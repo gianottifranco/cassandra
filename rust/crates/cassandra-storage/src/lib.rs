@@ -41,3 +41,14 @@ pub mod memtable;
 pub mod sstable;
 pub mod compaction;
 pub mod engine;
+pub mod counter;
+pub mod index;
+
+#[cfg(feature = "materialized-views")]
+pub mod materialized_views;
+
+#[cfg(feature = "triggers")]
+pub mod triggers;
+
+#[cfg(feature = "udfs")]
+pub mod udf;

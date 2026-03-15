@@ -25,6 +25,12 @@ lz4_flex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
+[features]
+default = []
+materialized-views = []
+triggers = []
+udfs = []
+
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }

@@ -264,6 +264,8 @@ pub enum ColumnType {
         fields: Vec<(String, ColumnType)>,
     },
     Tuple(Vec<ColumnType>),
+    /// Fixed-dimension vector: `vector<T, n>`.
+    Vector(Box<ColumnType>, u32),
 }
 
 impl ColumnType {
@@ -296,6 +298,7 @@ impl ColumnType {
             ColumnType::Set(_) => 0x0022,
             ColumnType::Udt { .. } => 0x0030,
             ColumnType::Tuple(_) => 0x0031,
+            ColumnType::Vector(_, _) => 0x0032,
         }
     }
 
@@ -343,6 +346,10 @@ impl ColumnType {
                     .collect(),
             },
             CqlType::Reversed(inner) => Self::from_cql_type(inner),
+            CqlType::Vector(inner, dims) => ColumnType::Vector(
+                Box::new(Self::from_cql_type(inner)),
+                *dims,
+            ),
         }
     }
 }

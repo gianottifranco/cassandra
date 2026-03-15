@@ -129,6 +129,12 @@ pub enum CqlType {
 
     /// Reversed type wrapper (for DESC clustering order).
     Reversed(Box<CqlType>),
+
+    /// Fixed-dimension vector type: `vector<T, n>`.
+    ///
+    /// Added in Cassandra 5.0 for vector similarity search.
+    /// The inner type is typically Float, and the u32 is the dimension count.
+    Vector(Box<CqlType>, u32),
 }
 
 impl CqlType {
@@ -162,6 +168,7 @@ impl CqlType {
             CqlType::Set(_, _) => Some(0x0022),
             CqlType::Udt { .. } => Some(0x0030),
             CqlType::Tuple(_) => Some(0x0031),
+            CqlType::Vector(_, _) => Some(0x0032),
             CqlType::Empty | CqlType::Reversed(_) => None,
         }
     }
@@ -219,6 +226,9 @@ impl CqlType {
                 format!("{}.{}", keyspace, name)
             }
             CqlType::Reversed(inner) => inner.cql_name(),
+            CqlType::Vector(inner, dims) => {
+                format!("vector<{}, {}>", inner.cql_name(), dims)
+            }
         }
     }
 
@@ -267,6 +277,9 @@ impl CqlType {
             CqlType::Uuid | CqlType::Timeuuid => Some(16),
             CqlType::Boolean => Some(1),
             CqlType::Empty => Some(0),
+            CqlType::Vector(inner, dims) => {
+                inner.fixed_size().map(|s| s * (*dims as usize))
+            }
             _ => None,
         }
     }

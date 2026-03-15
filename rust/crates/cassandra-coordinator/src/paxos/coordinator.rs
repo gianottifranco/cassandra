@@ -1,0 +1,534 @@
+// Licensed to the Apache Software Foundation (ASF) under one
+// or more contributor license agreements.  See the NOTICE file
+// distributed with this work for additional information
+// regarding copyright ownership.  The ASF licenses this file
+// to you under the Apache License, Version 2.0 (the
+// "License"); you may not use this file except in compliance
+// with the License.  You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+// implied. See the License for the specific language governing
+// permissions and limitations under the License.
+
+//! Paxos / LWT coordinator — orchestrates the full CAS round.
+//!
+//! ## Java Oracle
+//!
+//! `org.apache.cassandra.service.StorageProxy.cas()`
+//! `org.apache.cassandra.service.paxos.PaxosState.propose()`
+//!
+//! ## Protocol
+//!
+//! 1. **Prepare** — Send `PaxosPrepare` to quorum of replicas.
+//!    Collect `PaxosPromise` responses.
+//!    - If any replica returns an in-progress proposal, the coordinator
+//!      must adopt it (Paxos safety requirement).
+//! 2. **Read** — Perform a quorum read at SERIAL consistency to get the
+//!    current row value.
+//! 3. **Evaluate** — Check IF conditions against current row.
+//!    - If conditions fail, return the current row (CAS failure).
+//! 4. **Propose** — Send `PaxosPropose` with the mutation to quorum.
+//! 5. **Commit** — Send `PaxosCommit` to all replicas.
+//!
+//! ## Recovery
+//!
+//! If a prepare reveals an in-progress (accepted but not committed) proposal
+//! from a previous round, the new proposer must finish that round first
+//! before starting its own.  This is the Paxos liveness guarantee.
+
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use tracing::{debug, info, warn};
+use uuid::Uuid;
+
+use super::ballot::Ballot;
+use super::messages::*;
+use super::state::{PaxosState, Proposal};
+
+/// Maximum number of Paxos retries under contention before giving up.
+const MAX_CONTENTION_RETRIES: u32 = 4;
+
+/// CAS operation result.
+#[derive(Debug)]
+pub enum CasResult {
+    /// The CAS succeeded — the mutation was applied.
+    Success,
+    /// The CAS failed condition check. Contains the current row for
+    /// the client to see why.
+    ConditionNotMet {
+        /// Serialized current row data.
+        current_row: Vec<u8>,
+    },
+    /// Contention: too many retries, operation aborted.
+    ContentionAborted {
+        /// Number of attempts made.
+        attempts: u32,
+    },
+    /// Unavailable: not enough replicas for SERIAL consistency.
+    Unavailable {
+        required: usize,
+        alive: usize,
+    },
+    /// Timeout during Paxos round.
+    Timeout,
+}
+
+/// Errors from the Paxos coordinator.
+#[derive(Debug, thiserror::Error)]
+pub enum PaxosCoordinatorError {
+    #[error("Not enough replicas for serial CL: required={required}, alive={alive}")]
+    Unavailable { required: usize, alive: usize },
+
+    #[error("Paxos round timed out after {attempts} attempts")]
+    Timeout { attempts: u32 },
+
+    #[error("Contention: exceeded max retries ({max})")]
+    ContentionAborted { max: u32 },
+
+    #[error("Internal error: {0}")]
+    Internal(String),
+}
+
+/// Simulated replica — holds per-partition Paxos state.
+///
+/// In a real deployment, each replica is a remote node contacted via the
+/// messaging service.  For unit testing and single-node validation, we
+/// use this local simulation.
+#[derive(Debug)]
+pub struct PaxosReplica {
+    /// Per-partition Paxos state.
+    states: DashMap<Vec<u8>, PaxosState>,
+    /// This replica's node id.
+    pub node_id: Uuid,
+}
+
+impl PaxosReplica {
+    /// Create a new replica with the given node id.
+    pub fn new(node_id: Uuid) -> Self {
+        Self {
+            states: DashMap::new(),
+            node_id,
+        }
+    }
+
+    /// Handle a Prepare request.
+    pub fn handle_prepare(&self, msg: &PaxosPrepare) -> PaxosPromise {
+        let mut state = self
+            .states
+            .entry(msg.partition_key.clone())
+            .or_insert_with(PaxosState::new);
+
+        let resp = state.prepare(msg.ballot);
+        PaxosPromise {
+            promised: resp.promised,
+            ballot: resp.ballot,
+            in_progress: resp.accepted,
+            most_recent_commit: resp.committed,
+        }
+    }
+
+    /// Handle a Propose request.
+    pub fn handle_propose(&self, msg: &PaxosPropose) -> PaxosAccept {
+        let mut state = self
+            .states
+            .entry(msg.partition_key.clone())
+            .or_insert_with(PaxosState::new);
+
+        let resp = state.propose(msg.proposal.clone());
+        PaxosAccept {
+            accepted: resp.accepted,
+            ballot: resp.ballot,
+        }
+    }
+
+    /// Handle a Commit message.
+    pub fn handle_commit(&self, msg: &PaxosCommit) {
+        let mut state = self
+            .states
+            .entry(msg.partition_key.clone())
+            .or_insert_with(PaxosState::new);
+
+        state.commit(msg.proposal.clone());
+    }
+
+    /// Get the current state for a partition (for testing).
+    pub fn get_state(&self, partition_key: &[u8]) -> Option<PaxosState> {
+        self.states.get(partition_key).map(|s| s.clone())
+    }
+}
+
+/// The Paxos coordinator — drives a CAS operation across a set of replicas.
+///
+/// In production, `replicas` would be contacted via the inter-node messaging
+/// service.  Here we use `Arc<PaxosReplica>` for in-process simulation.
+pub struct PaxosCoordinator {
+    /// Our node's identity (used to generate ballots).
+    node_id: Uuid,
+    /// The replicas participating in this Paxos round.
+    replicas: Vec<Arc<PaxosReplica>>,
+    /// Quorum size (typically `rf / 2 + 1`).
+    quorum_size: usize,
+}
+
+impl PaxosCoordinator {
+    pub fn new(
+        node_id: Uuid,
+        replicas: Vec<Arc<PaxosReplica>>,
+        quorum_size: usize,
+    ) -> Self {
+        Self {
+            node_id,
+            replicas,
+            quorum_size,
+        }
+    }
+
+    /// Execute a compare-and-set (CAS) operation.
+    ///
+    /// `condition_fn` evaluates the IF clause against the current row data.
+    /// Returns `true` if the condition is met (proceed with mutation) or
+    /// `false` (CAS fails, return current row to client).
+    ///
+    /// `mutation` is the serialized mutation to apply if conditions pass.
+    pub fn execute_cas<F>(
+        &self,
+        keyspace: &str,
+        table: &str,
+        partition_key: &[u8],
+        mutation: Vec<u8>,
+        condition_fn: F,
+    ) -> CasResult
+    where
+        F: Fn(Option<&[u8]>) -> bool,  // current_row -> condition_met
+    {
+        let mut attempts = 0u32;
+
+        while attempts < MAX_CONTENTION_RETRIES {
+            attempts += 1;
+
+            // Generate a ballot
+            let ballot = if attempts == 1 {
+                Ballot::new(self.node_id)
+            } else {
+                // On retry, ensure strictly newer ballot
+                Ballot::with_timestamp(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .expect("clock")
+                        .as_micros() as i64
+                        + attempts as i64,
+                    self.node_id,
+                )
+            };
+
+            debug!(
+                attempt = attempts,
+                ballot = %ballot,
+                "Starting Paxos round"
+            );
+
+            // Phase 1: Prepare
+            let prepare_msg = PaxosPrepare {
+                partition_key: partition_key.to_vec(),
+                keyspace: keyspace.to_string(),
+                table: table.to_string(),
+                ballot,
+            };
+
+            let promises: Vec<PaxosPromise> = self
+                .replicas
+                .iter()
+                .map(|r| r.handle_prepare(&prepare_msg))
+                .collect();
+
+            let ack_count = promises.iter().filter(|p| p.promised).count();
+
+            if ack_count < self.quorum_size {
+                debug!(
+                    acks = ack_count,
+                    required = self.quorum_size,
+                    "Prepare failed — retrying"
+                );
+                continue;
+            }
+
+            // Check for in-progress proposals (must adopt per Paxos)
+            let in_progress = promises
+                .iter()
+                .filter_map(|p| p.in_progress.as_ref())
+                .max_by_key(|p| p.ballot);
+
+            let proposal_mutation = if let Some(adopted) = in_progress {
+                debug!(
+                    adopted_ballot = %adopted.ballot,
+                    "Adopting in-progress proposal from prior round"
+                );
+                // Must finish the prior round first
+                adopted.mutation.clone()
+            } else {
+                // No in-progress — we can propose our own mutation.
+                // But first, evaluate the CAS condition.
+                let current_row = promises
+                    .iter()
+                    .filter_map(|p| p.most_recent_commit.as_ref())
+                    .max_by_key(|c| c.ballot)
+                    .map(|c| c.mutation.as_slice());
+
+                if !condition_fn(current_row) {
+                    return CasResult::ConditionNotMet {
+                        current_row: current_row.unwrap_or_default().to_vec(),
+                    };
+                }
+
+                mutation.clone()
+            };
+
+            // Phase 2: Propose
+            let propose_msg = PaxosPropose {
+                partition_key: partition_key.to_vec(),
+                keyspace: keyspace.to_string(),
+                table: table.to_string(),
+                proposal: Proposal {
+                    ballot,
+                    mutation: proposal_mutation.clone(),
+                },
+            };
+
+            let accepts: Vec<PaxosAccept> = self
+                .replicas
+                .iter()
+                .map(|r| r.handle_propose(&propose_msg))
+                .collect();
+
+            let accept_count = accepts.iter().filter(|a| a.accepted).count();
+
+            if accept_count < self.quorum_size {
+                debug!(
+                    accepts = accept_count,
+                    required = self.quorum_size,
+                    "Propose failed — retrying"
+                );
+                continue;
+            }
+
+            // Phase 3: Commit
+            let commit_msg = PaxosCommit {
+                partition_key: partition_key.to_vec(),
+                keyspace: keyspace.to_string(),
+                table: table.to_string(),
+                proposal: Proposal {
+                    ballot,
+                    mutation: proposal_mutation,
+                },
+            };
+
+            for replica in &self.replicas {
+                replica.handle_commit(&commit_msg);
+            }
+
+            info!(
+                attempts,
+                ballot = %ballot,
+                "Paxos CAS committed successfully"
+            );
+
+            return CasResult::Success;
+        }
+
+        warn!(
+            max = MAX_CONTENTION_RETRIES,
+            "CAS aborted due to contention"
+        );
+
+        CasResult::ContentionAborted {
+            attempts: MAX_CONTENTION_RETRIES,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_a() -> Uuid {
+        Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap()
+    }
+
+    fn node_b() -> Uuid {
+        Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+    }
+
+    fn node_c() -> Uuid {
+        Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()
+    }
+
+    fn setup_cluster() -> (Vec<Arc<PaxosReplica>>, PaxosCoordinator) {
+        let r1 = Arc::new(PaxosReplica::new(node_a()));
+        let r2 = Arc::new(PaxosReplica::new(node_b()));
+        let r3 = Arc::new(PaxosReplica::new(node_c()));
+        let replicas = vec![r1.clone(), r2.clone(), r3.clone()];
+
+        let coordinator = PaxosCoordinator::new(node_a(), replicas.clone(), 2);
+        (replicas, coordinator)
+    }
+
+    #[test]
+    fn basic_cas_insert_if_not_exists() {
+        let (_replicas, coordinator) = setup_cluster();
+
+        let result = coordinator.execute_cas(
+            "ks",
+            "t1",
+            b"user1",
+            b"INSERT user1".to_vec(),
+            |current| current.is_none(), // IF NOT EXISTS
+        );
+
+        assert!(matches!(result, CasResult::Success));
+    }
+
+    #[test]
+    fn cas_fails_when_row_exists() {
+        let (replicas, coordinator) = setup_cluster();
+
+        // First insert succeeds
+        let r1 = coordinator.execute_cas(
+            "ks", "t1", b"user1",
+            b"INSERT user1".to_vec(),
+            |_| true, // Always succeed first time
+        );
+        assert!(matches!(r1, CasResult::Success));
+
+        // Second insert with IF NOT EXISTS should fail
+        let r2 = coordinator.execute_cas(
+            "ks", "t1", b"user1",
+            b"INSERT user1 again".to_vec(),
+            |current| current.is_none(), // IF NOT EXISTS — row exists now
+        );
+
+        assert!(matches!(r2, CasResult::ConditionNotMet { .. }));
+    }
+
+    #[test]
+    fn cas_condition_check() {
+        let (_replicas, coordinator) = setup_cluster();
+
+        // Insert initial value
+        coordinator.execute_cas(
+            "ks", "t1", b"pk",
+            b"version=1".to_vec(),
+            |_| true,
+        );
+
+        // Conditional update: only if current value is "version=1"
+        let result = coordinator.execute_cas(
+            "ks", "t1", b"pk",
+            b"version=2".to_vec(),
+            |current| {
+                current.map_or(false, |v| v == b"version=1")
+            },
+        );
+
+        assert!(matches!(result, CasResult::Success));
+    }
+
+    #[test]
+    fn concurrent_proposers_one_wins() {
+        // Simulate two coordinators trying to CAS the same key
+        let r1 = Arc::new(PaxosReplica::new(node_a()));
+        let r2 = Arc::new(PaxosReplica::new(node_b()));
+        let r3 = Arc::new(PaxosReplica::new(node_c()));
+
+        let replicas = vec![r1.clone(), r2.clone(), r3.clone()];
+
+        let coord_a = PaxosCoordinator::new(node_a(), replicas.clone(), 2);
+        let coord_b = PaxosCoordinator::new(node_b(), replicas.clone(), 2);
+
+        // Both try IF NOT EXISTS on same key
+        let result_a = coord_a.execute_cas(
+            "ks", "t", b"contested_key",
+            b"A wins".to_vec(),
+            |current| current.is_none(),
+        );
+
+        let result_b = coord_b.execute_cas(
+            "ks", "t", b"contested_key",
+            b"B wins".to_vec(),
+            |current| current.is_none(),
+        );
+
+        // One must succeed, the other must fail
+        let a_ok = matches!(result_a, CasResult::Success);
+        let b_ok = matches!(result_b, CasResult::Success);
+
+        // At least one should succeed
+        assert!(a_ok || b_ok, "At least one CAS must succeed");
+
+        // If A succeeded, B should get ConditionNotMet
+        if a_ok {
+            assert!(
+                matches!(result_b, CasResult::ConditionNotMet { .. }),
+                "B should see condition-not-met after A succeeded"
+            );
+        }
+    }
+
+    #[test]
+    fn replica_state_persists_after_commit() {
+        let (replicas, coordinator) = setup_cluster();
+
+        coordinator.execute_cas(
+            "ks", "t1", b"key1",
+            b"committed_value".to_vec(),
+            |_| true,
+        );
+
+        // All replicas should have the committed state
+        for r in &replicas {
+            let state = r.get_state(b"key1");
+            assert!(state.is_some());
+            let s = state.unwrap();
+            assert!(s.committed.is_some());
+            assert_eq!(s.committed.unwrap().mutation, b"committed_value");
+        }
+    }
+
+    #[test]
+    fn linearizable_sequence() {
+        let (_replicas, coordinator) = setup_cluster();
+
+        // Series of CAS operations that must be linearizable
+        // v0 → v1 → v2 → v3
+        for i in 0..4 {
+            let expected_current = if i == 0 {
+                None
+            } else {
+                Some(format!("v{}", i - 1).into_bytes())
+            };
+
+            let new_value = format!("v{}", i).into_bytes();
+
+            let result = coordinator.execute_cas(
+                "ks", "t1", b"serial_key",
+                new_value,
+                move |current| {
+                    match (&expected_current, current) {
+                        (None, None) => true,
+                        (Some(exp), Some(cur)) => cur == exp.as_slice(),
+                        _ => false,
+                    }
+                },
+            );
+
+            assert!(
+                matches!(result, CasResult::Success),
+                "Step {i} should succeed"
+            );
+        }
+    }
+}

@@ -37,11 +37,13 @@ pub mod codec;
 pub mod comparator;
 pub mod partition_key;
 pub mod clustering_key;
+pub mod vector;
 
 pub use native::CqlType;
 pub use collections::{ListType, SetType, MapType, TupleType};
 pub use udt::UserDefinedType;
 pub use codec::CqlValue;
+pub use vector::VectorValue;
 
 #[cfg(test)]
 mod tests {
@@ -52,5 +54,6 @@ mod tests {
         // Verify module re-exports work
         let _ = CqlType::Int;
         let _ = CqlType::Varchar;
+        let _ = CqlType::Vector(Box::new(CqlType::Float), 3);
     }
 }

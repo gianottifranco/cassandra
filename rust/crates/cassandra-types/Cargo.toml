@@ -12,6 +12,8 @@ cassandra-common = { path = "../cassandra-common" }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 serde = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

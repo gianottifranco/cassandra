@@ -41,6 +41,7 @@ pub mod read;
 pub mod hints;
 pub mod batch;
 pub mod tracing;
+pub mod paxos;
 
 pub use consistency::ConsistencyLevel;
 pub use write::{WriteCoordinator, WriteError, WriteResult, CoordinatedMutation};
@@ -48,3 +49,4 @@ pub use read::{ReadCoordinator, ReadError, ReadResult, CoordinatedRead};
 pub use hints::HintStore;
 pub use batch::BatchLogManager;
 pub use self::tracing::TraceSession;
+pub use paxos::{Ballot, PaxosState, PaxosCoordinator, PaxosReplica, CasResult};
