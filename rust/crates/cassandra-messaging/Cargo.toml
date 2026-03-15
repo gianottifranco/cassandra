@@ -12,7 +12,16 @@ cassandra-common = { path = "../cassandra-common" }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 tokio = { workspace = true }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+crossbeam = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

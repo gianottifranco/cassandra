@@ -16,6 +16,12 @@ cassandra-schema = { path = "../cassandra-schema" }
 cassandra-storage = { path = "../cassandra-storage" }
 cassandra-messaging = { path = "../cassandra-messaging" }
 cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
+uuid = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

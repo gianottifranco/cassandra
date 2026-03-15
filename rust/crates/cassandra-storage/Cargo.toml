@@ -9,15 +9,23 @@ rust-version.workspace = true
 
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
+cassandra-types = { path = "../cassandra-types" }
+cassandra-schema = { path = "../cassandra-schema" }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 crossbeam = { workspace = true }
 parking_lot = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
-cassandra-types = { path = "../cassandra-types" }
-cassandra-schema = { path = "../cassandra-schema" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+crc32fast = "1"
+lz4_flex = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util", "macros"] }

@@ -16,26 +16,35 @@
 
 //! # cassandra-coordinator
 //!
-//! Read/write coordinators, consistency level enforcement, paging, aggregation, Paxos/LWT
+//! Read/write coordination with consistency level enforcement,
+//! hinted handoff, batch logging, and request tracing.
 //!
 //! ## Java Oracle
 //!
-//! - `org.apache.cassandra.service` (reads, writes, pager, paxos)
-//! - `org.apache.cassandra.db.aggregation`
+//! - `org.apache.cassandra.service.StorageProxy` — coordinator entry points
+//! - `org.apache.cassandra.db.ConsistencyLevel` — CL definitions
+//! - `org.apache.cassandra.hints` — hinted handoff
+//! - `org.apache.cassandra.batchlog` — batch log
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! - [`consistency`] — CL enum and block_for calculations
+//! - [`write`] — write coordination with replica fan-out
+//! - [`read`] — read coordination with digest comparison
+//! - [`hints`] — hinted handoff storage
+//! - [`batch`] — distributed batch safety
+//! - [`tracing`] — per-request tracing sessions
 
-// TODO(phase-2+): Implement core functionality
+pub mod consistency;
+pub mod write;
+pub mod read;
+pub mod hints;
+pub mod batch;
+pub mod tracing;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+pub use consistency::ConsistencyLevel;
+pub use write::{WriteCoordinator, WriteError, WriteResult, CoordinatedMutation};
+pub use read::{ReadCoordinator, ReadError, ReadResult, CoordinatedRead};
+pub use hints::HintStore;
+pub use batch::BatchLogManager;
+pub use self::tracing::TraceSession;

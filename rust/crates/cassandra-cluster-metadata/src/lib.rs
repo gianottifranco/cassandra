@@ -16,27 +16,41 @@
 
 //! # cassandra-cluster-metadata
 //!
-//! Gossip protocol, snitches, token ring management, partitioners, replication strategies
+//! Cluster membership, token ring management, replication strategies,
+//! gossip protocol, snitches, and failure detection.
 //!
 //! ## Java Oracle
 //!
-//! - `org.apache.cassandra.gms`
-//! - `org.apache.cassandra.locator`
-//! - `org.apache.cassandra.dht`
+//! - `org.apache.cassandra.gms` — gossip, failure detection
+//! - `org.apache.cassandra.locator` — snitches, replication strategies
+//! - `org.apache.cassandra.dht` — partitioners, token ring
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! - [`node`] — endpoint identity and lifecycle state
+//! - [`ring`] — token ring (token→endpoint mapping)
+//! - [`snitch`] — datacenter/rack topology
+//! - [`replication`] — SimpleStrategy, NetworkTopologyStrategy
+//! - [`gossip`] — state propagation, heartbeats, failure detection
+//! - [`cluster`] — immutable cluster snapshot (Arc-swapped)
 
-// TODO(phase-2+): Implement core functionality
+pub mod node;
+pub mod ring;
+pub mod snitch;
+pub mod replication;
+pub mod gossip;
+pub mod cluster;
+pub mod topology;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+// Re-exports for ergonomic usage.
+pub use node::{Endpoint, NodeId, NodeInfo, NodeState};
+pub use ring::TokenRing;
+pub use snitch::{Snitch, SimpleSnitch, PropertyFileSnitch};
+pub use replication::{ReplicationStrategy, SimpleStrategy, NetworkTopologyStrategy, create_strategy};
+pub use gossip::{
+    ApplicationState, EndpointState, Gossiper, HeartbeatState, SeedProvider, VersionedValue,
+};
+pub use gossip::failure_detector::FailureDetector;
+pub use gossip::messages::{GossipDigest, GossipDigestSyn, GossipDigestAck, GossipDigestAck2};
+pub use cluster::{ClusterMetadata, ClusterSnapshot};
+pub use topology::{TopologyCoordinator, TopologyOperation, TopologyState, TopologyError, StreamPlanDescriptor, StreamRangeRequest};

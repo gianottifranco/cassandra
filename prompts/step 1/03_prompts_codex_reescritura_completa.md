@@ -373,7 +373,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 05 — Storage engine local completo: commit log, memtable, SSTable `big`, compaction y ejecución single-node
+## Executed - Prompt 05 — Storage engine local completo: commit log, memtable, SSTable `big`, compaction y ejecución single-node
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.
@@ -466,7 +466,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 06 — Clúster distribuido: metadato de anillo, gossip, mensajería internodo y coordinator path
+## Executed - Prompt 06 — Clúster distribuido: metadato de anillo, gossip, mensajería internodo y coordinator path
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.
@@ -558,7 +558,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 07 — Topología cambiante, streaming, repair, bootstrap y operaciones de movimiento de datos
+## Executed - Prompt 07 — Topología cambiante, streaming, repair, bootstrap y operaciones de movimiento de datos
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.

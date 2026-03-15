@@ -9,10 +9,18 @@ rust-version.workspace = true
 
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
-tokio = { workspace = true }
-tracing = { workspace = true }
 cassandra-storage = { path = "../cassandra-storage" }
 cassandra-messaging = { path = "../cassandra-messaging" }
+cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
+cassandra-streaming = { path = "../cassandra-streaming" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+md-5 = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

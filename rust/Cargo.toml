@@ -57,6 +57,7 @@ serde_json = "1"
 bytes = "1"
 tokio-util = { version = "0.7", features = ["codec"] }
 byteorder = "1"
+futures-util = { version = "0.3", features = ["sink"] }
 
 # Error handling
 thiserror = "2"
@@ -81,8 +82,11 @@ snap = "1"
 # Hashing
 md-5 = "0.10"
 
+# Random
+rand = "0.8"
+
 # UUID
-uuid = { version = "1", features = ["v4", "v1"] }
+uuid = { version = "1", features = ["v4", "v1", "serde"] }
 
 # Testing
 proptest = "1"

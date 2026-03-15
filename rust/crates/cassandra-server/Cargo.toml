@@ -9,9 +9,6 @@ rust-version.workspace = true
 
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 cassandra-config = { path = "../cassandra-config" }
 cassandra-native-protocol = { path = "../cassandra-native-protocol" }
 cassandra-storage = { path = "../cassandra-storage" }
@@ -19,3 +16,18 @@ cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
 cassandra-coordinator = { path = "../cassandra-coordinator" }
 cassandra-security = { path = "../cassandra-security" }
 cassandra-admin = { path = "../cassandra-admin" }
+cassandra-cql = { path = "../cassandra-cql" }
+cassandra-schema = { path = "../cassandra-schema" }
+cassandra-types = { path = "../cassandra-types" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

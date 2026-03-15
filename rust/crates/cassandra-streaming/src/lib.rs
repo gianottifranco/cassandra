@@ -16,26 +16,29 @@
 
 //! # cassandra-streaming
 //!
-//! SSTable streaming for bootstrap, decommission, rebuild, repair
+//! SSTable streaming for bootstrap, decommission, rebuild, repair.
 //!
 //! ## Java Oracle
 //!
 //! - `org.apache.cassandra.streaming`
 //! - `org.apache.cassandra.db.streaming`
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! - [`session`] — bidirectional streaming session with state machine
+//! - [`plan`] — describes what ranges to stream between which nodes
+//! - [`transfer`] — chunk-based file transfer with checksums
+//! - [`manager`] — singleton managing all active stream sessions
+//! - [`metrics`] — atomic counters for streaming progress
 
-// TODO(phase-2+): Implement core functionality
+pub mod session;
+pub mod plan;
+pub mod transfer;
+pub mod manager;
+pub mod metrics;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+pub use session::{StreamSession, StreamSessionState, StreamSessionId};
+pub use plan::{StreamPlan, StreamRequest};
+pub use transfer::{StreamTransfer, TransferState, ChunkChecksum};
+pub use manager::StreamManager;
+pub use metrics::StreamingMetrics;

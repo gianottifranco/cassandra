@@ -16,27 +16,28 @@
 
 //! # cassandra-storage
 //!
-//! Storage engine: SSTable read/write, MemTable, CommitLog, compaction, caches
+//! Storage engine: CommitLog, MemTable, SSTable, compaction, and the
+//! unified StorageEngine that ties them together.
 //!
 //! ## Java Oracle
 //!
-//! - `org.apache.cassandra.db` (all sub-packages)
-//! - `org.apache.cassandra.io`
-//! - `org.apache.cassandra.cache`
+//! - `org.apache.cassandra.db` (ColumnFamilyStore, Keyspace, Mutation)
+//! - `org.apache.cassandra.io` (SSTable readers/writers)
+//! - `org.apache.cassandra.db.commitlog` (CommitLog)
+//! - `org.apache.cassandra.db.compaction` (CompactionManager, strategies)
 //!
-//! ## Status
+//! ## Module Summary
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! | Module       | Status     | Description                                      |
+//! |-------------|------------|--------------------------------------------------|
+//! | commitlog   | Functional | Segmented WAL with CRC32C, rotation, replay      |
+//! | memtable    | Functional | Skiplist-based with manager and backpressure      |
+//! | sstable     | Functional | Big-format compatible writer/reader + bloom       |
+//! | compaction  | Functional | STCS strategy, merge, tombstone GC                |
+//! | engine      | Functional | Unified write/read/flush/compact/snapshot/replay  |
 
-// TODO(phase-2+): Implement core functionality
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+pub mod commitlog;
+pub mod memtable;
+pub mod sstable;
+pub mod compaction;
+pub mod engine;

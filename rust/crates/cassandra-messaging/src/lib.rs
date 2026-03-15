@@ -16,25 +16,31 @@
 
 //! # cassandra-messaging
 //!
-//! Inter-node messaging protocol, connection management, verb handlers
+//! Inter-node messaging protocol for Cassandra Rust.
+//!
+//! Provides framed TCP transport with length-prefixed messages, verb-based
+//! routing, per-verb metrics, and a messaging service with handler registration
+//! and request/response correlation.
 //!
 //! ## Java Oracle
 //!
-//! - `org.apache.cassandra.net`
+//! - `org.apache.cassandra.net.MessagingService`
+//! - `org.apache.cassandra.net.Verb`
+//! - `org.apache.cassandra.net.Message`
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! - [`verb`] — message type enum with request/response pairing
+//! - [`frame`] — wire-format codec (length-prefixed, Tokio Decoder/Encoder)
+//! - [`metrics`] — per-verb counters and latency tracking
+//! - [`service`] — central messaging hub with handler dispatch
 
-// TODO(phase-2+): Implement core functionality
+pub mod verb;
+pub mod frame;
+pub mod metrics;
+pub mod service;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+pub use verb::Verb;
+pub use frame::{Message, MessageHeader, MessageCodec};
+pub use metrics::{MessagingMetrics, VerbMetrics, VerbMetricsSnapshot};
+pub use service::{MessagingService, MessagingError, MessageHandler};
