@@ -35,3 +35,12 @@ udfs = []
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "advanced_features"
+harness = false
+
+[[bench]]
+name = "engine_bench"
+harness = false

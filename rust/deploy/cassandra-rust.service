@@ -1,0 +1,49 @@
+# Licensed under Apache License, Version 2.0.
+# SystemD unit file for Cassandra Rust server.
+
+[Unit]
+Description=Apache Cassandra (Rust)
+Documentation=https://github.com/apache/cassandra
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=cassandra
+Group=cassandra
+
+ExecStart=/usr/local/bin/cassandra-server
+WorkingDirectory=/var/lib/cassandra
+
+# Standard Cassandra environment
+Environment="RUST_LOG=info"
+Environment="CASSANDRA_CONF=/etc/cassandra"
+
+# Resource limits
+LimitNOFILE=100000
+LimitMEMLOCK=infinity
+LimitAS=infinity
+
+# Memory settings
+MemoryMax=8G
+MemoryHigh=6G
+
+# Restart policy
+Restart=on-failure
+RestartSec=10
+StartLimitBurst=5
+StartLimitIntervalSec=300
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/cassandra /var/log/cassandra /etc/cassandra
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cassandra-rust
+
+[Install]
+WantedBy=multi-user.target

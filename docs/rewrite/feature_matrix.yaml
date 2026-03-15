@@ -204,10 +204,15 @@ domains:
       - org.apache.cassandra.service.paxos
     rust_crate: cassandra-coordinator  # co-located with coordinator
     priority: P2
-    status: stub
+    status: in-progress
     description: >
       Classic Paxos for lightweight transactions (IF EXISTS / IF conditions).
-    parity_notes: "Must produce same observable results as Java LWT."
+      Single-decree Paxos with ballot, state machine, coordinator, and messages.
+      Recovery, contention backoff, and PaxosConfig implemented.
+    parity_notes: >
+      Ballot, PaxosState, PaxosCoordinator implemented with recovery logic,
+      contention backoff (exponential + jitter), and 20+ tests including
+      linearizability and multi-proposer contention. ADR-011 documents design.
 
   - name: Secondary Indexes
     id: indexes
@@ -215,11 +220,18 @@ domains:
       - org.apache.cassandra.index
     rust_crate: cassandra-storage  # co-located with storage
     priority: P2
-    status: stub
+    status: in-progress
     description: >
       Secondary index abstraction, built-in indexes (legacy, SAI),
       index builder, index maintenance on write path.
-    parity_notes: ""
+      SAI includes posting lists, query execution, segment builder/merger,
+      and brute-force kNN vector search.
+    parity_notes: >
+      Legacy index: in-memory BTreeMap with insert/delete/search (10 tests).
+      SAI: posting lists, range search, segment build/merge, query execution
+      with AND/OR conjunction (15+ tests). Vector kNN index with cosine,
+      euclidean, and dot-product metrics (10 tests). On-disk persistence
+      and HNSW/IVF ANN not yet implemented.
 
   - name: Materialized Views
     id: materialized-views
@@ -252,11 +264,14 @@ domains:
       - org.apache.cassandra.audit
     rust_crate: cassandra-security
     priority: P2
-    status: stub
+    status: partial
     description: >
-      Authentication (internal, LDAP, Kerberos pluggable), authorization
-      (role-based), TLS/SSL configuration, audit logging.
-    parity_notes: ""
+      Authentication (PasswordAuthenticator, AllowAll), authorization
+      (role-based with inheritance), TLS/SSL (rustls), CIDR access control,
+      dynamic data masking, audit logging, full query logging.
+    parity_notes: >
+      Phase 4: TLS, auth, authz, CIDR, DDM, audit, FQL implemented.
+      Gaps: LDAP/Kerberos auth, persistent role storage, syslog audit sink.
 
   - name: Observability & Diagnostics
     id: observability
@@ -266,11 +281,14 @@ domains:
       - org.apache.cassandra.diag
     rust_crate: cassandra-admin
     priority: P2
-    status: stub
+    status: partial
     description: >
-      Dropwizard metrics (to be replaced with Prometheus-native), request
-      tracing, diagnostic events.
-    parity_notes: "Metric names and semantics should match."
+      Prometheus-native metrics registry with core metrics
+      (latency histograms, counters, gauges). Virtual tables framework
+      with 5 built-in system_views tables.
+    parity_notes: >
+      Phase 4: Prometheus metrics, virtual tables, HTTP admin API implemented.
+      Gap: Distributed tracing integration, full JMX metric coverage.
 
   - name: Admin & Tooling
     id: admin
@@ -280,11 +298,13 @@ domains:
       - org.apache.cassandra.service.snapshot
     rust_crate: cassandra-admin
     priority: P2
-    status: stub
+    status: partial
     description: >
-      nodetool, sstableutil, sstableloader, sstable2json, standalone
-      compaction, snapshot management, disk space accounting.
-    parity_notes: "nodetool subset required for operational compatibility."
+      CLI (clap) with 17 nodetool-equivalent subcommands. SSTable tools
+      (dump, metadata) stubbed. HTTP admin API for remote operations.
+    parity_notes: >
+      Phase 4: CLI structure complete, admin HTTP API serving.
+      Gap: Most commands are stubs pending admin API wiring.
 
   - name: Accord (Distributed Transactions)
     id: accord
@@ -324,9 +344,12 @@ domains:
     id: triggers
     java_packages:
       - org.apache.cassandra.triggers
-    rust_crate: null
+    rust_crate: cassandra-storage  # stub behind feature flag
     priority: deferred
-    status: not-started
+    status: stub
     description: >
       Java-based trigger plugin system. Rarely used.
-    parity_notes: "Requires JNI or alternative FFI approach. Deferred."
+      Stub with TriggerDefinition and Trigger trait behind 'triggers' feature flag.
+    parity_notes: >
+      Stub only. Requires WASM or scripting engine for execution.
+      Behind feature flag 'triggers'. See materialized_views.rs for approach.

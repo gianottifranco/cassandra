@@ -126,10 +126,32 @@ pub struct CassandraConfig {
 
     // ── Auth ──
     #[serde(default)]
-    pub authenticator: Option<serde_yaml::Value>,
+    pub authenticator: Option<AuthenticatorConfig>,
 
     #[serde(default)]
-    pub authorizer: Option<serde_yaml::Value>,
+    pub authorizer: Option<AuthorizerConfig>,
+
+    #[serde(default)]
+    pub role_manager: Option<String>,
+
+    // ── TLS / Encryption ──
+    #[serde(default)]
+    pub client_encryption_options: Option<EncryptionOptions>,
+
+    #[serde(default)]
+    pub server_encryption_options: Option<EncryptionOptions>,
+
+    // ── Audit Logging ──
+    #[serde(default)]
+    pub audit_logging_options: Option<AuditLoggingConfig>,
+
+    // ── Full Query Logging ──
+    #[serde(default)]
+    pub full_query_logging_options: Option<FqlConfig>,
+
+    // ── Admin HTTP ──
+    #[serde(default = "defaults::admin_port")]
+    pub admin_port: u16,
 
     // ── Seed provider ──
     #[serde(default)]
@@ -142,6 +164,99 @@ pub struct CassandraConfig {
     // Catch-all for unrecognized fields (forwards compatibility)
     #[serde(flatten)]
     pub extra: std::collections::HashMap<String, serde_yaml::Value>,
+}
+
+// ─── Auth Config ───────────────────────────────────────────────────────────
+
+/// Authenticator configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthenticatorConfig {
+    /// Class name or short name: "AllowAllAuthenticator", "PasswordAuthenticator"
+    pub class_name: String,
+    /// Additional parameters.
+    #[serde(default)]
+    pub parameters: std::collections::HashMap<String, String>,
+}
+
+/// Authorizer configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthorizerConfig {
+    /// Class name: "AllowAllAuthorizer", "CassandraAuthorizer"
+    pub class_name: String,
+    #[serde(default)]
+    pub parameters: std::collections::HashMap<String, String>,
+}
+
+// ─── Encryption Config ─────────────────────────────────────────────────────
+
+/// TLS/SSL encryption options matching Java's `EncryptionOptions`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EncryptionOptions {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default)]
+    pub keystore: Option<String>,
+    #[serde(default)]
+    pub keystore_password: Option<String>,
+    #[serde(default)]
+    pub truststore: Option<String>,
+    #[serde(default)]
+    pub truststore_password: Option<String>,
+    /// PEM certificate path (Rust-native alternative to JKS).
+    #[serde(default)]
+    pub certificate: Option<String>,
+    /// PEM private key path.
+    #[serde(default)]
+    pub certificate_key: Option<String>,
+    /// CA certificate path.
+    #[serde(default)]
+    pub ca_certificate: Option<String>,
+    #[serde(default)]
+    pub require_client_auth: bool,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub cipher_suites: Option<Vec<String>>,
+}
+
+// ─── Audit Config ──────────────────────────────────────────────────────────
+
+/// Audit logging configuration in cassandra.yaml.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuditLoggingConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "defaults::audit_logger")]
+    pub logger: String,
+    #[serde(default)]
+    pub audit_logs_dir: Option<String>,
+    #[serde(default)]
+    pub included_keyspaces: Option<String>,
+    #[serde(default)]
+    pub excluded_keyspaces: Option<String>,
+    #[serde(default)]
+    pub included_categories: Option<String>,
+    #[serde(default)]
+    pub excluded_categories: Option<String>,
+    #[serde(default)]
+    pub roll_cycle: Option<String>,
+    #[serde(default)]
+    pub max_log_size: Option<u64>,
+}
+
+/// FQL configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FqlConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub log_dir: Option<String>,
+    #[serde(default)]
+    pub max_log_size_mb: Option<u64>,
+    #[serde(default)]
+    pub block: Option<bool>,
 }
 
 /// Default values matching Java's Config class.
@@ -161,6 +276,8 @@ pub mod defaults {
     pub fn commitlog_sync() -> String { "periodic".to_string() }
     pub fn disk_failure_policy() -> String { "stop".to_string() }
     pub fn commit_failure_policy() -> String { "stop".to_string() }
+    pub fn admin_port() -> u16 { 9090 }
+    pub fn audit_logger() -> String { "FileAuditLogger".to_string() }
 }
 
 impl Default for CassandraConfig {
@@ -181,6 +298,7 @@ mod tests {
         assert_eq!(cfg.num_tokens, 16);
         assert_eq!(cfg.native_transport_port, 9042);
         assert_eq!(cfg.concurrent_reads, 32);
+        assert_eq!(cfg.admin_port, 9090);
     }
 
     #[test]
@@ -203,5 +321,62 @@ some_unknown_field: 42
 "#;
         let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(cfg.extra.contains_key("some_unknown_field"));
+    }
+
+    #[test]
+    fn deserialize_with_encryption() {
+        let yaml = r#"
+cluster_name: SecureCluster
+client_encryption_options:
+  enabled: true
+  certificate: "/etc/certs/node.crt"
+  certificate_key: "/etc/certs/node.key"
+  ca_certificate: "/etc/certs/ca.crt"
+  require_client_auth: true
+"#;
+        let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
+        let enc = cfg.client_encryption_options.unwrap();
+        assert!(enc.enabled);
+        assert_eq!(enc.certificate.unwrap(), "/etc/certs/node.crt");
+        assert!(enc.require_client_auth);
+    }
+
+    #[test]
+    fn deserialize_with_authenticator() {
+        let yaml = r#"
+authenticator:
+  class_name: PasswordAuthenticator
+"#;
+        let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
+        let auth = cfg.authenticator.unwrap();
+        assert_eq!(auth.class_name, "PasswordAuthenticator");
+    }
+
+    #[test]
+    fn deserialize_with_audit() {
+        let yaml = r#"
+audit_logging_options:
+  enabled: true
+  logger: FileAuditLogger
+  audit_logs_dir: "/var/log/cassandra/audit"
+"#;
+        let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
+        let audit = cfg.audit_logging_options.unwrap();
+        assert!(audit.enabled);
+        assert_eq!(audit.audit_logs_dir.unwrap(), "/var/log/cassandra/audit");
+    }
+
+    #[test]
+    fn deserialize_with_fql() {
+        let yaml = r#"
+full_query_logging_options:
+  enabled: true
+  log_dir: "/var/log/cassandra/fql"
+  max_log_size_mb: 500
+"#;
+        let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
+        let fql = cfg.full_query_logging_options.unwrap();
+        assert!(fql.enabled);
+        assert_eq!(fql.max_log_size_mb.unwrap(), 500);
     }
 }

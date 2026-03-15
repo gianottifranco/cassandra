@@ -7,12 +7,47 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+fql = []
+
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+parking_lot = { workspace = true }
+dashmap = { workspace = true }
+uuid = { workspace = true }
+bytes = { workspace = true }
+
+# TLS
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+
+# Auth
+bcrypt = { workspace = true }
+
+# CIDR
+ipnet = { workspace = true }
+
+# File watching (cert reload)
+notify = { workspace = true }
+
+# Timestamps
+byteorder = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["full", "test-util"] }
+criterion = { workspace = true }
+
+[[bench]]
+name = "security_bench"
+harness = false

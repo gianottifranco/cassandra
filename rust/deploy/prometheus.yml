@@ -1,0 +1,18 @@
+# Prometheus configuration for Cassandra Rust cluster
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: 'cassandra-rust'
+    static_configs:
+      - targets:
+          - 'cass-rust-1:9180'
+          - 'cass-rust-2:9180'
+          - 'cass-rust-3:9180'
+        labels:
+          cluster: 'rust-prod-cluster'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

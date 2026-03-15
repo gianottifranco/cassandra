@@ -1,0 +1,111 @@
+# Licensed under Apache License, Version 2.0.
+# 3-node Cassandra Rust cluster for production validation.
+
+services:
+  cassandra-rust-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: cass-rust-1
+    container_name: cassandra-rust-1
+    ports:
+      - "9042:9042"     # Native protocol
+      - "9142:9142"     # Native protocol (TLS)
+      - "9180:9180"     # Prometheus metrics
+    environment:
+      CASSANDRA_CLUSTER_NAME: "rust-prod-cluster"
+      CASSANDRA_NUM_TOKENS: "256"
+      CASSANDRA_SEEDS: "cass-rust-1"
+      CASSANDRA_LISTEN_ADDRESS: "cass-rust-1"
+    volumes:
+      - cass1-data:/var/lib/cassandra/data
+      - cass1-commitlog:/var/lib/cassandra/commitlog
+    networks:
+      - cassandra-net
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    restart: unless-stopped
+
+  cassandra-rust-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: cass-rust-2
+    container_name: cassandra-rust-2
+    ports:
+      - "9043:9042"
+      - "9181:9180"
+    environment:
+      CASSANDRA_CLUSTER_NAME: "rust-prod-cluster"
+      CASSANDRA_NUM_TOKENS: "256"
+      CASSANDRA_SEEDS: "cass-rust-1"
+      CASSANDRA_LISTEN_ADDRESS: "cass-rust-2"
+    volumes:
+      - cass2-data:/var/lib/cassandra/data
+      - cass2-commitlog:/var/lib/cassandra/commitlog
+    networks:
+      - cassandra-net
+    depends_on:
+      - cassandra-rust-1
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    restart: unless-stopped
+
+  cassandra-rust-3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    hostname: cass-rust-3
+    container_name: cassandra-rust-3
+    ports:
+      - "9044:9042"
+      - "9182:9180"
+    environment:
+      CASSANDRA_CLUSTER_NAME: "rust-prod-cluster"
+      CASSANDRA_NUM_TOKENS: "256"
+      CASSANDRA_SEEDS: "cass-rust-1"
+      CASSANDRA_LISTEN_ADDRESS: "cass-rust-3"
+    volumes:
+      - cass3-data:/var/lib/cassandra/data
+      - cass3-commitlog:/var/lib/cassandra/commitlog
+    networks:
+      - cassandra-net
+    depends_on:
+      - cassandra-rust-1
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+    restart: unless-stopped
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:v2.50.0
+    container_name: cassandra-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks:
+      - cassandra-net
+    depends_on:
+      - cassandra-rust-1
+
+volumes:
+  cass1-data:
+  cass1-commitlog:
+  cass2-data:
+  cass2-commitlog:
+  cass3-data:
+  cass3-commitlog:
+
+networks:
+  cassandra-net:
+    driver: bridge

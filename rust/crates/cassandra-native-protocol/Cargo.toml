@@ -32,3 +32,10 @@ proptest = { workspace = true }
 tempfile = { workspace = true }
 hex = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+criterion = { workspace = true }
+bytes = { workspace = true }
+tokio-util = { workspace = true }
+
+[[bench]]
+name = "protocol_bench"
+harness = false

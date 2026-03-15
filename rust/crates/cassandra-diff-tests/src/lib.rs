@@ -59,6 +59,7 @@
 pub mod comparators;
 pub mod fuzz;
 pub mod golden;
+pub mod shadow_traffic;
 
 #[cfg(test)]
 mod tests {

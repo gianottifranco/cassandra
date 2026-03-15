@@ -81,3 +81,42 @@ docker-down:
 ## Run pytest diff-tests (requires running Docker services)
 pytest:
 	cd diff-tests/pytest && python3 -m pytest -v --tb=short
+
+## ── Phase 5: Production Readiness ───────────────────────────────────────
+
+## Build optimized release binaries
+release:
+	cargo build --profile production -p cassandra-server -p cassandra-tools
+
+## Build Docker image
+docker:
+	docker build -t cassandra-rust:dev .
+
+## Run soak tests (long-running, ~10s default)
+soak-test:
+	cargo test -p cassandra-diff-tests --test soak_tests -- --ignored --nocapture
+
+## Run chaos tests
+chaos-test:
+	cargo test -p cassandra-diff-tests --test chaos_tests -- --nocapture
+
+## Run backup/restore drill tests
+backup-test:
+	cargo test -p cassandra-diff-tests --test backup_restore_tests -- --nocapture
+
+## Run all benchmarks
+bench-run:
+	cargo bench --workspace
+
+## Run rollback drill
+rollback-drill:
+	bash scripts/rollback-drill.sh
+
+## Build release package
+package:
+	bash scripts/build-release.sh
+
+## Run Phase 5 full validation
+phase5-validate: check-all chaos-test backup-test bench
+	@echo ""
+	@echo "✓ Phase 5 validation complete"

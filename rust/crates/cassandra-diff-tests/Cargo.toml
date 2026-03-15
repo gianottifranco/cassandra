@@ -30,6 +30,7 @@ verifying Rust output against the Java oracle.
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
 cassandra-native-protocol = { path = "../cassandra-native-protocol" }
+cassandra-storage = { path = "../cassandra-storage" }
 cassandra-types = { path = "../cassandra-types" }
 
 serde = { workspace = true }
@@ -40,3 +41,4 @@ hex = "0.4"
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+criterion = { workspace = true }

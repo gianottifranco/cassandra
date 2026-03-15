@@ -9,9 +9,13 @@ rust-version.workspace = true
 
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
 cassandra-config = { path = "../cassandra-config" }
 cassandra-admin = { path = "../cassandra-admin" }
 cassandra-storage = { path = "../cassandra-storage" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+serde = { workspace = true }
+anyhow = { workspace = true }

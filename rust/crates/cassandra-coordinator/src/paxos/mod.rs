@@ -47,4 +47,4 @@ pub mod coordinator;
 pub use ballot::Ballot;
 pub use state::{PaxosState, Proposal};
 pub use messages::{PaxosPrepare, PaxosPromise, PaxosPropose, PaxosAccept, PaxosCommit};
-pub use coordinator::{PaxosCoordinator, PaxosReplica, CasResult, PaxosCoordinatorError};
+pub use coordinator::{PaxosCoordinator, PaxosReplica, CasResult, PaxosCoordinatorError, PaxosConfig};

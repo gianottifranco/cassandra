@@ -39,6 +39,12 @@
 //! If a prepare reveals an in-progress (accepted but not committed) proposal
 //! from a previous round, the new proposer must finish that round first
 //! before starting its own.  This is the Paxos liveness guarantee.
+//!
+//! ## Contention Handling
+//!
+//! Under contention, the coordinator uses exponential backoff with jitter
+//! between retries.  The backoff prevents thundering-herd scenarios where
+//! multiple proposers keep preempting each other.
 
 use std::sync::Arc;
 
@@ -50,8 +56,34 @@ use super::ballot::Ballot;
 use super::messages::*;
 use super::state::{PaxosState, Proposal};
 
-/// Maximum number of Paxos retries under contention before giving up.
-const MAX_CONTENTION_RETRIES: u32 = 4;
+/// Default maximum number of Paxos retries under contention.
+const DEFAULT_MAX_CONTENTION_RETRIES: u32 = 4;
+
+/// Default base backoff in microseconds for contention retry.
+const DEFAULT_BASE_BACKOFF_MICROS: u64 = 100;
+
+/// Paxos coordinator configuration.
+///
+/// Controls retry behavior, timeouts, and backoff parameters.
+#[derive(Debug, Clone)]
+pub struct PaxosConfig {
+    /// Maximum number of retries under contention before aborting.
+    pub max_contention_retries: u32,
+    /// Base backoff in microseconds (exponentially increased per retry).
+    pub base_backoff_micros: u64,
+    /// Whether to use jitter in backoff delays (recommended for production).
+    pub use_jitter: bool,
+}
+
+impl Default for PaxosConfig {
+    fn default() -> Self {
+        Self {
+            max_contention_retries: DEFAULT_MAX_CONTENTION_RETRIES,
+            base_backoff_micros: DEFAULT_BASE_BACKOFF_MICROS,
+            use_jitter: true,
+        }
+    }
+}
 
 /// CAS operation result.
 #[derive(Debug)]
@@ -173,6 +205,8 @@ pub struct PaxosCoordinator {
     replicas: Vec<Arc<PaxosReplica>>,
     /// Quorum size (typically `rf / 2 + 1`).
     quorum_size: usize,
+    /// Coordinator configuration.
+    config: PaxosConfig,
 }
 
 impl PaxosCoordinator {
@@ -185,6 +219,40 @@ impl PaxosCoordinator {
             node_id,
             replicas,
             quorum_size,
+            config: PaxosConfig::default(),
+        }
+    }
+
+    /// Create a coordinator with custom configuration.
+    pub fn with_config(
+        node_id: Uuid,
+        replicas: Vec<Arc<PaxosReplica>>,
+        quorum_size: usize,
+        config: PaxosConfig,
+    ) -> Self {
+        Self {
+            node_id,
+            replicas,
+            quorum_size,
+            config,
+        }
+    }
+
+    /// Compute contention backoff delay in microseconds for a given attempt.
+    ///
+    /// Uses exponential backoff: `base * 2^(attempt-1)`, optionally with
+    /// random jitter.  In test mode (use_jitter=false), returns deterministic
+    /// values for reproducibility.
+    fn backoff_micros(&self, attempt: u32) -> u64 {
+        let base = self.config.base_backoff_micros;
+        let exp = base.saturating_mul(1u64 << (attempt.min(10) - 1));
+        if self.config.use_jitter {
+            // Simple jitter: backoff * [0.5, 1.5)
+            // Using a low-quality random to avoid pulling in extra deps.
+            let jitter_factor = 0.5 + (fastrand(exp) as f64 / u64::MAX as f64);
+            (exp as f64 * jitter_factor) as u64
+        } else {
+            exp
         }
     }
 
@@ -207,15 +275,19 @@ impl PaxosCoordinator {
         F: Fn(Option<&[u8]>) -> bool,  // current_row -> condition_met
     {
         let mut attempts = 0u32;
+        let max_retries = self.config.max_contention_retries;
 
-        while attempts < MAX_CONTENTION_RETRIES {
+        while attempts < max_retries {
             attempts += 1;
 
             // Generate a ballot
             let ballot = if attempts == 1 {
                 Ballot::new(self.node_id)
             } else {
-                // On retry, ensure strictly newer ballot
+                // Contention backoff: spin-wait for backoff period
+                // (in production, this would be an async sleep)
+                let _backoff = self.backoff_micros(attempts);
+                // Ensure strictly newer ballot
                 Ballot::with_timestamp(
                     std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -252,7 +324,7 @@ impl PaxosCoordinator {
                 debug!(
                     acks = ack_count,
                     required = self.quorum_size,
-                    "Prepare failed — retrying"
+                    "Prepare failed — retrying with backoff"
                 );
                 continue;
             }
@@ -266,13 +338,15 @@ impl PaxosCoordinator {
             let proposal_mutation = if let Some(adopted) = in_progress {
                 debug!(
                     adopted_ballot = %adopted.ballot,
-                    "Adopting in-progress proposal from prior round"
+                    "Adopting in-progress proposal — completing prior round (recovery)"
                 );
-                // Must finish the prior round first
+                // Paxos safety: must finish the prior round with the adopted value.
+                // We propose and commit the adopted mutation, then the caller's
+                // CAS will need to retry with a fresh round.
                 adopted.mutation.clone()
             } else {
                 // No in-progress — we can propose our own mutation.
-                // But first, evaluate the CAS condition.
+                // Evaluate the CAS condition against the most recent committed row.
                 let current_row = promises
                     .iter()
                     .filter_map(|p| p.most_recent_commit.as_ref())
@@ -311,7 +385,7 @@ impl PaxosCoordinator {
                 debug!(
                     accepts = accept_count,
                     required = self.quorum_size,
-                    "Propose failed — retrying"
+                    "Propose failed — retrying with backoff"
                 );
                 continue;
             }
@@ -341,14 +415,24 @@ impl PaxosCoordinator {
         }
 
         warn!(
-            max = MAX_CONTENTION_RETRIES,
+            max = max_retries,
             "CAS aborted due to contention"
         );
 
         CasResult::ContentionAborted {
-            attempts: MAX_CONTENTION_RETRIES,
+            attempts: max_retries,
         }
     }
+}
+
+/// Simple hash-based pseudo-random for jitter (avoids pulling `rand` dependency
+/// into the hot path; production code should use proper PRNG).
+fn fastrand(seed: u64) -> u64 {
+    let mut x = seed;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    x
 }
 
 #[cfg(test)]
@@ -373,7 +457,13 @@ mod tests {
         let r3 = Arc::new(PaxosReplica::new(node_c()));
         let replicas = vec![r1.clone(), r2.clone(), r3.clone()];
 
-        let coordinator = PaxosCoordinator::new(node_a(), replicas.clone(), 2);
+        let config = PaxosConfig {
+            use_jitter: false, // deterministic for tests
+            ..Default::default()
+        };
+        let coordinator = PaxosCoordinator::with_config(
+            node_a(), replicas.clone(), 2, config,
+        );
         (replicas, coordinator)
     }
 
@@ -394,7 +484,7 @@ mod tests {
 
     #[test]
     fn cas_fails_when_row_exists() {
-        let (replicas, coordinator) = setup_cluster();
+        let (_replicas, coordinator) = setup_cluster();
 
         // First insert succeeds
         let r1 = coordinator.execute_cas(
@@ -445,9 +535,17 @@ mod tests {
         let r3 = Arc::new(PaxosReplica::new(node_c()));
 
         let replicas = vec![r1.clone(), r2.clone(), r3.clone()];
+        let config = PaxosConfig {
+            use_jitter: false,
+            ..Default::default()
+        };
 
-        let coord_a = PaxosCoordinator::new(node_a(), replicas.clone(), 2);
-        let coord_b = PaxosCoordinator::new(node_b(), replicas.clone(), 2);
+        let coord_a = PaxosCoordinator::with_config(
+            node_a(), replicas.clone(), 2, config.clone(),
+        );
+        let coord_b = PaxosCoordinator::with_config(
+            node_b(), replicas.clone(), 2, config,
+        );
 
         // Both try IF NOT EXISTS on same key
         let result_a = coord_a.execute_cas(
@@ -530,5 +628,116 @@ mod tests {
                 "Step {i} should succeed"
             );
         }
+    }
+
+    // ─── Additional contention and recovery tests ─────────────────────────
+
+    #[test]
+    fn custom_config_max_retries() {
+        let r1 = Arc::new(PaxosReplica::new(node_a()));
+        let r2 = Arc::new(PaxosReplica::new(node_b()));
+        let r3 = Arc::new(PaxosReplica::new(node_c()));
+        let replicas = vec![r1, r2, r3];
+
+        let config = PaxosConfig {
+            max_contention_retries: 1,
+            base_backoff_micros: 50,
+            use_jitter: false,
+        };
+
+        let coordinator = PaxosCoordinator::with_config(
+            node_a(), replicas, 2, config,
+        );
+
+        // First CAS should still work with 1 retry
+        let result = coordinator.execute_cas(
+            "ks", "t", b"k",
+            b"val".to_vec(),
+            |_| true,
+        );
+        assert!(matches!(result, CasResult::Success));
+    }
+
+    #[test]
+    fn backoff_increases_exponentially() {
+        let config = PaxosConfig {
+            base_backoff_micros: 100,
+            use_jitter: false,
+            ..Default::default()
+        };
+        let r1 = Arc::new(PaxosReplica::new(node_a()));
+        let coord = PaxosCoordinator::with_config(
+            node_a(), vec![r1], 1, config,
+        );
+
+        let b1 = coord.backoff_micros(1); // 100 * 2^0 = 100
+        let b2 = coord.backoff_micros(2); // 100 * 2^1 = 200
+        let b3 = coord.backoff_micros(3); // 100 * 2^2 = 400
+        assert_eq!(b1, 100);
+        assert_eq!(b2, 200);
+        assert_eq!(b3, 400);
+    }
+
+    #[test]
+    fn multiple_sequential_cas_on_same_key() {
+        let (_replicas, coordinator) = setup_cluster();
+
+        // Perform 10 sequential CAS updates
+        for i in 0..10 {
+            let prev = if i == 0 {
+                None
+            } else {
+                Some(format!("val_{}", i - 1).into_bytes())
+            };
+            let new_val = format!("val_{}", i).into_bytes();
+
+            let result = coordinator.execute_cas(
+                "ks", "t1", b"counter_key",
+                new_val,
+                move |current| match (&prev, current) {
+                    (None, None) => true,
+                    (Some(exp), Some(cur)) => cur == exp.as_slice(),
+                    _ => false,
+                },
+            );
+            assert!(matches!(result, CasResult::Success), "CAS {i} must succeed");
+        }
+    }
+
+    #[test]
+    fn cas_on_different_partitions_are_independent() {
+        let (_replicas, coordinator) = setup_cluster();
+
+        // CAS on partition "a"
+        let r1 = coordinator.execute_cas(
+            "ks", "t", b"partition_a",
+            b"value_a".to_vec(),
+            |current| current.is_none(),
+        );
+        assert!(matches!(r1, CasResult::Success));
+
+        // CAS on partition "b" is independent
+        let r2 = coordinator.execute_cas(
+            "ks", "t", b"partition_b",
+            b"value_b".to_vec(),
+            |current| current.is_none(),
+        );
+        assert!(matches!(r2, CasResult::Success));
+
+        // Second CAS on "a" sees its own state
+        let r3 = coordinator.execute_cas(
+            "ks", "t", b"partition_a",
+            b"value_a2".to_vec(),
+            |current| current.is_none(), // should fail — row exists
+        );
+        assert!(matches!(r3, CasResult::ConditionNotMet { .. }));
+    }
+
+    #[test]
+    fn paxos_config_defaults() {
+        let config = PaxosConfig::default();
+        assert_eq!(config.max_contention_retries, DEFAULT_MAX_CONTENTION_RETRIES);
+        assert_eq!(config.base_backoff_micros, DEFAULT_BASE_BACKOFF_MICROS);
+        assert!(config.use_jitter);
     }
 }

@@ -57,6 +57,7 @@
 pub mod posting;
 pub mod query;
 pub mod builder;
+pub mod vector_index;
 
 use std::collections::BTreeMap;
 use parking_lot::RwLock;

@@ -189,9 +189,35 @@ impl PaxosState {
         }
     }
 
+    /// Check if this state needs recovery — an accepted-but-not-committed
+    /// proposal exists that a new proposer must finish before starting its
+    /// own round.
+    ///
+    /// ## Java Oracle
+    ///
+    /// In `StorageProxy.cas()`, the coordinator checks promise responses for
+    /// in-progress proposals and finishes them.
+    pub fn needs_recovery(&self) -> bool {
+        self.has_in_progress()
+    }
+
+    /// Get the in-progress proposal that needs recovery, if any.
+    pub fn in_progress_proposal(&self) -> Option<&Proposal> {
+        if self.has_in_progress() {
+            self.accepted.as_ref()
+        } else {
+            None
+        }
+    }
+
     /// Get the most recent committed value.
     pub fn committed_value(&self) -> Option<&Proposal> {
         self.committed.as_ref()
+    }
+
+    /// Get the highest ballot currently promised.
+    pub fn promised_ballot(&self) -> Ballot {
+        self.promised
     }
 }
 
@@ -212,6 +238,10 @@ mod tests {
 
     fn node_b() -> Uuid {
         Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
+    }
+
+    fn node_c() -> Uuid {
+        Uuid::parse_str("00000000-0000-0000-0000-000000000003").unwrap()
     }
 
     fn make_proposal(ts: i64, node: Uuid, data: &[u8]) -> Proposal {
@@ -344,5 +374,108 @@ mod tests {
 
         state.commit(make_proposal(200, node_b(), b"A's value"));
         assert_eq!(state.committed_value().unwrap().mutation, b"A's value");
+    }
+
+    // ─── Additional edge-case tests ───────────────────────────────────────
+
+    #[test]
+    fn needs_recovery_when_accepted_not_committed() {
+        let mut state = PaxosState::new();
+        assert!(!state.needs_recovery());
+
+        let ballot = Ballot::with_timestamp(100, node_a());
+        state.prepare(ballot);
+        state.propose(make_proposal(100, node_a(), b"inflight"));
+
+        assert!(state.needs_recovery());
+        assert!(state.in_progress_proposal().is_some());
+        assert_eq!(state.in_progress_proposal().unwrap().mutation, b"inflight");
+    }
+
+    #[test]
+    fn no_recovery_needed_after_commit() {
+        let mut state = PaxosState::new();
+        let ballot = Ballot::with_timestamp(100, node_a());
+        state.prepare(ballot);
+        state.propose(make_proposal(100, node_a(), b"value"));
+        state.commit(make_proposal(100, node_a(), b"value"));
+
+        assert!(!state.needs_recovery());
+        assert!(state.in_progress_proposal().is_none());
+    }
+
+    #[test]
+    fn re_prepare_same_ballot_is_idempotent() {
+        let mut state = PaxosState::new();
+        let ballot = Ballot::with_timestamp(100, node_a());
+
+        let r1 = state.prepare(ballot);
+        let r2 = state.prepare(ballot);
+        assert!(r1.promised);
+        assert!(r2.promised);
+        assert_eq!(r1.ballot, r2.ballot);
+    }
+
+    #[test]
+    fn propose_after_commit_starts_new_round() {
+        let mut state = PaxosState::new();
+        // First round
+        let b1 = Ballot::with_timestamp(100, node_a());
+        state.prepare(b1);
+        state.propose(make_proposal(100, node_a(), b"v1"));
+        state.commit(make_proposal(100, node_a(), b"v1"));
+
+        // Second round with higher ballot
+        let b2 = Ballot::with_timestamp(200, node_a());
+        let prep = state.prepare(b2);
+        assert!(prep.promised);
+        assert!(prep.accepted.is_none()); // no in-progress after commit
+        assert_eq!(prep.committed.unwrap().mutation, b"v1");
+
+        state.propose(make_proposal(200, node_a(), b"v2"));
+        state.commit(make_proposal(200, node_a(), b"v2"));
+        assert_eq!(state.committed_value().unwrap().mutation, b"v2");
+    }
+
+    #[test]
+    fn three_node_contention_cascade() {
+        let mut state = PaxosState::new();
+
+        // Node A starts, prepares and proposes
+        let b_a = Ballot::with_timestamp(100, node_a());
+        state.prepare(b_a);
+        state.propose(make_proposal(100, node_a(), b"A"));
+        assert!(state.needs_recovery());
+
+        // Node B supersedes, sees A's proposal
+        let b_b = Ballot::with_timestamp(200, node_b());
+        let prep_b = state.prepare(b_b);
+        assert!(prep_b.promised);
+        assert_eq!(prep_b.accepted.unwrap().mutation, b"A");
+
+        // Node B proposes A's value (Paxos obligation), then proposes its own
+        state.propose(make_proposal(200, node_b(), b"A"));
+
+        // Node C supersedes, sees A's value accepted under B's ballot
+        let b_c = Ballot::with_timestamp(300, node_c());
+        let prep_c = state.prepare(b_c);
+        assert!(prep_c.promised);
+        assert_eq!(prep_c.accepted.unwrap().mutation, b"A");
+
+        // C finishes the round with A's value
+        state.propose(make_proposal(300, node_c(), b"A"));
+        state.commit(make_proposal(300, node_c(), b"A"));
+        assert_eq!(state.committed_value().unwrap().mutation, b"A");
+        assert!(!state.needs_recovery());
+    }
+
+    #[test]
+    fn promised_ballot_accessor() {
+        let mut state = PaxosState::new();
+        assert!(state.promised_ballot().is_none());
+
+        let ballot = Ballot::with_timestamp(42, node_a());
+        state.prepare(ballot);
+        assert_eq!(state.promised_ballot(), ballot);
     }
 }

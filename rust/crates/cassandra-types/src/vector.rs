@@ -58,9 +58,39 @@ impl VectorValue {
         Self { values }
     }
 
+    /// Create a vector from f64 slice (convenience for test / API code).
+    pub fn from_f64_slice(values: &[f64]) -> Self {
+        Self {
+            values: values.iter().map(|v| *v as f32).collect(),
+        }
+    }
+
     /// Number of dimensions.
     pub fn dimensions(&self) -> u32 {
         self.values.len() as u32
+    }
+
+    /// Validate that all components are finite (not NaN or Infinity).
+    ///
+    /// ## Java Oracle
+    ///
+    /// `VectorType.validate()` — rejects non-finite values.
+    pub fn validate(&self) -> Result<(), VectorError> {
+        for (i, v) in self.values.iter().enumerate() {
+            if v.is_nan() {
+                return Err(VectorError::InvalidComponent {
+                    index: i,
+                    reason: "NaN".to_string(),
+                });
+            }
+            if v.is_infinite() {
+                return Err(VectorError::InvalidComponent {
+                    index: i,
+                    reason: "Infinity".to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Serialize to big-endian IEEE 754 byte array (Java-compatible).
@@ -162,6 +192,26 @@ pub fn euclidean_distance(a: &VectorValue, b: &VectorValue) -> f32 {
         .sqrt()
 }
 
+/// Similarity metric for vector search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimilarityMetric {
+    /// Cosine similarity (higher = more similar).
+    Cosine,
+    /// Euclidean distance (lower = more similar).
+    Euclidean,
+    /// Dot product (higher = more similar).
+    DotProduct,
+}
+
+/// Compute the similarity/distance between two vectors using the given metric.
+pub fn compute_similarity(a: &VectorValue, b: &VectorValue, metric: SimilarityMetric) -> f32 {
+    match metric {
+        SimilarityMetric::Cosine => cosine_similarity(a, b),
+        SimilarityMetric::Euclidean => euclidean_distance(a, b),
+        SimilarityMetric::DotProduct => dot_product(a, b),
+    }
+}
+
 /// Vector type errors.
 #[derive(Debug, thiserror::Error)]
 pub enum VectorError {
@@ -171,6 +221,9 @@ pub enum VectorError {
 
     #[error("Deserialization error: {0}")]
     DeserializationError(String),
+
+    #[error("Invalid vector component at index {index}: {reason}")]
+    InvalidComponent { index: usize, reason: String },
 }
 
 #[cfg(test)]
@@ -181,6 +234,13 @@ mod tests {
     fn vector_creation() {
         let v = VectorValue::new(vec![1.0, 2.0, 3.0]);
         assert_eq!(v.dimensions(), 3);
+    }
+
+    #[test]
+    fn from_f64_slice() {
+        let v = VectorValue::from_f64_slice(&[1.0, 2.0, 3.0]);
+        assert_eq!(v.dimensions(), 3);
+        assert!((v.values[0] - 1.0).abs() < f32::EPSILON);
     }
 
     #[test]
@@ -281,4 +341,53 @@ mod tests {
         let decoded = VectorValue::deserialize(&bytes, 0).unwrap();
         assert_eq!(decoded.values.len(), 0);
     }
+
+    // ─── Validation tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn validate_finite_vector() {
+        let v = VectorValue::new(vec![1.0, -2.5, 0.0, 100.0]);
+        assert!(v.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_nan() {
+        let v = VectorValue::new(vec![1.0, f32::NAN, 3.0]);
+        let err = v.validate().unwrap_err();
+        assert!(format!("{err}").contains("NaN"));
+    }
+
+    #[test]
+    fn validate_rejects_positive_infinity() {
+        let v = VectorValue::new(vec![f32::INFINITY, 2.0]);
+        let err = v.validate().unwrap_err();
+        assert!(format!("{err}").contains("Infinity"));
+    }
+
+    #[test]
+    fn validate_rejects_negative_infinity() {
+        let v = VectorValue::new(vec![1.0, f32::NEG_INFINITY]);
+        assert!(v.validate().is_err());
+    }
+
+    #[test]
+    fn validate_empty_vector_is_ok() {
+        let v = VectorValue::new(vec![]);
+        assert!(v.validate().is_ok());
+    }
+
+    #[test]
+    fn similarity_metric_dispatch() {
+        let a = VectorValue::new(vec![1.0, 0.0]);
+        let b = VectorValue::new(vec![0.0, 1.0]);
+
+        let cos = compute_similarity(&a, &b, SimilarityMetric::Cosine);
+        let euc = compute_similarity(&a, &b, SimilarityMetric::Euclidean);
+        let dot = compute_similarity(&a, &b, SimilarityMetric::DotProduct);
+
+        assert!(cos.abs() < f32::EPSILON); // orthogonal
+        assert!((euc - std::f32::consts::SQRT_2).abs() < 0.001);
+        assert!(dot.abs() < f32::EPSILON);
+    }
 }
+

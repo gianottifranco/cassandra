@@ -650,7 +650,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 08 — Consistencia fuerte y features avanzadas: Paxos/LWT, counters, índices, SAI, vectores, vistas y extensibilidad
+## Executed - Prompt 08 — Consistencia fuerte y features avanzadas: Paxos/LWT, counters, índices, SAI, vectores, vistas y extensibilidad
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.
@@ -742,7 +742,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 09 — Seguridad, observabilidad, plano administrativo y herramientas operativas
+## Executed - Prompt 09 — Seguridad, observabilidad, plano administrativo y herramientas operativas
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.
@@ -834,7 +834,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 10 — Compatibilidad mixta Java↔Rust, migración, hardening de performance y release GA
+## Executed - Prompt 10 — Compatibilidad mixta Java↔Rust, migración, hardening de performance y release GA
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.
