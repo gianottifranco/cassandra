@@ -1,0 +1,21 @@
+[package]
+name = "cassandra-server"
+description = "Main Cassandra server binary — initializes runtime, loads config, starts listeners"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+cassandra-config = { path = "../cassandra-config" }
+cassandra-native-protocol = { path = "../cassandra-native-protocol" }
+cassandra-storage = { path = "../cassandra-storage" }
+cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
+cassandra-coordinator = { path = "../cassandra-coordinator" }
+cassandra-security = { path = "../cassandra-security" }
+cassandra-admin = { path = "../cassandra-admin" }

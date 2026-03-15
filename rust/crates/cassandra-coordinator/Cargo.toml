@@ -1,0 +1,22 @@
+[package]
+name = "cassandra-coordinator"
+description = "Read/write coordinators, consistency level enforcement, paging, aggregation, Paxos/LWT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+cassandra-types = { path = "../cassandra-types" }
+cassandra-schema = { path = "../cassandra-schema" }
+cassandra-storage = { path = "../cassandra-storage" }
+cassandra-messaging = { path = "../cassandra-messaging" }
+cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

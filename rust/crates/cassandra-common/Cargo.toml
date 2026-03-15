@@ -1,0 +1,21 @@
+[package]
+name = "cassandra-common"
+description = "Shared utilities, error types, and concurrency primitives for Cassandra Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

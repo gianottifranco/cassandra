@@ -1,0 +1,23 @@
+[package]
+name = "cassandra-storage"
+description = "Storage engine: SSTable read/write, MemTable, CommitLog, compaction, caches"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+cassandra-types = { path = "../cassandra-types" }
+cassandra-schema = { path = "../cassandra-schema" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

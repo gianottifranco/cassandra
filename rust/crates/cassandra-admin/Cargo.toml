@@ -1,0 +1,19 @@
+[package]
+name = "cassandra-admin"
+description = "Observability (metrics, tracing), diagnostics, nodetool-compatible administration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

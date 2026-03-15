@@ -1,0 +1,19 @@
+[package]
+name = "cassandra-streaming"
+description = "SSTable streaming for bootstrap, decommission, rebuild, repair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+cassandra-storage = { path = "../cassandra-storage" }
+cassandra-messaging = { path = "../cassandra-messaging" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

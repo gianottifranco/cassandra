@@ -1,0 +1,17 @@
+[package]
+name = "cassandra-schema"
+description = "Keyspace, table, column, index, UDT, UDA, UDF metadata and schema agreement protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+serde = { workspace = true }
+cassandra-types = { path = "../cassandra-types" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

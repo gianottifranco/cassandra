@@ -1,0 +1,19 @@
+[package]
+name = "cassandra-repair"
+description = "Incremental and full repair, Merkle tree exchange, anti-compaction"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+cassandra-storage = { path = "../cassandra-storage" }
+cassandra-messaging = { path = "../cassandra-messaging" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

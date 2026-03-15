@@ -1,0 +1,18 @@
+[package]
+name = "cassandra-types"
+description = "CQL type system: native types, collections, tuples, UDTs, serialization and comparison"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+bytes = { workspace = true }
+byteorder = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

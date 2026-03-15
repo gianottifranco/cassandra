@@ -1,0 +1,332 @@
+# Cassandra Rust Rewrite – Feature Compatibility Matrix
+#
+# This file classifies every functional domain of the Java codebase,
+# maps it to its Java source packages, assigns a target Rust crate,
+# and tracks rewrite status.
+#
+# Status values: not-started | in-progress | stub | parity | deferred
+# Priority: P0 (critical path) | P1 (required) | P2 (important) | P3 (nice-to-have) | deferred
+
+baseline:
+  branch: trunk
+  commit: "076c6f11364645bbb43360f013bee6f50a099185"
+  date: "2026-03-15"
+
+domains:
+
+  - name: Common Utilities
+    id: common
+    java_packages:
+      - org.apache.cassandra.utils
+      - org.apache.cassandra.concurrent
+      - org.apache.cassandra.exceptions
+      - org.apache.cassandra.serializers
+      - org.apache.cassandra.notifications
+    rust_crate: cassandra-common
+    priority: P0
+    status: stub
+    description: >
+      Shared utilities, concurrency primitives, serialization helpers,
+      exception/error types, byte buffer abstractions, bloom filters,
+      merkle trees, and other foundational building blocks.
+    parity_notes: ""
+
+  - name: Configuration
+    id: config
+    java_packages:
+      - org.apache.cassandra.config
+    rust_crate: cassandra-config
+    priority: P0
+    status: stub
+    description: >
+      Parsing and validation of cassandra.yaml, system properties,
+      guardrails defaults, and runtime configuration management.
+    parity_notes: "Must parse existing cassandra.yaml without error."
+
+  - name: Type System
+    id: types
+    java_packages:
+      - org.apache.cassandra.db.marshal
+      - org.apache.cassandra.serializers
+    rust_crate: cassandra-types
+    priority: P0
+    status: stub
+    description: >
+      CQL type system: native types (int, text, uuid, ...), collections
+      (list, set, map), tuples, UDTs, frozen/non-frozen semantics,
+      type serialization and comparison.
+    parity_notes: "Byte-level compatibility required for SSTable interop."
+
+  - name: Schema
+    id: schema
+    java_packages:
+      - org.apache.cassandra.schema
+    rust_crate: cassandra-schema
+    priority: P0
+    status: stub
+    description: >
+      Keyspace, table, column, index, UDT, UDA, UDF metadata.
+      Schema agreement protocol. Schema mutations and migrations.
+    parity_notes: ""
+
+  - name: Native Protocol
+    id: native-protocol
+    java_packages:
+      - org.apache.cassandra.transport
+      - org.apache.cassandra.transport.messages
+    rust_crate: cassandra-native-protocol
+    priority: P0
+    status: stub
+    description: >
+      CQL binary protocol v4/v5 frame codec, message types (STARTUP,
+      QUERY, RESULT, ERROR, etc.), connection lifecycle, authentication
+      handshake, event notification.
+    parity_notes: "Wire-compatible with all existing CQL drivers."
+
+  - name: CQL Language
+    id: cql
+    java_packages:
+      - org.apache.cassandra.cql3
+    rust_crate: cassandra-cql
+    priority: P0
+    status: stub
+    description: >
+      CQL parser (currently ANTLR-generated in Java), statement types,
+      query validation, plan/execution bridge, prepared statements,
+      batch statements, restrictions, selection, functions.
+    parity_notes: "Must accept all valid CQL3 syntax from baseline."
+
+  - name: Storage Engine
+    id: storage
+    java_packages:
+      - org.apache.cassandra.db
+      - org.apache.cassandra.db.commitlog
+      - org.apache.cassandra.db.compaction
+      - org.apache.cassandra.db.compression
+      - org.apache.cassandra.db.context
+      - org.apache.cassandra.db.filter
+      - org.apache.cassandra.db.lifecycle
+      - org.apache.cassandra.db.memtable
+      - org.apache.cassandra.db.monitoring
+      - org.apache.cassandra.db.partitions
+      - org.apache.cassandra.db.rows
+      - org.apache.cassandra.db.streaming
+      - org.apache.cassandra.db.transform
+      - org.apache.cassandra.db.tries
+      - org.apache.cassandra.io
+      - org.apache.cassandra.cache
+    rust_crate: cassandra-storage
+    priority: P0
+    status: stub
+    description: >
+      SSTable read/write (all format generations), MemTable, CommitLog,
+      compaction strategies (STCS, LCS, TWCS, UCS), compression,
+      bloom filters, key cache, row cache, partition/row iterators,
+      counter context, trie index.
+    parity_notes: "SSTable read compatibility is mandatory. Write format may evolve."
+
+  - name: Cluster Metadata & Topology
+    id: cluster-metadata
+    java_packages:
+      - org.apache.cassandra.gms
+      - org.apache.cassandra.locator
+      - org.apache.cassandra.dht
+    rust_crate: cassandra-cluster-metadata
+    priority: P1
+    status: stub
+    description: >
+      Gossip protocol (failure detection, state propagation), snitches
+      (Simple, Rack-based, Ec2, GCE, etc.), token ring management,
+      partitioners (Murmur3), range calculations, replication strategies
+      (SimpleStrategy, NetworkTopologyStrategy).
+    parity_notes: "Gossip wire format must be compatible for mixed clusters."
+
+  - name: Inter-node Messaging
+    id: messaging
+    java_packages:
+      - org.apache.cassandra.net
+    rust_crate: cassandra-messaging
+    priority: P1
+    status: stub
+    description: >
+      Inter-node messaging protocol, connection management, message
+      serialization/deserialization, verb handlers, flow control,
+      small/large message channels.
+    parity_notes: "Wire-compatible with Java nodes."
+
+  - name: Coordinator Path
+    id: coordinator
+    java_packages:
+      - org.apache.cassandra.service
+      - org.apache.cassandra.service.reads
+      - org.apache.cassandra.service.writes
+      - org.apache.cassandra.service.pager
+      - org.apache.cassandra.service.thresholds
+      - org.apache.cassandra.db.aggregation
+    rust_crate: cassandra-coordinator
+    priority: P1
+    status: stub
+    description: >
+      Read and write coordinators, consistency level enforcement, read
+      repair, speculative retry, paging, query result aggregation,
+      StorageProxy.
+    parity_notes: ""
+
+  - name: Repair & Anti-Entropy
+    id: repair
+    java_packages:
+      - org.apache.cassandra.repair
+      - org.apache.cassandra.db.repair
+    rust_crate: cassandra-repair
+    priority: P2
+    status: stub
+    description: >
+      Incremental and full repair, Merkle tree exchange, repair
+      coordinators, anti-compaction, repair history.
+    parity_notes: ""
+
+  - name: Streaming
+    id: streaming
+    java_packages:
+      - org.apache.cassandra.streaming
+      - org.apache.cassandra.db.streaming
+    rust_crate: cassandra-streaming
+    priority: P2
+    status: stub
+    description: >
+      SSTable streaming for bootstrap, decommission, rebuild, repair.
+      Stream plans, sessions, transfer handlers.
+    parity_notes: ""
+
+  - name: Paxos / LWT
+    id: paxos
+    java_packages:
+      - org.apache.cassandra.service.paxos
+    rust_crate: cassandra-coordinator  # co-located with coordinator
+    priority: P2
+    status: stub
+    description: >
+      Classic Paxos for lightweight transactions (IF EXISTS / IF conditions).
+    parity_notes: "Must produce same observable results as Java LWT."
+
+  - name: Secondary Indexes
+    id: indexes
+    java_packages:
+      - org.apache.cassandra.index
+    rust_crate: cassandra-storage  # co-located with storage
+    priority: P2
+    status: stub
+    description: >
+      Secondary index abstraction, built-in indexes (legacy, SAI),
+      index builder, index maintenance on write path.
+    parity_notes: ""
+
+  - name: Materialized Views
+    id: materialized-views
+    java_packages:
+      - org.apache.cassandra.db.view
+    rust_crate: null
+    priority: deferred
+    status: not-started
+    description: >
+      Materialized view maintenance. Deprecated upstream; deferred indefinitely.
+    parity_notes: "Upstream-deprecated. Not a rewrite target."
+
+  - name: Hints & Batchlog
+    id: hints-batchlog
+    java_packages:
+      - org.apache.cassandra.hints
+      - org.apache.cassandra.batchlog
+    rust_crate: cassandra-storage
+    priority: P1
+    status: stub
+    description: >
+      Hinted handoff subsystem and distributed batch log for atomic batches.
+    parity_notes: ""
+
+  - name: Security
+    id: security
+    java_packages:
+      - org.apache.cassandra.auth
+      - org.apache.cassandra.security
+      - org.apache.cassandra.audit
+    rust_crate: cassandra-security
+    priority: P2
+    status: stub
+    description: >
+      Authentication (internal, LDAP, Kerberos pluggable), authorization
+      (role-based), TLS/SSL configuration, audit logging.
+    parity_notes: ""
+
+  - name: Observability & Diagnostics
+    id: observability
+    java_packages:
+      - org.apache.cassandra.metrics
+      - org.apache.cassandra.tracing
+      - org.apache.cassandra.diag
+    rust_crate: cassandra-admin
+    priority: P2
+    status: stub
+    description: >
+      Dropwizard metrics (to be replaced with Prometheus-native), request
+      tracing, diagnostic events.
+    parity_notes: "Metric names and semantics should match."
+
+  - name: Admin & Tooling
+    id: admin
+    java_packages:
+      - org.apache.cassandra.tools
+      - org.apache.cassandra.service.disk
+      - org.apache.cassandra.service.snapshot
+    rust_crate: cassandra-admin
+    priority: P2
+    status: stub
+    description: >
+      nodetool, sstableutil, sstableloader, sstable2json, standalone
+      compaction, snapshot management, disk space accounting.
+    parity_notes: "nodetool subset required for operational compatibility."
+
+  - name: Accord (Distributed Transactions)
+    id: accord
+    java_packages:
+      - org.apache.cassandra.service.accord
+    source_module: modules/accord
+    rust_crate: null
+    priority: deferred
+    status: not-started
+    description: >
+      Next-gen distributed transaction engine. Still fluid in trunk.
+    parity_notes: "Excluded from initial parity target."
+
+  - name: Transactional Cluster Metadata
+    id: tcm
+    java_packages:
+      - org.apache.cassandra.tcm
+    rust_crate: null
+    priority: deferred
+    status: not-started
+    description: >
+      New transactional approach to cluster metadata management. Trunk-only.
+    parity_notes: "Under active development. Deferred."
+
+  - name: Full Query Logging
+    id: fql
+    java_packages:
+      - org.apache.cassandra.fql
+    rust_crate: null
+    priority: deferred
+    status: not-started
+    description: >
+      Chronicle-queue based query logging. Diagnostic feature.
+    parity_notes: "Non-critical diagnostic. Deferred."
+
+  - name: Triggers
+    id: triggers
+    java_packages:
+      - org.apache.cassandra.triggers
+    rust_crate: null
+    priority: deferred
+    status: not-started
+    description: >
+      Java-based trigger plugin system. Rarely used.
+    parity_notes: "Requires JNI or alternative FFI approach. Deferred."

@@ -1,0 +1,19 @@
+[package]
+name = "cassandra-config"
+description = "Configuration loading and validation for Cassandra Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+figment = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
