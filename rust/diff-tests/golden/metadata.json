@@ -1,0 +1,8 @@
+{
+  "oracle_host": "java-oracle",
+  "oracle_port": 9042,
+  "generated_at": "2026-03-15T16:00:00+00:00",
+  "generator_version": "1.0.0",
+  "baseline_commit": "076c6f11364645bbb43360f013bee6f50a099185",
+  "note": "These are offline-generated structural fixtures. Binary protocol fixtures require a running Java oracle and should be regenerated with generate_golden.py."
+}

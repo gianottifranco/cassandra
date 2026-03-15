@@ -1,0 +1,165 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ---------------------------------------------------------------------------
+# Cassandra Differential Test Cluster
+#
+# Services:
+#   java-oracle  — Baseline Java Cassandra node (source of truth)
+#   rust-sut     — Rust implementation (system under test)
+#
+# Usage:
+#   docker compose up -d                    # Start both nodes
+#   docker compose up -d java-oracle        # Start Java only
+#   docker compose --profile three-node up  # Start 3-node Java cluster
+#   docker compose down -v                  # Stop and clean up
+#
+# Golden fixture generation:
+#   docker compose run --rm golden-gen
+# ---------------------------------------------------------------------------
+
+services:
+  # ── Java Oracle Node ─────────────────────────────────────────────────────
+  java-oracle:
+    build:
+      context: ../..
+      dockerfile: rust/diff-tests/docker/Dockerfile.java-oracle
+    container_name: cassandra-java-oracle
+    hostname: java-oracle
+    ports:
+      - "19042:9042"    # Native transport (offset to avoid conflicts)
+      - "17000:7000"    # Inter-node
+      - "17199:7199"    # JMX
+    environment:
+      - CASSANDRA_CLUSTER_NAME=DiffTestOracle
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+      - CASSANDRA_NUM_TOKENS=16
+    volumes:
+      - java-oracle-data:/var/lib/cassandra
+      - golden-fixtures:/golden
+    networks:
+      - difftest
+    healthcheck:
+      test: ["CMD-SHELL", "cqlsh -e 'SELECT now() FROM system.local' || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 60s
+
+  # ── Rust System Under Test ───────────────────────────────────────────────
+  rust-sut:
+    build:
+      context: ../..
+      dockerfile: rust/diff-tests/docker/Dockerfile.rust-stub
+    container_name: cassandra-rust-sut
+    hostname: rust-sut
+    ports:
+      - "29042:9042"     # Native transport (different offset)
+    environment:
+      - CASSANDRA_NATIVE_PORT=9042
+    volumes:
+      - rust-sut-data:/var/lib/cassandra-rust
+    networks:
+      - difftest
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 9042 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ── Golden Fixture Generator (one-shot) ──────────────────────────────────
+  golden-gen:
+    build:
+      context: ../..
+      dockerfile: rust/diff-tests/docker/Dockerfile.java-oracle
+    container_name: cassandra-golden-gen
+    entrypoint: >
+      bash -c "
+        echo 'Waiting for Java oracle to be ready...' &&
+        until cqlsh java-oracle -e 'SELECT now() FROM system.local' 2>/dev/null; do
+          sleep 2
+        done &&
+        echo 'Oracle ready. Generating golden fixtures...' &&
+        python3 /opt/cassandra-rust/golden-gen/generate_golden.py --host java-oracle --output /golden
+      "
+    depends_on:
+      java-oracle:
+        condition: service_healthy
+    volumes:
+      - golden-fixtures:/golden
+      - ./golden-gen:/opt/cassandra-rust/golden-gen:ro
+    networks:
+      - difftest
+    profiles:
+      - golden
+
+  # ── Additional Java nodes for multi-node testing ─────────────────────────
+  java-oracle-2:
+    build:
+      context: ../..
+      dockerfile: rust/diff-tests/docker/Dockerfile.java-oracle
+    container_name: cassandra-java-oracle-2
+    hostname: java-oracle-2
+    environment:
+      - CASSANDRA_CLUSTER_NAME=DiffTestOracle
+      - CASSANDRA_SEEDS=java-oracle
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+      - CASSANDRA_NUM_TOKENS=16
+    volumes:
+      - java-oracle-2-data:/var/lib/cassandra
+    networks:
+      - difftest
+    depends_on:
+      java-oracle:
+        condition: service_healthy
+    profiles:
+      - three-node
+
+  java-oracle-3:
+    build:
+      context: ../..
+      dockerfile: rust/diff-tests/docker/Dockerfile.java-oracle
+    container_name: cassandra-java-oracle-3
+    hostname: java-oracle-3
+    environment:
+      - CASSANDRA_CLUSTER_NAME=DiffTestOracle
+      - CASSANDRA_SEEDS=java-oracle
+      - MAX_HEAP_SIZE=512M
+      - HEAP_NEWSIZE=128M
+      - CASSANDRA_NUM_TOKENS=16
+    volumes:
+      - java-oracle-3-data:/var/lib/cassandra
+    networks:
+      - difftest
+    depends_on:
+      java-oracle:
+        condition: service_healthy
+    profiles:
+      - three-node
+
+volumes:
+  java-oracle-data:
+  java-oracle-2-data:
+  java-oracle-3-data:
+  rust-sut-data:
+  golden-fixtures:
+
+networks:
+  difftest:
+    driver: bridge

@@ -1,0 +1,22 @@
+{
+  "0x0000": {"name": "SERVER_ERROR", "description": "Something unexpected happened server side"},
+  "0x000A": {"name": "PROTOCOL_ERROR", "description": "Invalid protocol message"},
+  "0x0100": {"name": "BAD_CREDENTIALS", "description": "Incorrect login credentials"},
+  "0x1000": {"name": "UNAVAILABLE", "description": "Required consistency level not achievable"},
+  "0x1001": {"name": "OVERLOADED", "description": "Coordinator node is overloaded"},
+  "0x1002": {"name": "IS_BOOTSTRAPPING", "description": "Coordinator is bootstrapping"},
+  "0x1003": {"name": "TRUNCATE_ERROR", "description": "Truncation error"},
+  "0x1100": {"name": "WRITE_TIMEOUT", "description": "Write request timed out"},
+  "0x1200": {"name": "READ_TIMEOUT", "description": "Read request timed out"},
+  "0x1300": {"name": "READ_FAILURE", "description": "Read request failed"},
+  "0x1400": {"name": "FUNCTION_FAILURE", "description": "User-defined function execution failed"},
+  "0x1500": {"name": "WRITE_FAILURE", "description": "Write request failed"},
+  "0x1600": {"name": "CDC_WRITE_FAILURE", "description": "CDC write failure"},
+  "0x1700": {"name": "CAS_WRITE_UNKNOWN", "description": "CAS write with unknown result"},
+  "0x2000": {"name": "SYNTAX_ERROR", "description": "CQL syntax error"},
+  "0x2100": {"name": "UNAUTHORIZED", "description": "Unauthorized operation"},
+  "0x2200": {"name": "INVALID", "description": "Invalid query"},
+  "0x2300": {"name": "CONFIG_ERROR", "description": "Configuration error"},
+  "0x2400": {"name": "ALREADY_EXISTS", "description": "Resource already exists"},
+  "0x2500": {"name": "UNPREPARED", "description": "Prepared query ID not found"}
+}

@@ -1,0 +1,121 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ---------------------------------------------------------------------------
+# Cassandra Java Oracle Node
+#
+# Builds the frozen baseline Java Cassandra from source and packages it into
+# a slim runtime image suitable for differential testing.
+#
+# Build context: repository root (../../..)
+# Usage:
+#   docker build -f rust/diff-tests/docker/Dockerfile.java-oracle \
+#                -t cassandra-java-oracle .
+# ---------------------------------------------------------------------------
+
+# ── Stage 1: Build ─────────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jdk AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ant \
+        python3 \
+        git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /cassandra
+
+# Copy the full source tree. The .dockerignore should exclude rust/target/.
+COPY build.xml build.properties.default relocate-dependencies.pom ./
+COPY src/ src/
+COPY lib/ lib/
+COPY conf/ conf/
+COPY test/ test/
+COPY modules/ modules/
+COPY tools/ tools/
+COPY bin/ bin/
+COPY pylib/ pylib/
+COPY .build/ .build/
+
+# Build Cassandra JARs
+RUN ant jar
+
+# Build the dtest shaded JAR (useful for future in-JVM dtests)
+# This is optional and may fail on some platforms; mark as non-fatal.
+RUN ant dtest-jar || true
+
+# ── Stage 2: Golden fixture generator build ────────────────────────────────
+COPY rust/diff-tests/golden-gen/ /golden-gen-src/
+
+# Compile ExportGolden using the built classpath
+RUN javac -cp "/cassandra/build/classes/main/*:/cassandra/lib/*" \
+    /golden-gen-src/src/ExportGolden.java \
+    -d /golden-gen-classes/ 2>/dev/null || true
+
+# ── Stage 3: Runtime ──────────────────────────────────────────────────────
+FROM eclipse-temurin:21-jre-jammy AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        procps \
+        net-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create cassandra user
+RUN groupadd -r cassandra && useradd -r -g cassandra cassandra
+
+WORKDIR /opt/cassandra
+
+# Copy built artifacts
+COPY --from=builder /cassandra/build/apache-cassandra-*.jar lib/
+COPY --from=builder /cassandra/build/classes/main/ classes/
+COPY --from=builder /cassandra/build/lib/jars/ lib/jars/
+COPY --from=builder /cassandra/lib/ lib/ext/
+COPY --from=builder /cassandra/conf/ conf/
+COPY --from=builder /cassandra/bin/ bin/
+COPY --from=builder /cassandra/tools/ tools/
+COPY --from=builder /cassandra/pylib/ pylib/
+
+# Copy golden generator classes if built successfully
+COPY --from=builder /golden-gen-classes/ /opt/golden-gen/ 
+
+# Adjust config for single-node testing
+RUN sed -i 's/^cluster_name:.*/cluster_name: "DiffTestOracle"/' conf/cassandra.yaml && \
+    sed -i 's/^# num_tokens:.*/num_tokens: 16/' conf/cassandra.yaml && \
+    sed -i 's/^num_tokens:.*/num_tokens: 16/' conf/cassandra.yaml && \
+    sed -i 's/^listen_address:.*/listen_address: 0.0.0.0/' conf/cassandra.yaml && \
+    sed -i 's/^rpc_address:.*/rpc_address: 0.0.0.0/' conf/cassandra.yaml && \
+    sed -i 's/^# broadcast_address:.*/broadcast_address: java-oracle/' conf/cassandra.yaml && \
+    sed -i 's/^# broadcast_rpc_address:.*/broadcast_rpc_address: java-oracle/' conf/cassandra.yaml
+
+# Data directories
+RUN mkdir -p /var/lib/cassandra/data /var/lib/cassandra/commitlog \
+             /var/lib/cassandra/saved_caches /var/lib/cassandra/hints \
+             /var/log/cassandra /golden && \
+    chown -R cassandra:cassandra /var/lib/cassandra /var/log/cassandra /golden
+
+ENV CASSANDRA_HOME=/opt/cassandra
+ENV CASSANDRA_CONF=/opt/cassandra/conf
+ENV PATH="${CASSANDRA_HOME}/bin:${PATH}"
+
+# Expose: native transport, inter-node, JMX
+EXPOSE 9042 7000 7199
+
+USER cassandra
+
+HEALTHCHECK --interval=5s --timeout=10s --retries=30 \
+    CMD cqlsh -e "SELECT now() FROM system.local" || exit 1
+
+ENTRYPOINT ["cassandra", "-f"]

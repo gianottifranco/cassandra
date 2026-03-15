@@ -1,0 +1,42 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[package]
+name = "cassandra-diff-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+description = """
+Differential testing framework for the Cassandra Java-to-Rust rewrite.
+Provides comparators, golden test runners, and fuzz strategies for
+verifying Rust output against the Java oracle.
+"""
+
+[dependencies]
+cassandra-common = { path = "../cassandra-common" }
+cassandra-native-protocol = { path = "../cassandra-native-protocol" }
+cassandra-types = { path = "../cassandra-types" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = "0.4"
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }

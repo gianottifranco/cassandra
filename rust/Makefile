@@ -2,7 +2,7 @@
 # or more contributor license agreements.
 # See the NOTICE file and LICENSE.txt at the repository root.
 
-.PHONY: build test fmt clippy deny bench check-all clean
+.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden
 
 # Default target
 all: check-all
@@ -55,3 +55,29 @@ status:
 	@echo "=== Feature Matrix Status ==="
 	@grep -E "^  - name:|status:" ../docs/rewrite/feature_matrix.yaml | paste - - | \
 		sed 's/  - name: //; s/    status: /\t/' || true
+
+## ── Differential Testing ────────────────────────────────────────────────
+
+## Run the full differential test suite (requires Docker)
+diff-test:
+	cargo run -p xtask -- diff-test
+
+## Run offline golden tests only (no Docker required)
+golden-test:
+	cargo run -p xtask -- golden-test
+
+## Generate golden fixtures from Java oracle
+generate-golden:
+	cargo run -p xtask -- generate-golden
+
+## Start Docker services for manual testing
+docker-up:
+	cd diff-tests && docker compose up -d java-oracle rust-sut
+
+## Stop Docker services
+docker-down:
+	cd diff-tests && docker compose down -v
+
+## Run pytest diff-tests (requires running Docker services)
+pytest:
+	cd diff-tests/pytest && python3 -m pytest -v --tb=short

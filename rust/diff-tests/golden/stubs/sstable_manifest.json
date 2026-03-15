@@ -1,0 +1,16 @@
+{
+  "description": "SSTable golden fixture manifest",
+  "status": "pending",
+  "phase_target": "Phase 4 (Storage Engine)",
+  "expected_formats": ["nb (big-format)", "nc (BTI format)"],
+  "expected_fixtures": [
+    "simple_table_sstable.db",
+    "clustering_table_sstable.db",
+    "counter_table_sstable.db",
+    "sstable_statistics.json",
+    "compression_info.db",
+    "index_summary.db",
+    "bloom_filter.db"
+  ],
+  "generated_at": "2026-03-15T16:00:00+00:00"
+}

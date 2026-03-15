@@ -1,0 +1,111 @@
+{
+  "description": "CQL native type serialization reference",
+  "protocol_version": 4,
+  "types": {
+    "ascii": {
+      "cql_type": "ascii",
+      "type_id": "0x0001",
+      "example_value": "hello",
+      "serialized_hex": "68656c6c6f",
+      "notes": "Plain ASCII string, no length prefix in serialized form within body"
+    },
+    "bigint": {
+      "cql_type": "bigint",
+      "type_id": "0x0002",
+      "example_value": 9223372036854775807,
+      "serialized_hex": "7fffffffffffffff",
+      "notes": "8-byte signed big-endian integer"
+    },
+    "blob": {
+      "cql_type": "blob",
+      "type_id": "0x0003",
+      "example_value": "0xDEADBEEF",
+      "serialized_hex": "deadbeef",
+      "notes": "Raw bytes"
+    },
+    "boolean_true": {
+      "cql_type": "boolean",
+      "type_id": "0x0004",
+      "example_value": true,
+      "serialized_hex": "01",
+      "notes": "1 byte: 0x00 = false, 0x01 = true"
+    },
+    "boolean_false": {
+      "cql_type": "boolean",
+      "type_id": "0x0004",
+      "example_value": false,
+      "serialized_hex": "00",
+      "notes": "1 byte: 0x00 = false, 0x01 = true"
+    },
+    "double": {
+      "cql_type": "double",
+      "type_id": "0x0007",
+      "example_value": 3.14159265358979,
+      "serialized_hex": "400921fb54442d18",
+      "notes": "IEEE 754 double-precision, big-endian"
+    },
+    "float": {
+      "cql_type": "float",
+      "type_id": "0x0008",
+      "example_value": 2.71,
+      "serialized_hex": "402d70a4",
+      "notes": "IEEE 754 single-precision, big-endian"
+    },
+    "int": {
+      "cql_type": "int",
+      "type_id": "0x0009",
+      "example_value": 42,
+      "serialized_hex": "0000002a",
+      "notes": "4-byte signed big-endian integer"
+    },
+    "smallint": {
+      "cql_type": "smallint",
+      "type_id": "0x0013",
+      "example_value": 32000,
+      "serialized_hex": "7d00",
+      "notes": "2-byte signed big-endian integer"
+    },
+    "tinyint": {
+      "cql_type": "tinyint",
+      "type_id": "0x0014",
+      "example_value": 127,
+      "serialized_hex": "7f",
+      "notes": "1-byte signed integer"
+    },
+    "text": {
+      "cql_type": "text",
+      "type_id": "0x000D",
+      "example_value": "Hello, Cassandra!",
+      "serialized_hex": "48656c6c6f2c2043617373616e64726121",
+      "notes": "UTF-8 encoded string, no length prefix in value bytes"
+    },
+    "uuid": {
+      "cql_type": "uuid",
+      "type_id": "0x000C",
+      "example_value": "550e8400-e29b-41d4-a716-446655440000",
+      "serialized_hex": "550e8400e29b41d4a716446655440000",
+      "notes": "16 bytes, no dashes"
+    },
+    "int_negative": {
+      "cql_type": "int",
+      "type_id": "0x0009",
+      "example_value": -1,
+      "serialized_hex": "ffffffff",
+      "notes": "Two's complement"
+    },
+    "int_zero": {
+      "cql_type": "int",
+      "type_id": "0x0009",
+      "example_value": 0,
+      "serialized_hex": "00000000",
+      "notes": "Zero"
+    },
+    "empty_text": {
+      "cql_type": "text",
+      "type_id": "0x000D",
+      "example_value": "",
+      "serialized_hex": "",
+      "notes": "Empty string serializes to zero bytes"
+    }
+  }
+}

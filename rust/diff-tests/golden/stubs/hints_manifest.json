@@ -1,0 +1,11 @@
+{
+  "description": "Hinted handoff golden fixture manifest",
+  "status": "pending",
+  "phase_target": "Phase 7 (Production Hardening)",
+  "expected_fixtures": [
+    "hint_file.hints",
+    "hint_header.json",
+    "hint_replay_expected.json"
+  ],
+  "generated_at": "2026-03-15T16:00:00+00:00"
+}

@@ -1,0 +1,81 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# ---------------------------------------------------------------------------
+# Cassandra Rust Stub Node (System Under Test)
+#
+# Builds the Rust workspace and packages the cassandra-server binary.
+# Until the server implements real protocol handling, the entrypoint runs
+# a minimal TCP listener that returns a proper protocol ERROR frame for
+# any connection, allowing the diff-test harness to verify connectivity.
+#
+# Build context: repository root (../../..)
+# Usage:
+#   docker build -f rust/diff-tests/docker/Dockerfile.rust-stub \
+#                -t cassandra-rust-stub .
+# ---------------------------------------------------------------------------
+
+# ── Stage 1: Build ─────────────────────────────────────────────────────────
+FROM rust:1.85-bookworm AS builder
+
+WORKDIR /cassandra/rust
+
+# Copy workspace manifest and lock first for layer caching
+COPY rust/Cargo.toml rust/Cargo.lock ./
+COPY rust/deny.toml ./
+
+# Copy all crate manifests for dependency resolution
+COPY rust/crates/ crates/
+
+# Copy xtask if it exists
+COPY rust/xtask/ xtask/
+
+# Build workspace
+RUN cargo build --workspace --release 2>/dev/null || cargo build --workspace
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────────────
+FROM debian:bookworm-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        python3 \
+        netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd -r cassandra && useradd -r -g cassandra cassandra
+
+WORKDIR /opt/cassandra-rust
+
+# Copy built binary (if it exists; stub may not produce a useful binary yet)
+COPY --from=builder /cassandra/rust/target/release/cassandra-server ./bin/ 2>/dev/null || true
+
+# Copy the TCP stub listener script for use until real protocol handling exists
+COPY rust/diff-tests/docker/stub-listener.py ./bin/
+
+RUN mkdir -p /var/lib/cassandra-rust /var/log/cassandra-rust && \
+    chown -R cassandra:cassandra /var/lib/cassandra-rust /var/log/cassandra-rust
+
+EXPOSE 9042
+
+USER cassandra
+
+# The stub listener accepts TCP connections on 9042 and returns a
+# Cassandra protocol SERVER_ERROR frame, so the test harness can verify
+# that the Rust node is reachable and baseline connectivity works.
+HEALTHCHECK --interval=5s --timeout=5s --retries=10 \
+    CMD nc -z localhost 9042 || exit 1
+
+ENTRYPOINT ["python3", "/opt/cassandra-rust/bin/stub-listener.py"]

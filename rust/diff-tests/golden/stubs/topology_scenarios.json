@@ -1,0 +1,50 @@
+{
+  "description": "Topology golden fixture manifest",
+  "status": "partial",
+  "scenarios": [
+    {
+      "name": "single_node",
+      "nodes": 1,
+      "replication_factor": 1,
+      "status": "available_via_docker_compose"
+    },
+    {
+      "name": "three_node",
+      "nodes": 3,
+      "replication_factor": 3,
+      "status": "available_via_docker_compose_three_node_profile"
+    },
+    {
+      "name": "multi_dc",
+      "nodes": 6,
+      "replication_factor": {"dc1": 3, "dc2": 3},
+      "status": "pending_phase_6"
+    },
+    {
+      "name": "bootstrap",
+      "description": "Adding a node to existing cluster",
+      "status": "pending_phase_6"
+    },
+    {
+      "name": "decommission",
+      "description": "Removing a node from cluster",
+      "status": "pending_phase_6"
+    },
+    {
+      "name": "hinted_handoff",
+      "description": "Node down, hints accumulated, node returns",
+      "status": "pending_phase_7"
+    },
+    {
+      "name": "read_repair",
+      "description": "Inconsistent replicas repaired on read",
+      "status": "pending_phase_7"
+    },
+    {
+      "name": "repair",
+      "description": "Full and incremental anti-entropy repair",
+      "status": "pending_phase_7"
+    }
+  ],
+  "generated_at": "2026-03-15T16:00:00+00:00"
+}
