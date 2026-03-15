@@ -11,6 +11,10 @@ rust-version.workspace = true
 cassandra-common = { path = "../cassandra-common" }
 cassandra-types = { path = "../cassandra-types" }
 cassandra-schema = { path = "../cassandra-schema" }
+tracing = { workspace = true }
+md-5 = { workspace = true }
+dashmap = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -7,13 +7,28 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["compression-lz4", "compression-snappy"]
+compression-lz4 = ["lz4_flex"]
+compression-snappy = ["snap"]
+
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
+cassandra-types = { path = "../cassandra-types" }
 bytes = { workspace = true }
 byteorder = { workspace = true }
 tokio = { workspace = true }
-cassandra-types = { path = "../cassandra-types" }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+md-5 = { workspace = true }
+uuid = { workspace = true }
+
+# Optional compression backends
+lz4_flex = { workspace = true, optional = true }
+snap = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+hex = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

@@ -16,25 +16,23 @@
 
 //! # cassandra-cql
 //!
-//! CQL parser, statement types, query validation, and prepared statement caching
+//! CQL parser, statement types, query validation, and prepared statement caching.
 //!
 //! ## Java Oracle
 //!
 //! - `org.apache.cassandra.cql3`
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! Pipeline: input → **Lexer** → tokens → **Parser** → AST → **Planner** → QueryPlan
+//!
+//! The parser is hand-rolled recursive descent for:
+//! - Full control over error messages with position info
+//! - Zero external grammar files or build-time codegen
+//! - Streaming-friendly design for future zero-copy parsing
 
-// TODO(phase-2+): Implement core functionality
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+pub mod lexer;
+pub mod ast;
+pub mod parser;
+pub mod planner;
+pub mod prepared;

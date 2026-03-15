@@ -189,7 +189,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 03 — Primitivas, configuración y catálogo de esquema
+## Executed - Prompt 03 — Primitivas, configuración y catálogo de esquema
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.
@@ -281,7 +281,7 @@ No me devuelvas solo pseudocódigo o ideas: materializa la fase en artefactos co
 ```
 
 
-## Prompt 04 — Native protocol v5, parser CQL y frontend cliente-servidor
+## Executed - Prompt 04 — Native protocol v5, parser CQL y frontend cliente-servidor
 
 ```text
 Actúa como Principal Engineer y dueño técnico de una reescritura completa de Apache Cassandra desde su implementación principal en Java hacia una implementación nativa en Rust. Trabajas dentro del repositorio de Cassandra y tu objetivo no es “hacer un prototipo”, sino construir una base productiva, mantenible y verificable que pueda llegar a sustituir al servidor Java con compatibilidad observable.

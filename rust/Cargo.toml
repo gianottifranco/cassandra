@@ -55,6 +55,7 @@ serde_json = "1"
 
 # Byte manipulation
 bytes = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
 byteorder = "1"
 
 # Error handling
@@ -68,9 +69,20 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Concurrency
 crossbeam = "0.8"
 parking_lot = "0.12"
+dashmap = "6"
 
 # Configuration
 figment = { version = "0.10", features = ["yaml", "env"] }
+
+# Compression
+lz4_flex = "0.11"
+snap = "1"
+
+# Hashing
+md-5 = "0.10"
+
+# UUID
+uuid = { version = "1", features = ["v4", "v1"] }
 
 # Testing
 proptest = "1"

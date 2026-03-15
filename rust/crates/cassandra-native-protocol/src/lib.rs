@@ -16,26 +16,32 @@
 
 //! # cassandra-native-protocol
 //!
-//! CQL binary protocol v4/v5 frame codec, message types, and connection lifecycle
+//! CQL binary protocol v4/v5 frame codec, message types, and connection lifecycle.
 //!
 //! ## Java Oracle
 //!
 //! - `org.apache.cassandra.transport`
 //! - `org.apache.cassandra.transport.messages`
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! The protocol layer is structured as:
+//! 1. **types** – primitive read/write for protocol data types
+//! 2. **frame** – frame header + body with `tokio_util::codec` integration
+//! 3. **message** – parsed message types (requests + responses)
+//! 4. **request** – decoders for client→server messages
+//! 5. **response** – encoders for server→client messages
+//! 6. **compress** – LZ4/Snappy frame body compression
+//! 7. **auth** – authenticator trait and implementations
+//! 8. **error_codes** – CassandraError → protocol error mapping
 
-// TODO(phase-2+): Implement core functionality
+pub mod types;
+pub mod frame;
+pub mod message;
+pub mod request;
+pub mod response;
+pub mod error_codes;
+pub mod auth;
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
-    }
-}
+#[cfg(any(feature = "compression-lz4", feature = "compression-snappy"))]
+pub mod compress;
