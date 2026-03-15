@@ -10,8 +10,10 @@ rust-version.workspace = true
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 cassandra-types = { path = "../cassandra-types" }
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+

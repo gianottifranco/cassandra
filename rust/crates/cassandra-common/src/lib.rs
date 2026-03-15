@@ -28,16 +28,24 @@
 
 pub mod error;
 pub mod version;
+pub mod timestamp;
+pub mod ttl;
+pub mod tombstone;
+pub mod murmur3;
+pub mod token;
 
 /// Re-export commonly used types.
 pub use error::{CassandraError, CassandraResult};
+pub use timestamp::Timestamp;
+pub use ttl::{Ttl, LocalDeletionTime};
+pub use tombstone::{DeletionTime, RangeTombstone};
+pub use token::Token;
 
 /// Crate version, matching the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// TODO(phase-2): Add modules:
+// TODO(phase-3+): Add modules:
 // - bloom: Bloom filter implementation
-// - hash: Murmur3 partitioner hash
 // - concurrent: Thread pool abstractions
 // - bytes: ByteBuf / ByteComparable abstractions
 // - compression: LZ4, Snappy, Zstd wrappers

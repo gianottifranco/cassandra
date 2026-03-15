@@ -16,26 +16,41 @@
 
 //! # cassandra-types
 //!
-//! CQL type system: native types, collections, tuples, UDTs, serialization and comparison
+//! CQL type system: native types, collections, tuples, UDTs, serialization
+//! and comparison.
 //!
 //! ## Java Oracle
 //!
-//! - `org.apache.cassandra.db.marshal`
-//! - `org.apache.cassandra.serializers`
+//! - `org.apache.cassandra.db.marshal` (AbstractType hierarchy)
+//! - `org.apache.cassandra.serializers` (type serializers)
 //!
-//! ## Status
+//! ## Architecture
 //!
-//! Stub crate — interfaces and module structure only.
-//! See `docs/rewrite/feature_matrix.yaml` for implementation status.
+//! The CQL type system is modeled as a Rust enum (`CqlType`) rather than a
+//! trait-based hierarchy. This enables exhaustive pattern matching, avoids
+//! virtual dispatch on hot paths, and keeps the type information inline.
 
-// TODO(phase-2+): Implement core functionality
+pub mod native;
+pub mod collections;
+pub mod udt;
+pub mod codec;
+pub mod comparator;
+pub mod partition_key;
+pub mod clustering_key;
+
+pub use native::CqlType;
+pub use collections::{ListType, SetType, MapType, TupleType};
+pub use udt::UserDefinedType;
+pub use codec::CqlValue;
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
-    fn crate_compiles() {
-        // This test verifies that the crate compiles successfully.
-        // It will be replaced with real tests as functionality is added.
-        assert!(true);
+    fn crate_compiles_with_modules() {
+        // Verify module re-exports work
+        let _ = CqlType::Int;
+        let _ = CqlType::Varchar;
     }
 }
