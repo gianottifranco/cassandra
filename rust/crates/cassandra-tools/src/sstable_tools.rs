@@ -9,8 +9,8 @@
 use std::path::Path;
 
 use cassandra_storage::sstable::{
-    reader::SSTableReader,
     format::{SSTableDescriptor, SSTableFormat},
+    reader::SSTableReader,
 };
 
 fn parse_descriptor(file: &str) -> Option<SSTableDescriptor> {
@@ -70,7 +70,10 @@ pub fn dump_sstable(file: &str) {
                 }
                 first_p = false;
                 println!("  {{");
-                println!("    \"partition_key\": \"{}\",", String::from_utf8_lossy(&pk));
+                println!(
+                    "    \"partition_key\": \"{}\",",
+                    String::from_utf8_lossy(&pk)
+                );
                 println!("    \"rows\": [");
                 let mut first_r = true;
                 for (ck, row) in &data.rows {
@@ -79,7 +82,10 @@ pub fn dump_sstable(file: &str) {
                     }
                     first_r = false;
                     println!("      {{");
-                    println!("        \"clustering_key\": \"{}\",", String::from_utf8_lossy(ck));
+                    println!(
+                        "        \"clustering_key\": \"{}\",",
+                        String::from_utf8_lossy(ck)
+                    );
                     println!("        \"is_tombstone\": {},", row.is_tombstone);
                     if let Some(ldt) = row.local_deletion_time {
                         println!("        \"local_deletion_time\": {},", ldt);
@@ -93,7 +99,11 @@ pub fn dump_sstable(file: &str) {
                         first_c = false;
                         println!("          {{");
                         println!("            \"column\": \"{}\",", cell.column);
-                        let val_str = cell.value.as_deref().map(|v| String::from_utf8_lossy(v).into_owned()).unwrap_or_else(|| "null".to_string());
+                        let val_str = cell
+                            .value
+                            .as_deref()
+                            .map(|v| String::from_utf8_lossy(v).into_owned())
+                            .unwrap_or_else(|| "null".to_string());
                         println!("            \"value\": \"{}\",", val_str);
                         println!("            \"timestamp\": {},", cell.timestamp);
                         println!("            \"ttl\": {},", cell.ttl);
@@ -123,9 +133,7 @@ pub fn show_metadata(file: &str) {
         return;
     }
 
-    let size = std::fs::metadata(path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
 
     let desc = match parse_descriptor(file) {
         Some(d) => d,

@@ -102,10 +102,7 @@ pub enum CasResult {
         attempts: u32,
     },
     /// Unavailable: not enough replicas for SERIAL consistency.
-    Unavailable {
-        required: usize,
-        alive: usize,
-    },
+    Unavailable { required: usize, alive: usize },
     /// Timeout during Paxos round.
     Timeout,
 }
@@ -210,11 +207,7 @@ pub struct PaxosCoordinator {
 }
 
 impl PaxosCoordinator {
-    pub fn new(
-        node_id: Uuid,
-        replicas: Vec<Arc<PaxosReplica>>,
-        quorum_size: usize,
-    ) -> Self {
+    pub fn new(node_id: Uuid, replicas: Vec<Arc<PaxosReplica>>, quorum_size: usize) -> Self {
         Self {
             node_id,
             replicas,
@@ -275,7 +268,7 @@ impl PaxosCoordinator {
     where
         R: std::future::Future<Output = Option<Vec<u8>>>,
         F1: Fn() -> R,
-        F2: Fn(Option<&[u8]>) -> bool,  // current_row -> condition_met
+        F2: Fn(Option<&[u8]>) -> bool, // current_row -> condition_met
     {
         let mut attempts = 0u32;
         let max_retries = self.config.max_contention_retries;
@@ -416,10 +409,7 @@ impl PaxosCoordinator {
             return CasResult::Success;
         }
 
-        warn!(
-            max = max_retries,
-            "CAS aborted due to contention"
-        );
+        warn!(max = max_retries, "CAS aborted due to contention");
 
         CasResult::ContentionAborted {
             attempts: max_retries,
@@ -463,9 +453,7 @@ mod tests {
             use_jitter: false, // deterministic for tests
             ..Default::default()
         };
-        let coordinator = PaxosCoordinator::with_config(
-            node_a(), replicas.clone(), 2, config,
-        );
+        let coordinator = PaxosCoordinator::with_config(node_a(), replicas.clone(), 2, config);
         (replicas, coordinator)
     }
 
@@ -473,14 +461,16 @@ mod tests {
     async fn basic_cas_insert_if_not_exists() {
         let (_replicas, coordinator) = setup_cluster();
 
-        let result = coordinator.execute_cas(
-            "ks",
-            "t1",
-            b"user1",
-            b"INSERT user1".to_vec(),
-            || async { None },
-            |current| current.is_none(), // IF NOT EXISTS
-        ).await;
+        let result = coordinator
+            .execute_cas(
+                "ks",
+                "t1",
+                b"user1",
+                b"INSERT user1".to_vec(),
+                || async { None },
+                |current| current.is_none(), // IF NOT EXISTS
+            )
+            .await;
 
         assert!(matches!(result, CasResult::Success));
     }
@@ -490,21 +480,29 @@ mod tests {
         let (_replicas, coordinator) = setup_cluster();
 
         // First insert succeeds
-        let r1 = coordinator.execute_cas(
-            "ks", "t1", b"user1",
-            b"INSERT user1".to_vec(),
-            || async { None },
-            |_| true, // Always succeed first time
-        ).await;
+        let r1 = coordinator
+            .execute_cas(
+                "ks",
+                "t1",
+                b"user1",
+                b"INSERT user1".to_vec(),
+                || async { None },
+                |_| true, // Always succeed first time
+            )
+            .await;
         assert!(matches!(r1, CasResult::Success));
 
         // Second insert with IF NOT EXISTS should fail
-        let r2 = coordinator.execute_cas(
-            "ks", "t1", b"user1",
-            b"INSERT user1 again".to_vec(),
-            || async { Some(b"INSERT user1".to_vec()) },
-            |current| current.is_none(), // IF NOT EXISTS — row exists now
-        ).await;
+        let r2 = coordinator
+            .execute_cas(
+                "ks",
+                "t1",
+                b"user1",
+                b"INSERT user1 again".to_vec(),
+                || async { Some(b"INSERT user1".to_vec()) },
+                |current| current.is_none(), // IF NOT EXISTS — row exists now
+            )
+            .await;
 
         assert!(matches!(r2, CasResult::ConditionNotMet { .. }));
     }
@@ -514,22 +512,28 @@ mod tests {
         let (_replicas, coordinator) = setup_cluster();
 
         // Insert initial value
-        coordinator.execute_cas(
-            "ks", "t1", b"pk",
-            b"version=1".to_vec(),
-            || async { None },
-            |_| true,
-        ).await;
+        coordinator
+            .execute_cas(
+                "ks",
+                "t1",
+                b"pk",
+                b"version=1".to_vec(),
+                || async { None },
+                |_| true,
+            )
+            .await;
 
         // Conditional update: only if current value is "version=1"
-        let result = coordinator.execute_cas(
-            "ks", "t1", b"pk",
-            b"version=2".to_vec(),
-            || async { Some(b"version=1".to_vec()) },
-            |current| {
-                current.map_or(false, |v| v == b"version=1")
-            },
-        ).await;
+        let result = coordinator
+            .execute_cas(
+                "ks",
+                "t1",
+                b"pk",
+                b"version=2".to_vec(),
+                || async { Some(b"version=1".to_vec()) },
+                |current| current.map_or(false, |v| v == b"version=1"),
+            )
+            .await;
 
         assert!(matches!(result, CasResult::Success));
     }
@@ -547,29 +551,33 @@ mod tests {
             ..Default::default()
         };
 
-        let coord_a = PaxosCoordinator::with_config(
-            node_a(), replicas.clone(), 2, config.clone(),
-        );
-        let coord_b = PaxosCoordinator::with_config(
-            node_b(), replicas.clone(), 2, config,
-        );
+        let coord_a = PaxosCoordinator::with_config(node_a(), replicas.clone(), 2, config.clone());
+        let coord_b = PaxosCoordinator::with_config(node_b(), replicas.clone(), 2, config);
 
         // We run them sequentially in the test to verify safety, simulating overlap
         // With an async runtime we could spawn both, but simulating the exact interleaving
         // requires hooks into the mock. For now, testing basic success.
-        let result_a = coord_a.execute_cas(
-            "ks", "t", b"contested_key",
-            b"A wins".to_vec(),
-            || async { None },
-            |current| current.is_none(),
-        ).await;
+        let result_a = coord_a
+            .execute_cas(
+                "ks",
+                "t",
+                b"contested_key",
+                b"A wins".to_vec(),
+                || async { None },
+                |current| current.is_none(),
+            )
+            .await;
 
-        let result_b = coord_b.execute_cas(
-            "ks", "t", b"contested_key",
-            b"B wins".to_vec(),
-            || async { Some(b"A wins".to_vec()) }, // B's read phase happens after A
-            |current| current.is_none(),
-        ).await;
+        let result_b = coord_b
+            .execute_cas(
+                "ks",
+                "t",
+                b"contested_key",
+                b"B wins".to_vec(),
+                || async { Some(b"A wins".to_vec()) }, // B's read phase happens after A
+                |current| current.is_none(),
+            )
+            .await;
 
         let a_ok = matches!(result_a, CasResult::Success);
         let b_ok = matches!(result_b, CasResult::Success);
@@ -590,12 +598,16 @@ mod tests {
     async fn replica_state_persists_after_commit() {
         let (replicas, coordinator) = setup_cluster();
 
-        coordinator.execute_cas(
-            "ks", "t1", b"key1",
-            b"committed_value".to_vec(),
-            || async { None },
-            |_| true,
-        ).await;
+        coordinator
+            .execute_cas(
+                "ks",
+                "t1",
+                b"key1",
+                b"committed_value".to_vec(),
+                || async { None },
+                |_| true,
+            )
+            .await;
 
         // All replicas should have the committed state
         for r in &replicas {
@@ -623,21 +635,23 @@ mod tests {
             let new_value = format!("v{}", i).into_bytes();
 
             let expected_current_clone = expected_current.clone();
-            let result = coordinator.execute_cas(
-                "ks", "t1", b"serial_key",
-                new_value,
-                move || {
-                    let expected_current_clone = expected_current_clone.clone();
-                    async move { expected_current_clone }
-                },
-                move |current| {
-                    match (&expected_current, current) {
+            let result = coordinator
+                .execute_cas(
+                    "ks",
+                    "t1",
+                    b"serial_key",
+                    new_value,
+                    move || {
+                        let expected_current_clone = expected_current_clone.clone();
+                        async move { expected_current_clone }
+                    },
+                    move |current| match (&expected_current, current) {
                         (None, None) => true,
                         (Some(exp), Some(cur)) => cur == exp.as_slice(),
                         _ => false,
-                    }
-                },
-            ).await;
+                    },
+                )
+                .await;
 
             assert!(
                 matches!(result, CasResult::Success),
@@ -661,17 +675,19 @@ mod tests {
             use_jitter: false,
         };
 
-        let coordinator = PaxosCoordinator::with_config(
-            node_a(), replicas, 2, config,
-        );
+        let coordinator = PaxosCoordinator::with_config(node_a(), replicas, 2, config);
 
         // First CAS should still work with 1 retry
-        let result = coordinator.execute_cas(
-            "ks", "t", b"k",
-            b"val".to_vec(),
-            || async { None },
-            |_| true,
-        ).await;
+        let result = coordinator
+            .execute_cas(
+                "ks",
+                "t",
+                b"k",
+                b"val".to_vec(),
+                || async { None },
+                |_| true,
+            )
+            .await;
         assert!(matches!(result, CasResult::Success));
     }
 
@@ -683,9 +699,7 @@ mod tests {
             ..Default::default()
         };
         let r1 = Arc::new(PaxosReplica::new(node_a()));
-        let coord = PaxosCoordinator::with_config(
-            node_a(), vec![r1], 1, config,
-        );
+        let coord = PaxosCoordinator::with_config(node_a(), vec![r1], 1, config);
 
         let b1 = coord.backoff_micros(1); // 100 * 2^0 = 100
         let b2 = coord.backoff_micros(2); // 100 * 2^1 = 200
@@ -709,19 +723,23 @@ mod tests {
             let new_val = format!("val_{}", i).into_bytes();
 
             let prev_clone = prev.clone();
-            let result = coordinator.execute_cas(
-                "ks", "t1", b"counter_key",
-                new_val,
-                move || {
-                    let prev_clone = prev_clone.clone();
-                    async move { prev_clone }
-                },
-                move |current| match (&prev, current) {
-                    (None, None) => true,
-                    (Some(exp), Some(cur)) => cur == exp.as_slice(),
-                    _ => false,
-                },
-            ).await;
+            let result = coordinator
+                .execute_cas(
+                    "ks",
+                    "t1",
+                    b"counter_key",
+                    new_val,
+                    move || {
+                        let prev_clone = prev_clone.clone();
+                        async move { prev_clone }
+                    },
+                    move |current| match (&prev, current) {
+                        (None, None) => true,
+                        (Some(exp), Some(cur)) => cur == exp.as_slice(),
+                        _ => false,
+                    },
+                )
+                .await;
             assert!(matches!(result, CasResult::Success), "CAS {i} must succeed");
         }
     }
@@ -731,39 +749,53 @@ mod tests {
         let (_replicas, coordinator) = setup_cluster();
 
         // CAS on partition "a"
-        let r1 = coordinator.execute_cas(
-            "ks", "t", b"partition_a",
-            b"value_a".to_vec(),
-            || async { None },
-            |current| current.is_none(),
-        ).await;
+        let r1 = coordinator
+            .execute_cas(
+                "ks",
+                "t",
+                b"partition_a",
+                b"value_a".to_vec(),
+                || async { None },
+                |current| current.is_none(),
+            )
+            .await;
         assert!(matches!(r1, CasResult::Success));
 
         // CAS on partition "b" is independent
-        let r2 = coordinator.execute_cas(
-            "ks", "t", b"partition_b",
-            b"value_b".to_vec(),
-            || async { None },
-            |current| current.is_none(),
-        ).await;
+        let r2 = coordinator
+            .execute_cas(
+                "ks",
+                "t",
+                b"partition_b",
+                b"value_b".to_vec(),
+                || async { None },
+                |current| current.is_none(),
+            )
+            .await;
         assert!(matches!(r2, CasResult::Success));
 
         // Second CAS on "a" sees its own state
-        let r3 = coordinator.execute_cas(
-            "ks", "t", b"partition_a",
-            b"value_a2".to_vec(),
-            || async { Some(b"value_a".to_vec()) },
-            |current| current.is_none(), // should fail — row exists
-        ).await;
+        let r3 = coordinator
+            .execute_cas(
+                "ks",
+                "t",
+                b"partition_a",
+                b"value_a2".to_vec(),
+                || async { Some(b"value_a".to_vec()) },
+                |current| current.is_none(), // should fail — row exists
+            )
+            .await;
         assert!(matches!(r3, CasResult::ConditionNotMet { .. }));
     }
 
     #[test]
     fn paxos_config_defaults() {
         let config = PaxosConfig::default();
-        assert_eq!(config.max_contention_retries, DEFAULT_MAX_CONTENTION_RETRIES);
+        assert_eq!(
+            config.max_contention_retries,
+            DEFAULT_MAX_CONTENTION_RETRIES
+        );
         assert_eq!(config.base_backoff_micros, DEFAULT_BASE_BACKOFF_MICROS);
         assert!(config.use_jitter);
     }
 }
-

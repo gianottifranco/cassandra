@@ -33,18 +33,20 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use self::failure_detector::FailureDetector;
+use self::messages::{GossipDigest, GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
+use crate::node::Endpoint;
 use parking_lot::RwLock;
 use rand::seq::SliceRandom;
 use tracing::{debug, info, warn};
-use crate::node::Endpoint;
-use self::failure_detector::FailureDetector;
-use self::messages::{GossipDigest, GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
 
 /// Application states propagated through gossip.
 ///
 /// Each node advertises these states; peers learn them through the gossip
 /// protocol's SYN→ACK→ACK2 exchange.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum ApplicationState {
     /// Node lifecycle status (JOINING, NORMAL, LEAVING, etc.).
     Status,
@@ -235,11 +237,7 @@ pub struct Gossiper {
 
 impl Gossiper {
     /// Create a new Gossiper.
-    pub fn new(
-        local_endpoint: Endpoint,
-        seeds: SeedProvider,
-        generation: i64,
-    ) -> Self {
+    pub fn new(local_endpoint: Endpoint, seeds: SeedProvider, generation: i64) -> Self {
         let mut endpoint_states = HashMap::new();
         endpoint_states.insert(local_endpoint, EndpointState::new(generation));
 
@@ -537,7 +535,8 @@ impl Gossiper {
     /// Graceful shutdown: mark this node as leaving and stop gossiping.
     pub fn shutdown(&self) {
         self.set_local_state(ApplicationState::Status, "LEFT".to_string());
-        self.is_running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.is_running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
         info!(endpoint = %self.local_endpoint, "Gossiper shutdown");
     }
 
@@ -833,7 +832,10 @@ mod tests {
         let state = g.get_endpoint_state(&ep(7001)).unwrap();
         assert_eq!(state.status(), Some("NORMAL"));
         assert_eq!(
-            state.get_state(&ApplicationState::Datacenter).unwrap().value,
+            state
+                .get_state(&ApplicationState::Datacenter)
+                .unwrap()
+                .value,
             "dc1"
         );
     }
@@ -1049,17 +1051,26 @@ mod tests {
     fn new_application_states() {
         let g = make_gossiper(7001, vec![]);
         g.set_local_state(ApplicationState::StatusWithPort, "NORMAL,7001".to_string());
-        g.set_local_state(ApplicationState::NativeAddressAndPort, "127.0.0.1:9042".to_string());
+        g.set_local_state(
+            ApplicationState::NativeAddressAndPort,
+            "127.0.0.1:9042".to_string(),
+        );
         g.set_local_state(ApplicationState::NetVersion, "12".to_string());
         g.set_local_state(ApplicationState::DiskUsage, "45".to_string());
 
         let state = g.get_endpoint_state(&ep(7001)).unwrap();
         assert_eq!(
-            state.get_state(&ApplicationState::StatusWithPort).unwrap().value,
+            state
+                .get_state(&ApplicationState::StatusWithPort)
+                .unwrap()
+                .value,
             "NORMAL,7001"
         );
         assert_eq!(
-            state.get_state(&ApplicationState::NetVersion).unwrap().value,
+            state
+                .get_state(&ApplicationState::NetVersion)
+                .unwrap()
+                .value,
             "12"
         );
     }
@@ -1107,7 +1118,10 @@ mod tests {
         // Node 0 (dc1) should know node 5 is in dc2
         let state = nodes[0].get_endpoint_state(&ep(7006)).unwrap();
         assert_eq!(
-            state.get_state(&ApplicationState::Datacenter).unwrap().value,
+            state
+                .get_state(&ApplicationState::Datacenter)
+                .unwrap()
+                .value,
             "dc2"
         );
     }
@@ -1174,7 +1188,10 @@ mod tests {
         let state = g.get_endpoint_state(&ep(7002)).unwrap();
         assert_eq!(state.heartbeat.generation, 2);
         assert_eq!(
-            state.get_state(&ApplicationState::Datacenter).unwrap().value,
+            state
+                .get_state(&ApplicationState::Datacenter)
+                .unwrap()
+                .value,
             "new-dc"
         );
 

@@ -148,8 +148,12 @@ pub struct NoOpAuditLogger;
 
 impl AuditLogger for NoOpAuditLogger {
     fn log(&self, _event: &AuditEvent) {}
-    fn is_enabled(&self) -> bool { false }
-    fn name(&self) -> &str { "NoOpAuditLogger" }
+    fn is_enabled(&self) -> bool {
+        false
+    }
+    fn name(&self) -> &str {
+        "NoOpAuditLogger"
+    }
 }
 
 // ─── FileAuditLogger ──────────────────────────────────────────────────────
@@ -242,9 +246,7 @@ pub struct AsyncAuditLogger {
 impl AsyncAuditLogger {
     /// Create a new async audit logger wrapping the given sink.
     /// Returns the logger and a JoinHandle for the background drain task.
-    pub fn new(
-        sink: Box<dyn AuditLogger>,
-    ) -> (Self, tokio::task::JoinHandle<()>) {
+    pub fn new(sink: Box<dyn AuditLogger>) -> (Self, tokio::task::JoinHandle<()>) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AuditEvent>();
 
         let handle = tokio::spawn(async move {
@@ -371,12 +373,8 @@ mod tests {
         let logger = FileAuditLogger::new(dir.path().to_path_buf(), 10).unwrap();
 
         for i in 0..5 {
-            let event = AuditEvent::now(
-                AuditEventType::Query,
-                format!("user{}", i),
-                "10.0.0.1",
-            )
-            .with_query(format!("SELECT {}", i));
+            let event = AuditEvent::now(AuditEventType::Query, format!("user{}", i), "10.0.0.1")
+                .with_query(format!("SELECT {}", i));
             logger.log(&event);
         }
 
@@ -397,8 +395,8 @@ mod tests {
         let file_logger = FileAuditLogger::new(dir.path().to_path_buf(), 10).unwrap();
         let (async_logger, handle) = AsyncAuditLogger::new(Box::new(file_logger));
 
-        let event = AuditEvent::now(AuditEventType::DmlRead, "reader", "::1")
-            .with_query("SELECT * FROM t");
+        let event =
+            AuditEvent::now(AuditEventType::DmlRead, "reader", "::1").with_query("SELECT * FROM t");
         async_logger.log(event);
 
         // Drop the sender to signal shutdown

@@ -4,9 +4,9 @@
 //!
 //! Loads `cassandra.yaml`, applies environment overrides, and validates.
 
-use std::path::Path;
 use crate::config::CassandraConfig;
 use crate::validation::{self, ConfigError};
+use std::path::Path;
 
 /// Error loading configuration.
 #[derive(Debug)]
@@ -23,7 +23,9 @@ impl std::fmt::Display for LoadError {
             Self::Parse(e) => write!(f, "YAML parse error: {}", e),
             Self::Validation(errs) => {
                 write!(f, "{} validation error(s):", errs.len())?;
-                for e in errs { write!(f, "\n  - {}", e)?; }
+                for e in errs {
+                    write!(f, "\n  - {}", e)?;
+                }
                 Ok(())
             }
         }

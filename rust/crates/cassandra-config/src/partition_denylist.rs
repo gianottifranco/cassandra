@@ -58,10 +58,7 @@ impl PartitionDenylist {
     /// Add a partition key to the denylist.
     pub fn deny(&mut self, keyspace: &str, table: &str, partition_key: Vec<u8>) {
         let key = format!("{}.{}", keyspace, table);
-        self.entries
-            .entry(key)
-            .or_default()
-            .insert(partition_key);
+        self.entries.entry(key).or_default().insert(partition_key);
     }
 
     /// Remove a partition key from the denylist.

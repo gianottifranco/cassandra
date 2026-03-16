@@ -20,9 +20,9 @@
 //! - `org.apache.cassandra.transport.messages.ErrorMessage`
 //! - `org.apache.cassandra.exceptions.ExceptionCode`
 
-use cassandra_common::CassandraError;
 use crate::message::{ErrorDetail, ErrorMessage};
 use crate::types::Consistency;
+use cassandra_common::CassandraError;
 
 /// Convert a CassandraError into a protocol ErrorMessage.
 ///
@@ -45,7 +45,11 @@ pub fn error_to_message(err: &CassandraError) -> ErrorMessage {
             message: msg.clone(),
             detail: ErrorDetail::None,
         },
-        CassandraError::Unavailable { consistency, required, alive } => ErrorMessage {
+        CassandraError::Unavailable {
+            consistency,
+            required,
+            alive,
+        } => ErrorMessage {
             code: 0x1000,
             message: format!(
                 "Cannot achieve consistency level {}: not enough replicas alive ({}/{})",
@@ -72,7 +76,12 @@ pub fn error_to_message(err: &CassandraError) -> ErrorMessage {
             message: msg.clone(),
             detail: ErrorDetail::None,
         },
-        CassandraError::WriteTimeout { consistency, received, block_for, write_type } => ErrorMessage {
+        CassandraError::WriteTimeout {
+            consistency,
+            received,
+            block_for,
+            write_type,
+        } => ErrorMessage {
             code: 0x1100,
             message: format!(
                 "Operation timed out - received only {} responses, required {} for {}",
@@ -85,7 +94,12 @@ pub fn error_to_message(err: &CassandraError) -> ErrorMessage {
                 write_type: write_type.clone(),
             },
         },
-        CassandraError::ReadTimeout { consistency, received, block_for, data_present } => ErrorMessage {
+        CassandraError::ReadTimeout {
+            consistency,
+            received,
+            block_for,
+            data_present,
+        } => ErrorMessage {
             code: 0x1200,
             message: format!(
                 "Operation timed out - received only {} responses, required {} for {}",
@@ -186,7 +200,11 @@ mod tests {
         let msg = error_to_message(&err);
         assert_eq!(msg.code, 0x1000);
         match &msg.detail {
-            ErrorDetail::Unavailable { consistency, required, alive } => {
+            ErrorDetail::Unavailable {
+                consistency,
+                required,
+                alive,
+            } => {
                 assert_eq!(*consistency, Consistency::Quorum);
                 assert_eq!(*required, 2);
                 assert_eq!(*alive, 1);
@@ -237,7 +255,10 @@ mod tests {
     #[test]
     fn consistency_from_name() {
         assert_eq!(Consistency::from_name("QUORUM"), Some(Consistency::Quorum));
-        assert_eq!(Consistency::from_name("local_quorum"), Some(Consistency::LocalQuorum));
+        assert_eq!(
+            Consistency::from_name("local_quorum"),
+            Some(Consistency::LocalQuorum)
+        );
         assert_eq!(Consistency::from_name("INVALID"), None);
     }
 }

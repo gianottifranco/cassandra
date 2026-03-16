@@ -91,7 +91,10 @@ impl SSTableReader {
         }
 
         // 2. Binary search on index
-        let offset = match self.index.binary_search_by(|e| e.partition_key.as_slice().cmp(partition_key)) {
+        let offset = match self
+            .index
+            .binary_search_by(|e| e.partition_key.as_slice().cmp(partition_key))
+        {
             Ok(pos) => self.index[pos].data_offset,
             Err(_) => return Ok(None), // Not in index
         };
@@ -290,8 +293,8 @@ fn read_cell<R: Read>(reader: &mut R) -> io::Result<Cell> {
     let name_len = reader.read_u16::<BigEndian>()? as usize;
     let mut name_buf = vec![0u8; name_len];
     reader.read_exact(&mut name_buf)?;
-    let column = String::from_utf8(name_buf)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let column =
+        String::from_utf8(name_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     // Timestamp
     let timestamp = reader.read_i64::<BigEndian>()?;
@@ -373,10 +376,7 @@ mod tests {
         assert_eq!(p5.rows.len(), 3);
         let row = p5.rows.get(&vec![0u8]).unwrap();
         assert_eq!(row.cells[0].column, "name");
-        assert_eq!(
-            row.cells[0].value.as_deref(),
-            Some(b"value_5_0".as_slice())
-        );
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"value_5_0".as_slice()));
     }
 
     #[test]

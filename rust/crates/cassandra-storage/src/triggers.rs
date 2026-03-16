@@ -71,7 +71,10 @@ impl TriggerManager {
 
     /// Register a trigger. Stub — always returns error.
     pub fn register(&mut self, _def: TriggerDefinition) -> Result<(), String> {
-        Err("Triggers are not implemented. Feature is deferred (requires WASM/FFI plugin system).".to_string())
+        Err(
+            "Triggers are not implemented. Feature is deferred (requires WASM/FFI plugin system)."
+                .to_string(),
+        )
     }
 
     /// Check if any triggers exist for a table.

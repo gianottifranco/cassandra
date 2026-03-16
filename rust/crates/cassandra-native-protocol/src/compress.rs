@@ -58,9 +58,9 @@ impl Compression {
             #[cfg(feature = "compression-snappy")]
             Compression::Snappy => {
                 let mut encoder = snap::raw::Encoder::new();
-                encoder.compress_vec(data).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::Other, e)
-                })
+                encoder
+                    .compress_vec(data)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
             }
             #[allow(unreachable_patterns)]
             _ => Err(std::io::Error::new(
@@ -87,16 +87,15 @@ impl Compression {
                     return Ok(Vec::new());
                 }
                 let compressed = &data[4..];
-                lz4_flex::decompress(compressed, uncompressed_size).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                })
+                lz4_flex::decompress(compressed, uncompressed_size)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             }
             #[cfg(feature = "compression-snappy")]
             Compression::Snappy => {
                 let mut decoder = snap::raw::Decoder::new();
-                decoder.decompress_vec(data).map_err(|e| {
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-                })
+                decoder
+                    .decompress_vec(data)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
             }
             #[allow(unreachable_patterns)]
             _ => Err(std::io::Error::new(

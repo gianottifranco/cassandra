@@ -20,10 +20,10 @@
 //! - `org.apache.cassandra.transport.messages.ResultMessage`
 //! - `org.apache.cassandra.transport.messages.ErrorMessage`
 
-use bytes::BytesMut;
 use crate::frame::{self, Frame, Opcode};
 use crate::message::*;
 use crate::types;
+use bytes::BytesMut;
 
 /// Encode a response Message into a Frame.
 pub fn encode_response(msg: &Message, version: u8, stream_id: i16) -> Frame {
@@ -59,17 +59,17 @@ pub fn encode_response(msg: &Message, version: u8, stream_id: i16) -> Frame {
             Opcode::AuthChallenge
         }
         Message::AuthSuccess(token) => {
-            types::write_bytes_opt(
-                &mut body,
-                token.as_deref(),
-            );
+            types::write_bytes_opt(&mut body, token.as_deref());
             Opcode::AuthSuccess
         }
         _ => {
             // Request messages should not be encoded as responses.
             // Return an ERROR frame for this case.
             types::write_int(&mut body, 0x0000); // SERVER_ERROR
-            types::write_string(&mut body, "Internal: attempted to encode request as response");
+            types::write_string(
+                &mut body,
+                "Internal: attempted to encode request as response",
+            );
             Opcode::Error
         }
     };
@@ -194,18 +194,32 @@ fn encode_error(err: &ErrorMessage, buf: &mut BytesMut) {
 
     match &err.detail {
         ErrorDetail::None => {}
-        ErrorDetail::Unavailable { consistency, required, alive } => {
+        ErrorDetail::Unavailable {
+            consistency,
+            required,
+            alive,
+        } => {
             types::write_consistency(buf, *consistency);
             types::write_int(buf, *required);
             types::write_int(buf, *alive);
         }
-        ErrorDetail::WriteTimeout { consistency, received, block_for, write_type } => {
+        ErrorDetail::WriteTimeout {
+            consistency,
+            received,
+            block_for,
+            write_type,
+        } => {
             types::write_consistency(buf, *consistency);
             types::write_int(buf, *received);
             types::write_int(buf, *block_for);
             types::write_string(buf, write_type);
         }
-        ErrorDetail::ReadTimeout { consistency, received, block_for, data_present } => {
+        ErrorDetail::ReadTimeout {
+            consistency,
+            received,
+            block_for,
+            data_present,
+        } => {
             types::write_consistency(buf, *consistency);
             types::write_int(buf, *received);
             types::write_int(buf, *block_for);
@@ -413,9 +427,7 @@ mod tests {
                 col_type: ColumnType::Varchar,
             },
         ];
-        let rows = vec![
-            vec![Some(vec![0u8; 16]), Some(b"Alice".to_vec())],
-        ];
+        let rows = vec![vec![Some(vec![0u8; 16]), Some(b"Alice".to_vec())]];
         let frame = rows_result_frame(0x04, 0, "ks", "users", specs, rows);
         assert_eq!(frame.header.opcode, Opcode::Result);
 

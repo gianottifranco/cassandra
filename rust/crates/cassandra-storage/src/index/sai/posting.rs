@@ -96,8 +96,7 @@ impl PostingList {
 
     /// Serialize to bytes (for on-disk persistence).
     pub fn serialize(&self) -> Vec<u8> {
-        serde_json::to_vec(&self.locations)
-            .expect("PostingList serialization should never fail")
+        serde_json::to_vec(&self.locations).expect("PostingList serialization should never fail")
     }
 
     /// Deserialize from bytes.
@@ -125,7 +124,11 @@ mod tests {
         pl.add(b"a".to_vec(), b"".to_vec());
         pl.add(b"b".to_vec(), b"".to_vec());
 
-        let pks: Vec<&[u8]> = pl.locations().iter().map(|l| l.partition_key.as_slice()).collect();
+        let pks: Vec<&[u8]> = pl
+            .locations()
+            .iter()
+            .map(|l| l.partition_key.as_slice())
+            .collect();
         assert_eq!(pks, vec![b"a".as_slice(), b"b", b"c"]);
     }
 

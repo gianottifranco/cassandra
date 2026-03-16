@@ -69,11 +69,7 @@ impl OperationTracker {
     }
 
     /// Register a new operation.
-    pub fn register(
-        &self,
-        operation_type: OperationType,
-        description: impl Into<String>,
-    ) -> Uuid {
+    pub fn register(&self, operation_type: OperationType, description: impl Into<String>) -> Uuid {
         let id = Uuid::new_v4();
         self.operations.write().insert(
             id,

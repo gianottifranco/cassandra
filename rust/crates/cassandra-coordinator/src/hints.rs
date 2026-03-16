@@ -24,15 +24,15 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
-use cassandra_cluster_metadata::Endpoint;
 use crate::write::CoordinatedMutation;
+use cassandra_cluster_metadata::Endpoint;
 
 // ─── Configuration ───────────────────────────────────────────────
 
@@ -181,7 +181,9 @@ impl HintStore {
                 max = self.config.max_total_hints,
                 "Total hint capacity exceeded, dropping hint"
             );
-            self.metrics.hints_dropped_overflow.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .hints_dropped_overflow
+                .fetch_add(1, Ordering::Relaxed);
             return false;
         }
 
@@ -204,7 +206,9 @@ impl HintStore {
         if queue.len() >= self.config.max_hints_per_endpoint {
             queue.pop_front(); // Drop oldest hint
             debug!(target = %target, "Hint store full for endpoint, dropping oldest");
-            self.metrics.hints_dropped_overflow.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .hints_dropped_overflow
+                .fetch_add(1, Ordering::Relaxed);
         } else {
             self.total_hints.fetch_add(1, Ordering::Relaxed);
         }
@@ -239,7 +243,9 @@ impl HintStore {
 
             let expired_count = expired.len() as u64;
             if expired_count > 0 {
-                self.metrics.hints_expired.fetch_add(expired_count, Ordering::Relaxed);
+                self.metrics
+                    .hints_expired
+                    .fetch_add(expired_count, Ordering::Relaxed);
                 debug!(
                     target = %target,
                     expired = expired_count,
@@ -248,10 +254,8 @@ impl HintStore {
             }
 
             let live_count = live.len() as u64;
-            self.total_hints.fetch_sub(
-                live_count + expired_count,
-                Ordering::Relaxed,
-            );
+            self.total_hints
+                .fetch_sub(live_count + expired_count, Ordering::Relaxed);
 
             info!(target = %target, count = live_count, "Draining hints for replay");
             live
@@ -262,11 +266,7 @@ impl HintStore {
 
     /// Number of pending hints for a target.
     pub fn hint_count(&self, target: &Endpoint) -> usize {
-        self.hints
-            .read()
-            .get(target)
-            .map(|q| q.len())
-            .unwrap_or(0)
+        self.hints.read().get(target).map(|q| q.len()).unwrap_or(0)
     }
 
     /// Total number of stored hints across all targets.
@@ -337,7 +337,9 @@ impl HintStore {
 
         if total_purged > 0 {
             self.total_hints.fetch_sub(total_purged, Ordering::Relaxed);
-            self.metrics.hints_expired.fetch_add(total_purged, Ordering::Relaxed);
+            self.metrics
+                .hints_expired
+                .fetch_add(total_purged, Ordering::Relaxed);
             info!(purged = total_purged, "Purged expired hints");
         }
 
@@ -398,12 +400,16 @@ impl HintedHandoffManager {
         if !self.config.enabled {
             return Vec::new();
         }
-        
+
         let mut valid_hints = Vec::new();
         for hint in self.store.drain_hints(target) {
             let ks = &hint.mutation.keyspace;
             if let Some(strategy) = strategies.get(ks) {
-                let replicas = snapshot.replicas_for_key(&hint.mutation.partition_key, strategy.as_ref(), snitch);
+                let replicas = snapshot.replicas_for_key(
+                    &hint.mutation.partition_key,
+                    strategy.as_ref(),
+                    snitch,
+                );
                 if replicas.contains(target) {
                     valid_hints.push(hint);
                 } else {
@@ -419,7 +425,7 @@ impl HintedHandoffManager {
                 valid_hints.push(hint);
             }
         }
-        
+
         valid_hints
     }
 
@@ -575,9 +581,11 @@ mod tests {
 
     #[test]
     fn manager_node_recovered() {
-        use cassandra_cluster_metadata::{ClusterMetadata, NodeId, NodeInfo, SimpleStrategy, SimpleSnitch};
+        use cassandra_cluster_metadata::{
+            ClusterMetadata, NodeId, NodeInfo, SimpleSnitch, SimpleStrategy,
+        };
         use cassandra_common::Token;
-        
+
         let mgr = HintedHandoffManager::new(HintConfig::default());
         mgr.store().store_hint(ep(7002), test_mutation());
         mgr.store().store_hint(ep(7002), test_mutation());
@@ -594,7 +602,10 @@ mod tests {
         let cm = ClusterMetadata::new(node);
         let snapshot = cm.snapshot();
         let snitch = SimpleSnitch;
-        let mut strategies: HashMap<String, Box<dyn cassandra_cluster_metadata::ReplicationStrategy>> = HashMap::new();
+        let mut strategies: HashMap<
+            String,
+            Box<dyn cassandra_cluster_metadata::ReplicationStrategy>,
+        > = HashMap::new();
         strategies.insert("ks".to_string(), Box::new(SimpleStrategy::new(1)));
 
         let hints = mgr.on_node_recovered(&ep(7002), &snapshot, &snitch, &strategies);

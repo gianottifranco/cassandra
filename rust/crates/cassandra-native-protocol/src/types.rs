@@ -23,11 +23,11 @@
 //! - `org.apache.cassandra.transport.CBUtil`
 //! - `org.apache.cassandra.transport.DataType`
 
+use byteorder::{BigEndian, ReadBytesExt};
+use bytes::{BufMut, BytesMut};
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use byteorder::{BigEndian, ReadBytesExt};
-use bytes::{BufMut, BytesMut};
 
 /// Read a protocol [int] (4-byte signed big-endian).
 pub fn read_int(cursor: &mut &[u8]) -> io::Result<i32> {
@@ -140,7 +140,12 @@ pub fn read_inet(cursor: &mut &[u8]) -> io::Result<(IpAddr, u32)> {
             cursor.read_exact(&mut b)?;
             IpAddr::V6(Ipv6Addr::from(b))
         }
-        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, format!("invalid inet size: {}", size))),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("invalid inet size: {}", size),
+            ));
+        }
     };
     let port = read_int(cursor)? as u32;
     Ok((addr, port))
@@ -177,7 +182,10 @@ impl Consistency {
             0x0008 => Ok(Consistency::Serial),
             0x0009 => Ok(Consistency::LocalSerial),
             0x000A => Ok(Consistency::LocalOne),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("unknown consistency: 0x{:04X}", v))),
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unknown consistency: 0x{:04X}", v),
+            )),
         }
     }
 

@@ -12,10 +12,10 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use cassandra_cluster_metadata::Endpoint;
-use cassandra_common::Token;
 use crate::coordinator::RepairType;
 use crate::merkle::MerkleTree;
+use cassandra_cluster_metadata::Endpoint;
+use cassandra_common::Token;
 
 /// Unique repair session identifier.
 pub type RepairSessionId = Uuid;
@@ -222,7 +222,8 @@ mod tests {
         let mut s = RepairSession::new(
             Uuid::new_v4(),
             RepairType::Full,
-            "ks", "t1",
+            "ks",
+            "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![ep(7001), ep(7002)],
         );
@@ -241,7 +242,8 @@ mod tests {
         let mut s = RepairSession::new(
             Uuid::new_v4(),
             RepairType::Full,
-            "ks", "t1",
+            "ks",
+            "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![ep(7001)],
         );
@@ -258,7 +260,8 @@ mod tests {
         let mut s = RepairSession::new(
             Uuid::new_v4(),
             RepairType::Full,
-            "ks", "t1",
+            "ks",
+            "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![ep(7001)],
         );
@@ -273,7 +276,8 @@ mod tests {
         let mut s = RepairSession::new(
             Uuid::new_v4(),
             RepairType::Full,
-            "ks", "t1",
+            "ks",
+            "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![],
         );

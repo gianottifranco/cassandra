@@ -390,4 +390,3 @@ mod tests {
         assert!(dot.abs() < f32::EPSILON);
     }
 }
-

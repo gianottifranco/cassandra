@@ -35,6 +35,7 @@ members = [
     "crates/cassandra-tools",
     "crates/cassandra-diff-tests",
     "xtask", "crates/cassandra-accord",
+    "crates/cassandra-migration",
 ]
 
 [workspace.package]

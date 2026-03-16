@@ -2,8 +2,8 @@
 
 //! Admin benchmarks: metrics gathering overhead.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use cassandra_admin::prometheus_metrics::MetricsRegistry;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_metrics_gather(c: &mut Criterion) {
     let registry = MetricsRegistry::new();
@@ -43,5 +43,10 @@ fn bench_latency_observe(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_metrics_gather, bench_metrics_increment, bench_latency_observe);
+criterion_group!(
+    benches,
+    bench_metrics_gather,
+    bench_metrics_increment,
+    bench_latency_observe
+);
 criterion_main!(benches);

@@ -63,10 +63,7 @@ impl SSTableWriter {
 
     /// Write all partitions to disk. Partitions MUST be sorted by key.
     /// Returns statistics about the written SSTable.
-    pub fn write(
-        &self,
-        partitions: &[(Vec<u8>, PartitionData)],
-    ) -> io::Result<SSTableStats> {
+    pub fn write(&self, partitions: &[(Vec<u8>, PartitionData)]) -> io::Result<SSTableStats> {
         fs::create_dir_all(&self.descriptor.directory)?;
 
         let mut stats = SSTableStats {

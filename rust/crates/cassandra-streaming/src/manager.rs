@@ -126,11 +126,7 @@ impl StreamManager {
 
     /// Get a summary of all active sessions.
     pub fn active_sessions(&self) -> Vec<SessionSummary> {
-        self.sessions
-            .read()
-            .values()
-            .map(|s| s.summary())
-            .collect()
+        self.sessions.read().values().map(|s| s.summary()).collect()
     }
 
     /// Get summaries of sessions involving a specific peer.

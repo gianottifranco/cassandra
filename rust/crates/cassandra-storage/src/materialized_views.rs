@@ -148,11 +148,7 @@ impl ViewManager {
     }
 
     /// Get view definitions for a base table.
-    pub fn get_views_for(
-        &self,
-        keyspace: &str,
-        table: &str,
-    ) -> Vec<MaterializedViewDefinition> {
+    pub fn get_views_for(&self, keyspace: &str, table: &str) -> Vec<MaterializedViewDefinition> {
         self.views
             .read()
             .get(&(keyspace.to_string(), table.to_string()))
@@ -341,14 +337,7 @@ mod tests {
         columns.insert("name".to_string(), Some(b"Alice".to_vec()));
         columns.insert("age".to_string(), Some(b"30".to_vec())); // not in view
 
-        let result = mgr.generate_view_updates(
-            "ks",
-            "users",
-            b"user1",
-            &columns,
-            1000,
-            false,
-        );
+        let result = mgr.generate_view_updates("ks", "users", b"user1", &columns, 1000, false);
 
         assert!(!result.had_errors);
         assert_eq!(result.mutations.len(), 1);
@@ -368,14 +357,7 @@ mod tests {
         mgr.register(test_view_def()).unwrap();
 
         let columns = HashMap::new();
-        let result = mgr.generate_view_updates(
-            "ks",
-            "users",
-            b"user1",
-            &columns,
-            1000,
-            true,
-        );
+        let result = mgr.generate_view_updates("ks", "users", b"user1", &columns, 1000, true);
 
         assert_eq!(result.mutations.len(), 1);
         assert!(result.mutations[0].is_delete);
@@ -386,14 +368,7 @@ mod tests {
         let mgr = ViewManager::new();
 
         let columns = HashMap::new();
-        let result = mgr.generate_view_updates(
-            "ks",
-            "users",
-            b"user1",
-            &columns,
-            1000,
-            false,
-        );
+        let result = mgr.generate_view_updates("ks", "users", b"user1", &columns, 1000, false);
 
         assert!(result.mutations.is_empty());
     }
@@ -421,14 +396,7 @@ mod tests {
         columns.insert("email".to_string(), Some(b"alice@example.com".to_vec()));
         columns.insert("age".to_string(), Some(b"30".to_vec()));
 
-        let result = mgr.generate_view_updates(
-            "ks",
-            "users",
-            b"user1",
-            &columns,
-            1000,
-            false,
-        );
+        let result = mgr.generate_view_updates("ks", "users", b"user1", &columns, 1000, false);
 
         let vm = &result.mutations[0];
         assert!(vm.columns.contains_key("email"));

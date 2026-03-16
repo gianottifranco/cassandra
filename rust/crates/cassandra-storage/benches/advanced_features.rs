@@ -1,7 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 //! Criterion benchmarks for advanced features: counters, SAI, vectors.
 
-use criterion::{criterion_group, criterion_main, Criterion, black_box};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use uuid::Uuid;
 
 fn node(n: u8) -> Uuid {
@@ -107,8 +107,16 @@ mod sai_benches {
             let mut b1 = SaiSegmentBuilder::new(1, "idx", "col");
             let mut b2 = SaiSegmentBuilder::new(2, "idx", "col");
             for i in 0u32..100 {
-                b1.add(i.to_be_bytes().to_vec(), format!("pk_{i}").into_bytes(), vec![]);
-                b2.add((i + 50).to_be_bytes().to_vec(), format!("pk2_{i}").into_bytes(), vec![]);
+                b1.add(
+                    i.to_be_bytes().to_vec(),
+                    format!("pk_{i}").into_bytes(),
+                    vec![],
+                );
+                b2.add(
+                    (i + 50).to_be_bytes().to_vec(),
+                    format!("pk2_{i}").into_bytes(),
+                    vec![],
+                );
             }
             let s1 = b1.build();
             let s2 = b2.build();

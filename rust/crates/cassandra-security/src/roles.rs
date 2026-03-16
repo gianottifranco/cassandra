@@ -79,15 +79,33 @@ pub trait RoleManager: Send + Sync {
 }
 
 impl<T: ?Sized + RoleManager> RoleManager for std::sync::Arc<T> {
-    fn create_role(&self, role: Role) { (**self).create_role(role) }
-    fn alter_role(&self, name: &str, options: RoleOptions) -> Result<(), SecurityError> { (**self).alter_role(name, options) }
-    fn drop_role(&self, name: &str) -> Result<(), SecurityError> { (**self).drop_role(name) }
-    fn get_role(&self, name: &str) -> Option<Role> { (**self).get_role(name) }
-    fn list_roles(&self) -> Vec<Role> { (**self).list_roles() }
-    fn grant_role(&self, role: &str, grantee: &str) -> Result<(), SecurityError> { (**self).grant_role(role, grantee) }
-    fn revoke_role(&self, role: &str, grantee: &str) -> Result<(), SecurityError> { (**self).revoke_role(role, grantee) }
-    fn get_all_roles(&self, name: &str) -> Vec<String> { (**self).get_all_roles(name) }
-    fn role_exists(&self, name: &str) -> bool { (**self).role_exists(name) }
+    fn create_role(&self, role: Role) {
+        (**self).create_role(role)
+    }
+    fn alter_role(&self, name: &str, options: RoleOptions) -> Result<(), SecurityError> {
+        (**self).alter_role(name, options)
+    }
+    fn drop_role(&self, name: &str) -> Result<(), SecurityError> {
+        (**self).drop_role(name)
+    }
+    fn get_role(&self, name: &str) -> Option<Role> {
+        (**self).get_role(name)
+    }
+    fn list_roles(&self) -> Vec<Role> {
+        (**self).list_roles()
+    }
+    fn grant_role(&self, role: &str, grantee: &str) -> Result<(), SecurityError> {
+        (**self).grant_role(role, grantee)
+    }
+    fn revoke_role(&self, role: &str, grantee: &str) -> Result<(), SecurityError> {
+        (**self).revoke_role(role, grantee)
+    }
+    fn get_all_roles(&self, name: &str) -> Vec<String> {
+        (**self).get_all_roles(name)
+    }
+    fn role_exists(&self, name: &str) -> bool {
+        (**self).role_exists(name)
+    }
 }
 
 // ─── InMemoryRoleManager ──────────────────────────────────────────────────

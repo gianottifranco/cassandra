@@ -6,8 +6,8 @@
 //! - `org.apache.cassandra.config.Config`
 //! - `conf/cassandra.yaml`
 
-use serde::Deserialize;
 use crate::units::{DataSize, Duration};
+use serde::Deserialize;
 
 /// Core Cassandra configuration loaded from `cassandra.yaml`.
 ///
@@ -261,23 +261,57 @@ pub struct FqlConfig {
 
 /// Default values matching Java's Config class.
 pub mod defaults {
-    pub fn cluster_name() -> String { "Test Cluster".to_string() }
-    pub fn num_tokens() -> u32 { 16 }
-    pub fn partitioner() -> String { "org.apache.cassandra.dht.Murmur3Partitioner".to_string() }
-    pub fn storage_port() -> u16 { 7000 }
-    pub fn ssl_storage_port() -> u16 { 7001 }
-    pub fn native_transport_port() -> u16 { 9042 }
-    pub fn concurrent_reads() -> u32 { 32 }
-    pub fn concurrent_writes() -> u32 { 32 }
-    pub fn concurrent_counter_writes() -> u32 { 32 }
-    pub fn concurrent_materialized_view_writes() -> u32 { 32 }
-    pub fn hinted_handoff_enabled() -> bool { true }
-    pub fn max_hints_delivery_threads() -> u32 { 2 }
-    pub fn commitlog_sync() -> String { "periodic".to_string() }
-    pub fn disk_failure_policy() -> String { "stop".to_string() }
-    pub fn commit_failure_policy() -> String { "stop".to_string() }
-    pub fn admin_port() -> u16 { 9090 }
-    pub fn audit_logger() -> String { "FileAuditLogger".to_string() }
+    pub fn cluster_name() -> String {
+        "Test Cluster".to_string()
+    }
+    pub fn num_tokens() -> u32 {
+        16
+    }
+    pub fn partitioner() -> String {
+        "org.apache.cassandra.dht.Murmur3Partitioner".to_string()
+    }
+    pub fn storage_port() -> u16 {
+        7000
+    }
+    pub fn ssl_storage_port() -> u16 {
+        7001
+    }
+    pub fn native_transport_port() -> u16 {
+        9042
+    }
+    pub fn concurrent_reads() -> u32 {
+        32
+    }
+    pub fn concurrent_writes() -> u32 {
+        32
+    }
+    pub fn concurrent_counter_writes() -> u32 {
+        32
+    }
+    pub fn concurrent_materialized_view_writes() -> u32 {
+        32
+    }
+    pub fn hinted_handoff_enabled() -> bool {
+        true
+    }
+    pub fn max_hints_delivery_threads() -> u32 {
+        2
+    }
+    pub fn commitlog_sync() -> String {
+        "periodic".to_string()
+    }
+    pub fn disk_failure_policy() -> String {
+        "stop".to_string()
+    }
+    pub fn commit_failure_policy() -> String {
+        "stop".to_string()
+    }
+    pub fn admin_port() -> u16 {
+        9090
+    }
+    pub fn audit_logger() -> String {
+        "FileAuditLogger".to_string()
+    }
 }
 
 impl Default for CassandraConfig {

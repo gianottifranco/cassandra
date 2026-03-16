@@ -56,7 +56,10 @@ pub fn validate(config: &CassandraConfig) -> Vec<ConfigError> {
     for (name, val) in [
         ("concurrent_reads", config.concurrent_reads),
         ("concurrent_writes", config.concurrent_writes),
-        ("concurrent_counter_writes", config.concurrent_counter_writes),
+        (
+            "concurrent_counter_writes",
+            config.concurrent_counter_writes,
+        ),
     ] {
         if val == 0 {
             errors.push(ConfigError {
@@ -72,7 +75,10 @@ pub fn validate(config: &CassandraConfig) -> Vec<ConfigError> {
         other => {
             errors.push(ConfigError {
                 field: "commitlog_sync".into(),
-                message: format!("invalid commitlog_sync mode: '{}' (expected periodic|batch|group)", other),
+                message: format!(
+                    "invalid commitlog_sync mode: '{}' (expected periodic|batch|group)",
+                    other
+                ),
             });
         }
     }

@@ -35,34 +35,38 @@
 //! - [`cluster`] — immutable cluster snapshot (Arc-swapped)
 //! - [`tcm`] — Transactional Cluster Metadata (epoch-based metadata log)
 
+pub mod cluster;
+pub mod gossip;
 pub mod node;
+pub mod replication;
 pub mod ring;
 pub mod snitch;
-pub mod replication;
-pub mod gossip;
-pub mod cluster;
-pub mod topology;
 pub mod tcm;
+pub mod topology;
 
 // Re-exports for ergonomic usage.
-pub use node::{Endpoint, NodeId, NodeInfo, NodeState};
-pub use ring::TokenRing;
-pub use snitch::{
-    Snitch, SimpleSnitch, PropertyFileSnitch, GossipingPropertyFileSnitch,
-    DynamicEndpointSnitch, RackInferringSnitch, Ec2Snitch, create_snitch,
-};
-pub use replication::{
-    ReplicationStrategy, SimpleStrategy, NetworkTopologyStrategy,
-    LocalStrategy, EverywhereStrategy, TransientReplicationStrategy,
-    create_strategy,
-};
+pub use cluster::{ClusterMetadata, ClusterSnapshot};
+pub use gossip::failure_detector::FailureDetector;
+pub use gossip::messages::{GossipDigest, GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
 pub use gossip::{
     ApplicationState, EndpointState, Gossiper, HeartbeatState, SeedProvider, VersionedValue,
 };
-pub use gossip::failure_detector::FailureDetector;
-pub use gossip::messages::{GossipDigest, GossipDigestSyn, GossipDigestAck, GossipDigestAck2};
-pub use cluster::{ClusterMetadata, ClusterSnapshot};
-pub use topology::{TopologyCoordinator, TopologyOperation, TopologyState, TopologyError, StreamPlanDescriptor, StreamRangeRequest};
-pub use tcm::{Epoch, MetadataLog, NodeDirectory, Placement, LockedRanges, TcmMetadata, TcmError, Transformation};
-pub use tcm::bridge::{ControlPlaneMode, ControlPlaneBridge};
-
+pub use node::{Endpoint, NodeId, NodeInfo, NodeState};
+pub use replication::{
+    EverywhereStrategy, LocalStrategy, NetworkTopologyStrategy, ReplicationStrategy,
+    SimpleStrategy, TransientReplicationStrategy, create_strategy,
+};
+pub use ring::TokenRing;
+pub use snitch::{
+    DynamicEndpointSnitch, Ec2Snitch, GossipingPropertyFileSnitch, PropertyFileSnitch,
+    RackInferringSnitch, SimpleSnitch, Snitch, create_snitch,
+};
+pub use tcm::bridge::{ControlPlaneBridge, ControlPlaneMode};
+pub use tcm::{
+    Epoch, LockedRanges, MetadataLog, NodeDirectory, Placement, TcmError, TcmMetadata,
+    Transformation,
+};
+pub use topology::{
+    StreamPlanDescriptor, StreamRangeRequest, TopologyCoordinator, TopologyError,
+    TopologyOperation, TopologyState,
+};

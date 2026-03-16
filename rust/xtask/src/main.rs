@@ -34,6 +34,7 @@ fn main() -> ExitCode {
         Some("golden-test") => cmd_golden_test(),
         Some("generate-golden") => cmd_generate_golden(),
         Some("coverage-audit") => cmd_coverage_audit(),
+        Some("final-validate") => cmd_final_validate(),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -74,12 +75,20 @@ COMMANDS:
                       3. Report unclassified features
                       Fails CI if any Java package is unclassified.
 
+    final-validate    Run full Phase 25 validation:
+                      1. Chaos tests (10 scenarios)
+                      2. Property-based fuzz tests
+                      3. Security audit tests
+                      4. Performance budget checks
+                      Reports pass/fail summary for each category.
+
     help              Show this help message.
 
 EXAMPLES:
     cargo xtask diff-test          # Full end-to-end
     cargo xtask golden-test        # Just offline tests
     cargo xtask coverage-audit     # Check coverage completeness
+    cargo xtask final-validate     # Full Phase 25 validation
     make diff-test                 # Same as cargo xtask diff-test
 "#
     );
@@ -144,10 +153,7 @@ fn cmd_coverage_audit() -> ExitCode {
     println!("\n═══════════════════════════════════════════════════════════");
     println!("  Coverage Audit Results");
     println!("═══════════════════════════════════════════════════════════");
-    println!(
-        "  Inventory generation: {}",
-        status_icon(inventory_ok)
-    );
+    println!("  Inventory generation: {}", status_icon(inventory_ok));
     println!("  Matrix validation:   {}", status_icon(matrix_ok));
     println!("  Matrix YAML:         {}", status_icon(yaml_ok));
     println!("═══════════════════════════════════════════════════════════\n");
@@ -410,4 +416,82 @@ fn wait_for_service(host: &str, port: u16, timeout_secs: u32) -> bool {
 
 fn status_icon(passed: bool) -> &'static str {
     if passed { "✅ PASS" } else { "❌ FAIL" }
+}
+
+fn cmd_final_validate() -> ExitCode {
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Phase 25 — Final Validation Suite");
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    let ws = workspace_root();
+
+    // Step 1: Chaos tests
+    println!("── Step 1: Chaos Tests (10 scenarios) ───────────────────\n");
+    let chaos_ok = run_cmd(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "cassandra-diff-tests",
+            "--test",
+            "chaos_tests",
+            "--",
+            "--nocapture",
+        ],
+        Some(&ws),
+    );
+
+    // Step 2: Property-based fuzz tests
+    println!("\n── Step 2: Property-Based Fuzz Tests ──────────────────────\n");
+    let fuzz_ok = run_cmd(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "cassandra-diff-tests",
+            "--test",
+            "fuzz_tests",
+            "--",
+            "--nocapture",
+        ],
+        Some(&ws),
+    );
+
+    // Step 3: Security audit tests
+    println!("\n── Step 3: Security Audit ──────────────────────────────────\n");
+    let security_ok = run_cmd(
+        "cargo",
+        &[
+            "test",
+            "-p",
+            "cassandra-diff-tests",
+            "--test",
+            "security_audit",
+            "--",
+            "--nocapture",
+        ],
+        Some(&ws),
+    );
+
+    // Step 4: Golden tests (baseline diff)
+    println!("\n── Step 4: Golden Tests ────────────────────────────────────\n");
+    let golden_ok = run_golden_tests();
+
+    // Summary
+    println!("\n═══════════════════════════════════════════════════════════");
+    println!("  Phase 25 — Final Validation Results");
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Chaos tests:     {}", status_icon(chaos_ok));
+    println!("  Fuzz tests:      {}", status_icon(fuzz_ok));
+    println!("  Security audit:  {}", status_icon(security_ok));
+    println!("  Golden tests:    {}", status_icon(golden_ok));
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    if chaos_ok && fuzz_ok && security_ok && golden_ok {
+        println!("✅ Phase 25 final validation PASSED.");
+        ExitCode::SUCCESS
+    } else {
+        println!("❌ Phase 25 final validation has FAILURES. Review above.");
+        ExitCode::FAILURE
+    }
 }

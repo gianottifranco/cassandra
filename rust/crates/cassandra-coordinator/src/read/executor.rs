@@ -86,7 +86,10 @@ pub fn compute_execution_plan(
     percentile_latency_ms: impl Fn(f64) -> u64,
 ) -> ReadExecutionPlan {
     assert!(!sorted_replicas.is_empty(), "Need at least one replica");
-    assert!(required <= sorted_replicas.len(), "Not enough replicas for CL");
+    assert!(
+        required <= sorted_replicas.len(),
+        "Not enough replicas for CL"
+    );
 
     let data_replica = sorted_replicas[0];
     let digest_end = required.min(sorted_replicas.len());
@@ -133,12 +136,7 @@ mod tests {
     #[test]
     fn never_speculating_executor() {
         let replicas = vec![ep(7001), ep(7002), ep(7003)];
-        let plan = compute_execution_plan(
-            &replicas,
-            2,
-            &SpeculativeRetryPolicy::None,
-            |_| 100,
-        );
+        let plan = compute_execution_plan(&replicas, 2, &SpeculativeRetryPolicy::None, |_| 100);
         assert_eq!(plan.data_replica, ep(7001));
         assert_eq!(plan.digest_replicas.len(), 1);
         assert!(plan.speculative_replica.is_none());
@@ -148,12 +146,7 @@ mod tests {
     #[test]
     fn always_speculating_executor() {
         let replicas = vec![ep(7001), ep(7002), ep(7003)];
-        let plan = compute_execution_plan(
-            &replicas,
-            2,
-            &SpeculativeRetryPolicy::Always,
-            |_| 100,
-        );
+        let plan = compute_execution_plan(&replicas, 2, &SpeculativeRetryPolicy::Always, |_| 100);
         assert_eq!(plan.data_replica, ep(7001));
         assert_eq!(plan.digest_replicas.len(), 1);
         assert_eq!(plan.speculative_replica, Some(ep(7003)));
@@ -176,12 +169,7 @@ mod tests {
     #[test]
     fn no_speculation_when_not_enough_replicas() {
         let replicas = vec![ep(7001), ep(7002)];
-        let plan = compute_execution_plan(
-            &replicas,
-            2,
-            &SpeculativeRetryPolicy::Always,
-            |_| 100,
-        );
+        let plan = compute_execution_plan(&replicas, 2, &SpeculativeRetryPolicy::Always, |_| 100);
         // No extra replica available for speculation
         assert!(plan.speculative_replica.is_none());
     }
@@ -189,12 +177,7 @@ mod tests {
     #[test]
     fn cl_one_uses_single_replica() {
         let replicas = vec![ep(7001), ep(7002), ep(7003)];
-        let plan = compute_execution_plan(
-            &replicas,
-            1,
-            &SpeculativeRetryPolicy::None,
-            |_| 100,
-        );
+        let plan = compute_execution_plan(&replicas, 1, &SpeculativeRetryPolicy::None, |_| 100);
         assert_eq!(plan.data_replica, ep(7001));
         assert!(plan.digest_replicas.is_empty());
     }
@@ -214,7 +197,9 @@ mod tests {
             ReadExecutorType::Speculating,
         );
         assert_eq!(
-            ReadExecutorType::from_policy(&SpeculativeRetryPolicy::FixedDelay(Duration::from_millis(50))),
+            ReadExecutorType::from_policy(&SpeculativeRetryPolicy::FixedDelay(
+                Duration::from_millis(50)
+            )),
             ReadExecutorType::Speculating,
         );
     }

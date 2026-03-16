@@ -30,21 +30,21 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use dashmap::DashMap;
+use futures_util::{SinkExt, StreamExt};
 use parking_lot::RwLock;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 use tokio_util::codec::{FramedRead, FramedWrite};
-use futures_util::{SinkExt, StreamExt};
 use tracing::{debug, error, info, warn};
 
 use cassandra_security::tls::ReloadableTlsAcceptor;
-use tokio_rustls::TlsConnector;
 use rustls::pki_types::ServerName;
+use tokio_rustls::TlsConnector;
 
 use crate::frame::{Message, MessageCodec};
 use crate::metrics::MessagingMetrics;
@@ -117,11 +117,7 @@ impl MessagingService {
     }
 
     /// Configure TLS for the messaging service.
-    pub fn with_tls(
-        mut self,
-        acceptor: ReloadableTlsAcceptor,
-        connector: TlsConnector,
-    ) -> Self {
+    pub fn with_tls(mut self, acceptor: ReloadableTlsAcceptor, connector: TlsConnector) -> Self {
         self.tls_acceptor = Some(acceptor);
         self.tls_connector = Some(connector);
         self
@@ -167,11 +163,7 @@ impl MessagingService {
     ///
     /// Returns `Err(MessagingError::Backpressure)` if the endpoint has
     /// more than `max_inflight` outstanding requests.
-    pub async fn send(
-        &self,
-        endpoint: SocketAddr,
-        msg: Message,
-    ) -> Result<(), MessagingError> {
+    pub async fn send(&self, endpoint: SocketAddr, msg: Message) -> Result<(), MessagingError> {
         // Check backpressure
         let inflight = self.inflight_count(&endpoint);
         if inflight >= self.max_inflight {
@@ -189,9 +181,16 @@ impl MessagingService {
                 .map_err(MessagingError::Io)?;
 
             let stream: Box<dyn AsyncStream> = if let Some(ref tls) = self.tls_connector {
-                let domain = ServerName::try_from(endpoint.ip().to_string())
-                    .map_err(|_| MessagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid IP for ServerName")))?;
-                let tls_stream = tls.connect(domain, tcp_stream).await.map_err(MessagingError::Io)?;
+                let domain = ServerName::try_from(endpoint.ip().to_string()).map_err(|_| {
+                    MessagingError::Io(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Invalid IP for ServerName",
+                    ))
+                })?;
+                let tls_stream = tls
+                    .connect(domain, tcp_stream)
+                    .await
+                    .map_err(MessagingError::Io)?;
                 Box::new(tls_stream)
             } else {
                 Box::new(tcp_stream)
@@ -200,7 +199,8 @@ impl MessagingService {
             let mut framed = FramedWrite::new(stream, MessageCodec);
             framed.send(msg).await.map_err(MessagingError::Io)?;
             Ok(())
-        }.await;
+        }
+        .await;
 
         self.decrement_inflight(&endpoint);
         result
@@ -237,9 +237,16 @@ impl MessagingService {
             .map_err(|_| MessagingError::Timeout)??;
 
         let stream: Box<dyn AsyncStream> = if let Some(ref tls) = self.tls_connector {
-            let domain = ServerName::try_from(endpoint.ip().to_string())
-                .map_err(|_| MessagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid IP for ServerName")))?;
-            let tls_stream = tls.connect(domain, tcp_stream).await.map_err(MessagingError::Io)?;
+            let domain = ServerName::try_from(endpoint.ip().to_string()).map_err(|_| {
+                MessagingError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "Invalid IP for ServerName",
+                ))
+            })?;
+            let tls_stream = tls
+                .connect(domain, tcp_stream)
+                .await
+                .map_err(MessagingError::Io)?;
             Box::new(tls_stream)
         } else {
             Box::new(tcp_stream)
@@ -563,7 +570,11 @@ mod tests {
         svc.register_handler(
             Verb::Ping,
             Arc::new(|msg| {
-                Some(Message::response(msg.header.message_id, Verb::Pong, Vec::new()))
+                Some(Message::response(
+                    msg.header.message_id,
+                    Verb::Pong,
+                    Vec::new(),
+                ))
             }),
         );
 
@@ -683,8 +694,14 @@ mod tests {
         let config = VerbTimeoutConfig::with_defaults();
         assert_eq!(config.timeout_for(&Verb::Mutation), Duration::from_secs(5));
         assert_eq!(config.timeout_for(&Verb::Ping), Duration::from_secs(1));
-        assert_eq!(config.timeout_for(&Verb::StreamInit), Duration::from_secs(7200));
-        assert_eq!(config.timeout_for(&Verb::TcmCommit), Duration::from_secs(30));
+        assert_eq!(
+            config.timeout_for(&Verb::StreamInit),
+            Duration::from_secs(7200)
+        );
+        assert_eq!(
+            config.timeout_for(&Verb::TcmCommit),
+            Duration::from_secs(30)
+        );
     }
 
     #[test]
@@ -698,6 +715,9 @@ mod tests {
     fn verb_timeout_unknown_fallback() {
         let config = VerbTimeoutConfig::with_defaults();
         // Verb not explicitly configured should get 10s default
-        assert_eq!(config.timeout_for(&Verb::BatchRemove), Duration::from_secs(10));
+        assert_eq!(
+            config.timeout_for(&Verb::BatchRemove),
+            Duration::from_secs(10)
+        );
     }
 }

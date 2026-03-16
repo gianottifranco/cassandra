@@ -188,10 +188,7 @@ pub struct PartitionRangeReadCommand {
 
 impl PartitionRangeReadCommand {
     /// Full-table scan with default limits.
-    pub fn full_scan(
-        keyspace: impl Into<String>,
-        table: impl Into<String>,
-    ) -> Self {
+    pub fn full_scan(keyspace: impl Into<String>, table: impl Into<String>) -> Self {
         let now_in_seconds = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -471,7 +468,13 @@ impl fmt::Display for ReadCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::SinglePartition(cmd) => {
-                write!(f, "SinglePartition({}.{}, pk={} bytes)", cmd.keyspace, cmd.table, cmd.partition_key.len())
+                write!(
+                    f,
+                    "SinglePartition({}.{}, pk={} bytes)",
+                    cmd.keyspace,
+                    cmd.table,
+                    cmd.partition_key.len()
+                )
             }
             Self::PartitionRange(cmd) => {
                 write!(f, "PartitionRange({}.{})", cmd.keyspace, cmd.table)
@@ -579,9 +582,11 @@ mod tests {
 
     #[test]
     fn read_command_display() {
-        let cmd = ReadCommand::SinglePartition(
-            SinglePartitionReadCommand::full_partition("ks", "users", b"pk1".to_vec())
-        );
+        let cmd = ReadCommand::SinglePartition(SinglePartitionReadCommand::full_partition(
+            "ks",
+            "users",
+            b"pk1".to_vec(),
+        ));
         let s = format!("{cmd}");
         assert!(s.contains("SinglePartition"));
         assert!(s.contains("ks.users"));
@@ -589,8 +594,8 @@ mod tests {
 
     #[test]
     fn reversed_command() {
-        let cmd = SinglePartitionReadCommand::full_partition("ks", "t1", b"pk1".to_vec())
-            .reversed();
+        let cmd =
+            SinglePartitionReadCommand::full_partition("ks", "t1", b"pk1".to_vec()).reversed();
         assert!(cmd.is_reversed);
     }
 }

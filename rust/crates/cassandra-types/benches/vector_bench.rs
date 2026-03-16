@@ -1,8 +1,8 @@
 // Licensed under Apache License, Version 2.0.
 //! Criterion benchmarks for vector similarity computations.
 
-use criterion::{criterion_group, criterion_main, Criterion, black_box};
-use cassandra_types::vector::{VectorValue, cosine_similarity, euclidean_distance, dot_product};
+use cassandra_types::vector::{VectorValue, cosine_similarity, dot_product, euclidean_distance};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_cosine(c: &mut Criterion) {
     let dim = 128;

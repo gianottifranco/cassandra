@@ -106,8 +106,7 @@ impl Partitioner for RandomPartitioner {
         // compatibility while preserving uniform distribution.
         let digest = md5_hash(key);
         let value = i64::from_be_bytes([
-            digest[0], digest[1], digest[2], digest[3],
-            digest[4], digest[5], digest[6], digest[7],
+            digest[0], digest[1], digest[2], digest[3], digest[4], digest[5], digest[6], digest[7],
         ]);
         // Ensure non-negative to match Java's BigInteger(1, md5)
         Token::from_raw(value & i64::MAX)
@@ -128,7 +127,7 @@ impl Partitioner for RandomPartitioner {
 
 /// Minimal MD5 — we use the `md-5` crate already in workspace deps.
 fn md5_hash(data: &[u8]) -> [u8; 16] {
-    use md5::{Md5, Digest};
+    use md5::{Digest, Md5};
     let mut hasher = Md5::new();
     hasher.update(data);
     let result = hasher.finalize();

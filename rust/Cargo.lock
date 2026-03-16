@@ -376,6 +376,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "cassandra-migration"
+version = "0.1.0"
+dependencies = [
+ "byteorder",
+ "md-5",
+ "proptest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "cassandra-native-protocol"
 version = "0.1.0"
 dependencies = [

@@ -12,8 +12,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
-use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 use cassandra_security::Resource as SecurityResource;
+use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 
 use cassandra_cql::ast::{
     Assignment, ClusteringOrder as AstClusteringOrder, Literal, Relation, SelectColumns, Selector,
@@ -105,7 +105,11 @@ impl QueryExecutor {
         Arc::clone(&self.catalog)
     }
 
-    pub fn execute(&self, plan: &QueryPlan, user: Option<&str>) -> Result<QueryResult, ExecutorError> {
+    pub fn execute(
+        &self,
+        plan: &QueryPlan,
+        user: Option<&str>,
+    ) -> Result<QueryResult, ExecutorError> {
         match plan {
             QueryPlan::Use(u) => self.execute_use(u),
             QueryPlan::CreateKeyspace(ck) => self.execute_create_keyspace(ck),
@@ -222,10 +226,7 @@ impl QueryExecutor {
         })
     }
 
-    fn execute_drop_keyspace(
-        &self,
-        plan: &DropKeyspacePlan,
-    ) -> Result<QueryResult, ExecutorError> {
+    fn execute_drop_keyspace(&self, plan: &DropKeyspacePlan) -> Result<QueryResult, ExecutorError> {
         let mut catalog = self.catalog.write();
         *catalog = catalog.without_keyspace(&plan.name);
         info!(keyspace = %plan.name, "Dropped keyspace");
@@ -237,10 +238,7 @@ impl QueryExecutor {
         })
     }
 
-    fn execute_create_table(
-        &self,
-        plan: &CreateTablePlan,
-    ) -> Result<QueryResult, ExecutorError> {
+    fn execute_create_table(&self, plan: &CreateTablePlan) -> Result<QueryResult, ExecutorError> {
         use cassandra_schema::TableMetadataBuilder;
 
         let mut builder = TableMetadataBuilder::new(&plan.keyspace, &plan.name);
@@ -344,11 +342,9 @@ impl QueryExecutor {
 
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
-        let table_meta = snapshot
-            .table(&plan.keyspace, &plan.table)
-            .ok_or_else(|| {
-                ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
-            })?;
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
 
         let pk_cols = table_meta.partition_key_columns();
         let ck_cols = table_meta.clustering_columns();
@@ -416,11 +412,9 @@ impl QueryExecutor {
 
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
-        let table_meta = snapshot
-            .table(&plan.keyspace, &plan.table)
-            .ok_or_else(|| {
-                ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
-            })?;
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
 
         let pk_cols = table_meta.partition_key_columns();
         let ck_cols = table_meta.clustering_columns();
@@ -487,11 +481,9 @@ impl QueryExecutor {
 
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
-        let table_meta = snapshot
-            .table(&plan.keyspace, &plan.table)
-            .ok_or_else(|| {
-                ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
-            })?;
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
 
         let pk_cols = table_meta.partition_key_columns();
         let ck_cols = table_meta.clustering_columns();
@@ -538,11 +530,7 @@ impl QueryExecutor {
             clustering_key: ck_bytes,
             cells,
             is_tombstone: is_row_delete,
-            local_deletion_time: if is_row_delete {
-                Some(now_secs)
-            } else {
-                None
-            },
+            local_deletion_time: if is_row_delete { Some(now_secs) } else { None },
         };
 
         let mutation = Mutation {
@@ -561,14 +549,16 @@ impl QueryExecutor {
         Ok(QueryResult::Void)
     }
 
-    fn execute_select(&self, plan: &SelectPlan, user: Option<&str>) -> Result<QueryResult, ExecutorError> {
+    fn execute_select(
+        &self,
+        plan: &SelectPlan,
+        user: Option<&str>,
+    ) -> Result<QueryResult, ExecutorError> {
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
-        let table_meta = snapshot
-            .table(&plan.keyspace, &plan.table)
-            .ok_or_else(|| {
-                ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
-            })?;
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
 
         let pk_cols = table_meta.partition_key_columns();
         let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
@@ -581,7 +571,11 @@ impl QueryExecutor {
                     pk_bytes.extend_from_slice(&v);
                 }
             } else {
-                if let Some(idx) = table_meta.indexes.iter().find(|i| i.target_column() == Some(&rel.column)) {
+                if let Some(idx) = table_meta
+                    .indexes
+                    .iter()
+                    .find(|i| i.target_column() == Some(&rel.column))
+                {
                     index_searches.push((rel.clone(), idx.clone()));
                 }
             }
@@ -620,14 +614,18 @@ impl QueryExecutor {
         // By default, if user is not available or authorizer triggers, we mask.
         // For phase 7, if Authorizer traits properly resolve "has_permission", we use them.
         let mut apply_masking = false;
-        
+
         if let Some(username) = user {
             use cassandra_security::authz::Permission;
-            let resource = cassandra_security::authz::Resource::Table { 
-                keyspace: plan.keyspace.clone(), 
-                table: plan.table.clone() 
+            let resource = cassandra_security::authz::Resource::Table {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
             };
-            if self.authorizer.authorize(username, &resource, Permission::Unmask).is_err() {
+            if self
+                .authorizer
+                .authorize(username, &resource, Permission::Unmask)
+                .is_err()
+            {
                 apply_masking = true;
             }
         } else {
@@ -656,7 +654,11 @@ impl QueryExecutor {
         if pk_bytes.is_empty() {
             if !index_searches.is_empty() {
                 let (rel, idx) = &index_searches[0];
-                let is_vector = idx.options.get("class_name").map(|s| s.contains("StorageAttachedIndex")).unwrap_or(false)
+                let is_vector = idx
+                    .options
+                    .get("class_name")
+                    .map(|s| s.contains("StorageAttachedIndex"))
+                    .unwrap_or(false)
                     && idx.options.contains_key("vector_dimensions");
 
                 let term_bytes = term_to_bytes(&rel.value).unwrap_or_default();
@@ -665,14 +667,18 @@ impl QueryExecutor {
                     let k = plan.limit.as_ref().and_then(term_to_i64).unwrap_or(10) as usize;
                     self.engine
                         .search_vector_index(&plan.keyspace, &plan.table, &idx.name, &term_bytes, k)
-                        .map_err(|e: Box<dyn std::error::Error>| ExecutorError::StorageError(e.to_string()))?
+                        .map_err(|e: Box<dyn std::error::Error>| {
+                            ExecutorError::StorageError(e.to_string())
+                        })?
                         .into_iter()
                         .map(|(pd, _score)| pd)
                         .collect::<Vec<_>>()
                 } else {
                     self.engine
                         .search_index(&plan.keyspace, &plan.table, &idx.name, &term_bytes)
-                        .map_err(|e: Box<dyn std::error::Error>| ExecutorError::StorageError(e.to_string()))?
+                        .map_err(|e: Box<dyn std::error::Error>| {
+                            ExecutorError::StorageError(e.to_string())
+                        })?
                 };
 
                 let mut result_rows = Vec::new();
@@ -688,10 +694,15 @@ impl QueryExecutor {
                                 .iter()
                                 .find(|c| c.column == rc.name && c.is_live_at(now_secs))
                                 .and_then(|c| c.value.clone());
-                                
+
                             if apply_masking {
                                 if let Some(v) = &value {
-                                    if let Some(masked) = masking_registry.apply_mask(&plan.keyspace, &plan.table, &rc.name, v) {
+                                    if let Some(masked) = masking_registry.apply_mask(
+                                        &plan.keyspace,
+                                        &plan.table,
+                                        &rc.name,
+                                        v,
+                                    ) {
                                         value = Some(masked);
                                     }
                                 }
@@ -727,8 +738,7 @@ impl QueryExecutor {
         let mut result_rows = Vec::new();
 
         if let Some(pd) = partition {
-            let now_secs =
-                (current_timestamp_micros() / 1_000_000) as i32;
+            let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
             let live: Vec<&Row> = pd.live_rows(now_secs);
 
             for row in live {
@@ -739,10 +749,15 @@ impl QueryExecutor {
                         .iter()
                         .find(|c| c.column == rc.name && c.is_live_at(now_secs))
                         .and_then(|c| c.value.clone());
-                        
+
                     if apply_masking {
                         if let Some(v) = &value {
-                            if let Some(masked) = masking_registry.apply_mask(&plan.keyspace, &plan.table, &rc.name, v) {
+                            if let Some(masked) = masking_registry.apply_mask(
+                                &plan.keyspace,
+                                &plan.table,
+                                &rc.name,
+                                v,
+                            ) {
                                 value = Some(masked);
                             }
                         }
@@ -765,7 +780,11 @@ impl QueryExecutor {
         })
     }
 
-    fn execute_batch(&self, plan: &BatchPlan, user: Option<&str>) -> Result<QueryResult, ExecutorError> {
+    fn execute_batch(
+        &self,
+        plan: &BatchPlan,
+        user: Option<&str>,
+    ) -> Result<QueryResult, ExecutorError> {
         for sub in &plan.plans {
             self.execute(sub, user)?;
         }
@@ -913,14 +932,18 @@ fn parse_uuid_bytes(s: &str) -> Option<Vec<u8>> {
 fn row_to_mutation_row(row: Row) -> MutationRow {
     MutationRow {
         clustering_key: row.clustering_key,
-        cells: row.cells.into_iter().map(|c| CellMutation {
-            column: c.column,
-            value: c.value,
-            timestamp: c.timestamp,
-            ttl: c.ttl,
-            local_deletion_time: c.local_deletion_time,
-            is_tombstone: c.is_tombstone,
-        }).collect(),
+        cells: row
+            .cells
+            .into_iter()
+            .map(|c| CellMutation {
+                column: c.column,
+                value: c.value,
+                timestamp: c.timestamp,
+                ttl: c.ttl,
+                local_deletion_time: c.local_deletion_time,
+                is_tombstone: c.is_tombstone,
+            })
+            .collect(),
         is_tombstone: row.is_tombstone,
         local_deletion_time: row.local_deletion_time,
     }
@@ -938,11 +961,16 @@ fn parse_permission(p: &str) -> Result<Permission, ExecutorError> {
         "EXECUTE" => Ok(Permission::Execute),
         "UNMASK" => Ok(Permission::Unmask),
         "SELECT_MASKED" => Ok(Permission::SelectMasked),
-        _ => Err(ExecutorError::InvalidQuery(format!("Unknown permission '{}'", p))),
+        _ => Err(ExecutorError::InvalidQuery(format!(
+            "Unknown permission '{}'",
+            p
+        ))),
     }
 }
 
-fn ast_resource_to_security(r: &cassandra_cql::ast::Resource) -> Result<SecurityResource, ExecutorError> {
+fn ast_resource_to_security(
+    r: &cassandra_cql::ast::Resource,
+) -> Result<SecurityResource, ExecutorError> {
     use cassandra_cql::ast::Resource as AstRes;
     match r {
         AstRes::AllKeyspaces => Ok(SecurityResource::Root),

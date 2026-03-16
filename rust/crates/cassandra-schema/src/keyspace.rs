@@ -6,9 +6,9 @@
 //! - `org.apache.cassandra.schema.KeyspaceMetadata`
 //! - `org.apache.cassandra.schema.KeyspaceParams`
 
-use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
 use crate::table::TableMetadata;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// The kind of keyspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -18,7 +18,9 @@ pub enum KeyspaceKind {
 }
 
 impl Default for KeyspaceKind {
-    fn default() -> Self { Self::Regular }
+    fn default() -> Self {
+        Self::Regular
+    }
 }
 
 /// Replication parameters for a keyspace.
@@ -34,7 +36,10 @@ impl ReplicationParams {
     /// Simple strategy with given RF.
     pub fn simple(replication_factor: u32) -> Self {
         let mut options = BTreeMap::new();
-        options.insert("replication_factor".to_string(), replication_factor.to_string());
+        options.insert(
+            "replication_factor".to_string(),
+            replication_factor.to_string(),
+        );
         Self {
             strategy_class: "org.apache.cassandra.locator.SimpleStrategy".to_string(),
             options,
@@ -43,7 +48,8 @@ impl ReplicationParams {
 
     /// Network topology strategy with per-DC replication factors.
     pub fn network_topology(dc_rfs: BTreeMap<String, u32>) -> Self {
-        let options = dc_rfs.into_iter()
+        let options = dc_rfs
+            .into_iter()
             .map(|(dc, rf)| (dc, rf.to_string()))
             .collect();
         Self {
@@ -69,7 +75,9 @@ pub struct KeyspaceParams {
     pub durable_writes: bool,
 }
 
-fn default_durable_writes() -> bool { true }
+fn default_durable_writes() -> bool {
+    true
+}
 
 impl Default for KeyspaceParams {
     fn default() -> Self {
@@ -148,8 +156,8 @@ impl KeyspaceMetadata {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::table::TableMetadataBuilder;
     use crate::column::ColumnMetadata;
+    use crate::table::TableMetadataBuilder;
     use cassandra_types::CqlType;
 
     #[test]
@@ -163,8 +171,10 @@ mod tests {
     #[test]
     fn system_keyspace() {
         let ks = KeyspaceMetadata::system("system");
-        assert_eq!(ks.params.replication.strategy_class,
-            "org.apache.cassandra.locator.LocalStrategy");
+        assert_eq!(
+            ks.params.replication.strategy_class,
+            "org.apache.cassandra.locator.LocalStrategy"
+        );
     }
 
     #[test]
@@ -172,8 +182,7 @@ mod tests {
         let table = TableMetadataBuilder::new("test_ks", "users")
             .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Uuid))
             .build();
-        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default())
-            .with_table(table);
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
         assert_eq!(ks.table_count(), 1);
         assert!(ks.table("users").is_some());
     }

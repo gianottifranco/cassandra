@@ -13,12 +13,10 @@
 //! All system table definitions modeled as Rust structs with column metadata
 //! and CQL CREATE TABLE statements matching the Java baseline.
 
-
-
-use crate::column::{ColumnKind, ColumnMetadata, ClusteringOrder};
+use crate::column::{ClusteringOrder, ColumnKind, ColumnMetadata};
 use crate::keyspace::{KeyspaceMetadata, KeyspaceParams, ReplicationParams};
-use crate::table::{TableMetadata, TableMetadataBuilder};
 use crate::schema_constants;
+use crate::table::{TableMetadata, TableMetadataBuilder};
 use cassandra_types::CqlType;
 
 // ─── System Table Column Spec ──────────────────────────────────────────────
@@ -35,13 +33,28 @@ pub struct SystemColumnSpec {
 
 impl SystemColumnSpec {
     pub const fn partition_key(name: &'static str, cql_type: CqlType, pos: u32) -> Self {
-        Self { name, cql_type, kind: ColumnKind::PartitionKey, position: pos }
+        Self {
+            name,
+            cql_type,
+            kind: ColumnKind::PartitionKey,
+            position: pos,
+        }
     }
     pub const fn clustering(name: &'static str, cql_type: CqlType, pos: u32) -> Self {
-        Self { name, cql_type, kind: ColumnKind::Clustering, position: pos }
+        Self {
+            name,
+            cql_type,
+            kind: ColumnKind::Clustering,
+            position: pos,
+        }
     }
     pub const fn regular(name: &'static str, cql_type: CqlType) -> Self {
-        Self { name, cql_type, kind: ColumnKind::Regular, position: 0 }
+        Self {
+            name,
+            cql_type,
+            kind: ColumnKind::Regular,
+            position: 0,
+        }
     }
 }
 
@@ -106,7 +119,10 @@ pub fn local_table() -> SystemTableDef {
             SystemColumnSpec::regular("rpc_port", CqlType::Int),
             SystemColumnSpec::regular("schema_version", CqlType::Uuid),
             SystemColumnSpec::regular("tokens", CqlType::Set(Box::new(CqlType::Varchar), false)),
-            SystemColumnSpec::regular("truncated_at", CqlType::Map(Box::new(CqlType::Uuid), Box::new(CqlType::Blob), false)),
+            SystemColumnSpec::regular(
+                "truncated_at",
+                CqlType::Map(Box::new(CqlType::Uuid), Box::new(CqlType::Blob), false),
+            ),
         ],
         gc_grace_seconds: 0,
         default_ttl: 0,
@@ -169,7 +185,10 @@ pub fn peer_events_v2_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("peer", CqlType::Inet, 0),
             SystemColumnSpec::clustering("peer_port", CqlType::Int, 0),
-            SystemColumnSpec::regular("hints_dropped", CqlType::Map(Box::new(CqlType::Uuid), Box::new(CqlType::Int), false)),
+            SystemColumnSpec::regular(
+                "hints_dropped",
+                CqlType::Map(Box::new(CqlType::Uuid), Box::new(CqlType::Int), false),
+            ),
         ],
         gc_grace_seconds: 0,
         default_ttl: 0,
@@ -278,7 +297,10 @@ pub fn compaction_history_table() -> SystemTableDef {
             SystemColumnSpec::regular("columnfamily_name", CqlType::Varchar),
             SystemColumnSpec::regular("compacted_at", CqlType::Timestamp),
             SystemColumnSpec::regular("keyspace_name", CqlType::Varchar),
-            SystemColumnSpec::regular("rows_merged", CqlType::Map(Box::new(CqlType::Int), Box::new(CqlType::Bigint), false)),
+            SystemColumnSpec::regular(
+                "rows_merged",
+                CqlType::Map(Box::new(CqlType::Int), Box::new(CqlType::Bigint), false),
+            ),
         ],
         gc_grace_seconds: 0,
         default_ttl: 604800, // 7 days
@@ -351,7 +373,10 @@ pub fn available_ranges_v2_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::regular("full_ranges", CqlType::Set(Box::new(CqlType::Blob), false)),
-            SystemColumnSpec::regular("transient_ranges", CqlType::Set(Box::new(CqlType::Blob), false)),
+            SystemColumnSpec::regular(
+                "transient_ranges",
+                CqlType::Set(Box::new(CqlType::Blob), false),
+            ),
         ],
         gc_grace_seconds: 0,
         default_ttl: 0,
@@ -442,7 +467,10 @@ pub fn repairs_table() -> SystemTableDef {
             SystemColumnSpec::regular("coordinator", CqlType::Inet),
             SystemColumnSpec::regular("coordinator_port", CqlType::Int),
             SystemColumnSpec::regular("participants", CqlType::Set(Box::new(CqlType::Inet), false)),
-            SystemColumnSpec::regular("participants_wp", CqlType::Set(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "participants_wp",
+                CqlType::Set(Box::new(CqlType::Varchar), false),
+            ),
             SystemColumnSpec::regular("ranges", CqlType::Set(Box::new(CqlType::Blob), false)),
             SystemColumnSpec::regular("cfids", CqlType::Set(Box::new(CqlType::Uuid), false)),
         ],
@@ -542,7 +570,14 @@ pub fn schema_keyspaces_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::regular("durable_writes", CqlType::Boolean),
-            SystemColumnSpec::regular("replication", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "replication",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
         ],
         gc_grace_seconds: 604800,
         default_ttl: 0,
@@ -559,14 +594,38 @@ pub fn schema_tables_table() -> SystemTableDef {
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("table_name", CqlType::Varchar, 0),
             SystemColumnSpec::regular("bloom_filter_fp_chance", CqlType::Double),
-            SystemColumnSpec::regular("caching", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "caching",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
             SystemColumnSpec::regular("comment", CqlType::Varchar),
-            SystemColumnSpec::regular("compaction", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
-            SystemColumnSpec::regular("compression", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "compaction",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
+            SystemColumnSpec::regular(
+                "compression",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
             SystemColumnSpec::regular("crc_check_chance", CqlType::Double),
             SystemColumnSpec::regular("dclocal_read_repair_chance", CqlType::Double),
             SystemColumnSpec::regular("default_time_to_live", CqlType::Int),
-            SystemColumnSpec::regular("extensions", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Blob), false)),
+            SystemColumnSpec::regular(
+                "extensions",
+                CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Blob), false),
+            ),
             SystemColumnSpec::regular("flags", CqlType::Set(Box::new(CqlType::Varchar), false)),
             SystemColumnSpec::regular("gc_grace_seconds", CqlType::Int),
             SystemColumnSpec::regular("id", CqlType::Uuid),
@@ -614,7 +673,10 @@ pub fn schema_column_masks_table() -> SystemTableDef {
             SystemColumnSpec::clustering("column_name", CqlType::Varchar, 1),
             SystemColumnSpec::regular("function_name", CqlType::Varchar),
             SystemColumnSpec::regular("function_keyspace_name", CqlType::Varchar),
-            SystemColumnSpec::regular("function_argument_types", CqlType::List(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "function_argument_types",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+            ),
         ],
         gc_grace_seconds: 604800,
         default_ttl: 0,
@@ -650,7 +712,14 @@ pub fn schema_triggers_table() -> SystemTableDef {
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("table_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("trigger_name", CqlType::Varchar, 1),
-            SystemColumnSpec::regular("options", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "options",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
         ],
         gc_grace_seconds: 604800,
         default_ttl: 0,
@@ -669,14 +738,38 @@ pub fn schema_views_table() -> SystemTableDef {
             SystemColumnSpec::regular("base_table_id", CqlType::Uuid),
             SystemColumnSpec::regular("base_table_name", CqlType::Varchar),
             SystemColumnSpec::regular("bloom_filter_fp_chance", CqlType::Double),
-            SystemColumnSpec::regular("caching", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "caching",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
             SystemColumnSpec::regular("comment", CqlType::Varchar),
-            SystemColumnSpec::regular("compaction", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
-            SystemColumnSpec::regular("compression", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "compaction",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
+            SystemColumnSpec::regular(
+                "compression",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
             SystemColumnSpec::regular("crc_check_chance", CqlType::Double),
             SystemColumnSpec::regular("dclocal_read_repair_chance", CqlType::Double),
             SystemColumnSpec::regular("default_time_to_live", CqlType::Int),
-            SystemColumnSpec::regular("extensions", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Blob), false)),
+            SystemColumnSpec::regular(
+                "extensions",
+                CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Blob), false),
+            ),
             SystemColumnSpec::regular("gc_grace_seconds", CqlType::Int),
             SystemColumnSpec::regular("id", CqlType::Uuid),
             SystemColumnSpec::regular("include_all_columns", CqlType::Boolean),
@@ -701,8 +794,14 @@ pub fn schema_types_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("type_name", CqlType::Varchar, 0),
-            SystemColumnSpec::regular("field_names", CqlType::List(Box::new(CqlType::Varchar), false)),
-            SystemColumnSpec::regular("field_types", CqlType::List(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "field_names",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+            ),
+            SystemColumnSpec::regular(
+                "field_types",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+            ),
         ],
         gc_grace_seconds: 604800,
         default_ttl: 0,
@@ -718,8 +817,15 @@ pub fn schema_functions_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("function_name", CqlType::Varchar, 0),
-            SystemColumnSpec::clustering("argument_types", CqlType::List(Box::new(CqlType::Varchar), false), 1),
-            SystemColumnSpec::regular("argument_names", CqlType::List(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::clustering(
+                "argument_types",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+                1,
+            ),
+            SystemColumnSpec::regular(
+                "argument_names",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+            ),
             SystemColumnSpec::regular("body", CqlType::Varchar),
             SystemColumnSpec::regular("called_on_null_input", CqlType::Boolean),
             SystemColumnSpec::regular("language", CqlType::Varchar),
@@ -739,7 +845,11 @@ pub fn schema_aggregates_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("keyspace_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("aggregate_name", CqlType::Varchar, 0),
-            SystemColumnSpec::clustering("argument_types", CqlType::List(Box::new(CqlType::Varchar), false), 1),
+            SystemColumnSpec::clustering(
+                "argument_types",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+                1,
+            ),
             SystemColumnSpec::regular("final_func", CqlType::Varchar),
             SystemColumnSpec::regular("initcond", CqlType::Varchar),
             SystemColumnSpec::regular("return_type", CqlType::Varchar),
@@ -762,7 +872,14 @@ pub fn schema_indexes_table() -> SystemTableDef {
             SystemColumnSpec::clustering("table_name", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("index_name", CqlType::Varchar, 1),
             SystemColumnSpec::regular("kind", CqlType::Varchar),
-            SystemColumnSpec::regular("options", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "options",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
         ],
         gc_grace_seconds: 604800,
         default_ttl: 0,
@@ -832,7 +949,10 @@ pub fn auth_role_permissions_table() -> SystemTableDef {
         columns: vec![
             SystemColumnSpec::partition_key("role", CqlType::Varchar, 0),
             SystemColumnSpec::clustering("resource", CqlType::Varchar, 0),
-            SystemColumnSpec::regular("permissions", CqlType::Set(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "permissions",
+                CqlType::Set(Box::new(CqlType::Varchar), false),
+            ),
         ],
         gc_grace_seconds: 7776000,
         default_ttl: 0,
@@ -897,7 +1017,14 @@ pub fn trace_sessions_table() -> SystemTableDef {
             SystemColumnSpec::regular("coordinator", CqlType::Inet),
             SystemColumnSpec::regular("coordinator_port", CqlType::Int),
             SystemColumnSpec::regular("duration", CqlType::Int),
-            SystemColumnSpec::regular("parameters", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "parameters",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
             SystemColumnSpec::regular("request", CqlType::Varchar),
             SystemColumnSpec::regular("started_at", CqlType::Timestamp),
         ],
@@ -928,10 +1055,7 @@ pub fn trace_events_table() -> SystemTableDef {
 
 /// Returns all table definitions for the `system_traces` keyspace.
 pub fn system_traces_tables() -> Vec<SystemTableDef> {
-    vec![
-        trace_sessions_table(),
-        trace_events_table(),
-    ]
+    vec![trace_sessions_table(), trace_events_table()]
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -954,7 +1078,10 @@ pub fn distributed_repair_history_table() -> SystemTableDef {
             SystemColumnSpec::regular("exception_stacktrace", CqlType::Varchar),
             SystemColumnSpec::regular("finished_at", CqlType::Timestamp),
             SystemColumnSpec::regular("participants", CqlType::Set(Box::new(CqlType::Inet), false)),
-            SystemColumnSpec::regular("participants_wp", CqlType::Set(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "participants_wp",
+                CqlType::Set(Box::new(CqlType::Varchar), false),
+            ),
             SystemColumnSpec::regular("range_begin", CqlType::Varchar),
             SystemColumnSpec::regular("range_end", CqlType::Varchar),
             SystemColumnSpec::regular("started_at", CqlType::Timestamp),
@@ -973,15 +1100,31 @@ pub fn distributed_parent_repair_history_table() -> SystemTableDef {
         comment: "Repair history",
         columns: vec![
             SystemColumnSpec::partition_key("parent_id", CqlType::Uuid, 0),
-            SystemColumnSpec::regular("columnfamily_names", CqlType::Set(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "columnfamily_names",
+                CqlType::Set(Box::new(CqlType::Varchar), false),
+            ),
             SystemColumnSpec::regular("exception_message", CqlType::Varchar),
             SystemColumnSpec::regular("exception_stacktrace", CqlType::Varchar),
             SystemColumnSpec::regular("finished_at", CqlType::Timestamp),
             SystemColumnSpec::regular("keyspace_name", CqlType::Varchar),
-            SystemColumnSpec::regular("requested_ranges", CqlType::Set(Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "requested_ranges",
+                CqlType::Set(Box::new(CqlType::Varchar), false),
+            ),
             SystemColumnSpec::regular("started_at", CqlType::Timestamp),
-            SystemColumnSpec::regular("successful_ranges", CqlType::Set(Box::new(CqlType::Varchar), false)),
-            SystemColumnSpec::regular("options", CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Varchar), false)),
+            SystemColumnSpec::regular(
+                "successful_ranges",
+                CqlType::Set(Box::new(CqlType::Varchar), false),
+            ),
+            SystemColumnSpec::regular(
+                "options",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ),
         ],
         gc_grace_seconds: 0,
         default_ttl: 0,
@@ -1137,7 +1280,11 @@ mod tests {
     fn system_keyspace_has_all_tables() {
         let tables = system_keyspace_tables();
         // Java baseline has 22+ tables (excluding deprecated duplicates added separately)
-        assert!(tables.len() >= 22, "expected >=22 system tables, got {}", tables.len());
+        assert!(
+            tables.len() >= 22,
+            "expected >=22 system tables, got {}",
+            tables.len()
+        );
 
         let names: Vec<&str> = tables.iter().map(|t| t.name).collect();
         // Spot-check critical tables
@@ -1146,17 +1293,34 @@ mod tests {
         assert!(names.contains(&"peers"), "missing system.peers (legacy)");
         assert!(names.contains(&"batches"), "missing system.batches");
         assert!(names.contains(&"paxos"), "missing system.paxos");
-        assert!(names.contains(&"compaction_history"), "missing system.compaction_history");
+        assert!(
+            names.contains(&"compaction_history"),
+            "missing system.compaction_history"
+        );
         assert!(names.contains(&"repairs"), "missing system.repairs");
-        assert!(names.contains(&"prepared_statements"), "missing system.prepared_statements");
-        assert!(names.contains(&"table_estimates"), "missing system.table_estimates");
-        assert!(names.contains(&"size_estimates"), "missing system.size_estimates (legacy)");
+        assert!(
+            names.contains(&"prepared_statements"),
+            "missing system.prepared_statements"
+        );
+        assert!(
+            names.contains(&"table_estimates"),
+            "missing system.table_estimates"
+        );
+        assert!(
+            names.contains(&"size_estimates"),
+            "missing system.size_estimates (legacy)"
+        );
     }
 
     #[test]
     fn system_schema_has_all_tables() {
         let tables = system_schema_tables();
-        assert_eq!(tables.len(), 11, "expected 11 system_schema tables, got {}", tables.len());
+        assert_eq!(
+            tables.len(),
+            11,
+            "expected 11 system_schema tables, got {}",
+            tables.len()
+        );
 
         let names: Vec<&str> = tables.iter().map(|t| t.name).collect();
         assert!(names.contains(&"keyspaces"));
@@ -1232,13 +1396,23 @@ mod tests {
     #[test]
     fn system_keyspace_metadata_is_local_strategy() {
         let ks = build_system_keyspace();
-        assert!(ks.params.replication.strategy_class.contains("LocalStrategy"));
+        assert!(
+            ks.params
+                .replication
+                .strategy_class
+                .contains("LocalStrategy")
+        );
     }
 
     #[test]
     fn auth_keyspace_is_replicated() {
         let ks = build_system_auth_keyspace();
-        assert!(ks.params.replication.strategy_class.contains("SimpleStrategy"));
+        assert!(
+            ks.params
+                .replication
+                .strategy_class
+                .contains("SimpleStrategy")
+        );
     }
 
     #[test]
@@ -1247,8 +1421,10 @@ mod tests {
             let table_names: Vec<&str> = ks.tables.keys().map(|s| s.as_str()).collect();
             let unique: std::collections::HashSet<&str> = table_names.iter().copied().collect();
             assert_eq!(
-                table_names.len(), unique.len(),
-                "duplicate table names in keyspace {}", ks.name
+                table_names.len(),
+                unique.len(),
+                "duplicate table names in keyspace {}",
+                ks.name
             );
         }
     }
@@ -1257,7 +1433,10 @@ mod tests {
     fn all_tables_have_partition_key() {
         for ks in all_system_keyspaces() {
             for (tname, table) in &ks.tables {
-                let has_pk = table.columns.iter().any(|c| c.kind == ColumnKind::PartitionKey);
+                let has_pk = table
+                    .columns
+                    .iter()
+                    .any(|c| c.kind == ColumnKind::PartitionKey);
                 assert!(has_pk, "table {}.{} has no partition key", ks.name, tname);
             }
         }

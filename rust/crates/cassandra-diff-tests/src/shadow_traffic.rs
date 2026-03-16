@@ -106,8 +106,7 @@ pub struct ShadowReport {
 pub fn load_fql_entries(path: &Path) -> Result<Vec<FqlEntry>, String> {
     let content = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read FQL file {}: {}", path.display(), e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse FQL JSON: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse FQL JSON: {}", e))
 }
 
 /// Run a shadow traffic replay session.
@@ -158,7 +157,10 @@ pub fn replay_session(entries: &[FqlEntry]) -> ShadowReport {
         latencies[idx.min(latencies.len() - 1)]
     };
 
-    let matched = results.iter().filter(|r| r.status == ReplayStatus::Match).count();
+    let matched = results
+        .iter()
+        .filter(|r| r.status == ReplayStatus::Match)
+        .count();
     let diverged = results
         .iter()
         .filter(|r| matches!(r.status, ReplayStatus::Divergence { .. }))

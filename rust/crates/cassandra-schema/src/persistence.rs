@@ -5,8 +5,8 @@
 //! Saves and loads `SchemaSnapshot` to/from disk for recovery.
 //! Feature-gated behind `persistence` for minimal builds.
 
-use std::path::Path;
 use crate::catalog::SchemaSnapshot;
+use std::path::Path;
 
 /// Error during schema persistence operations.
 #[derive(Debug)]
@@ -40,9 +40,9 @@ pub fn load<P: AsRef<Path>>(path: P) -> Result<SchemaSnapshot, PersistenceError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::column::ColumnMetadata;
     use crate::keyspace::{KeyspaceMetadata, KeyspaceParams};
     use crate::table::TableMetadataBuilder;
-    use crate::column::ColumnMetadata;
     use cassandra_types::CqlType;
 
     #[test]

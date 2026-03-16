@@ -8,12 +8,15 @@
 - p99 latency exceeds 2× Java baseline
 - Data divergence detected in shadow traffic
 - Any data loss or corruption event
+- CDC gap detected (missing segments)
+- Schema divergence discovered
 
 ## Prerequisites
 
 - Java cluster still running (or snapshot available)
 - DNS/LB configuration access
 - Operator access to both clusters
+- CDC checkpoint file from migration (if applicable)
 
 ## Immediate Rollback (During Shadow Phase)
 
@@ -21,7 +24,6 @@ If the Rust cluster has not yet taken production traffic:
 
 1. **Stop shadow traffic replay**:
    ```bash
-   # Kill the shadow replay process
    pkill -f "shadow-replay"
    ```
 
@@ -35,7 +37,7 @@ If traffic has been switched to Rust:
 
 ```bash
 # Update DNS/LB to point back to Java cluster
-# Method depends on your infrastructure:
+# Method depends on infrastructure:
 # - AWS Route 53: update A/CNAME record
 # - HAProxy: update backend configuration
 # - Kubernetes: update Service selector
@@ -44,12 +46,9 @@ If traffic has been switched to Rust:
 ### Step 2: Verify Java Cluster
 
 ```bash
-# Check Java cluster health
-nodetool status
-nodetool info
-
-# Verify a sample query
-cqlsh java-host -e "SELECT * FROM system.local"
+nodetool status    # All nodes should be UN
+nodetool info      # Verify cluster name/version
+cqlsh java-host -e "SELECT * FROM system.local"   # Basic health
 ```
 
 ### Step 3: Stop Rust Cluster
@@ -62,27 +61,39 @@ sudo systemctl stop cassandra-rust
 docker compose -f docker-compose.prod.yml down
 ```
 
-### Step 4: Preserve Evidence
+### Step 4: Restore CDC Continuity
+
+```bash
+# If CDC consumers were pointing to Rust, revert to Java
+# 1. Update consumer config to Java CDC directory
+# 2. Consumer handles from last-consumed offset (idempotent)
+
+# Verify CDC state
+ls /var/lib/cassandra/cdc_raw/ | wc -l   # Count Java CDC segments
+```
+
+### Step 5: Preserve Evidence
 
 ```bash
 # Save Rust logs for analysis
-cp /var/log/cassandra/*.log /tmp/rollback-evidence/
+mkdir -p /tmp/rollback-evidence
+cp /var/log/cassandra-rust/*.log /tmp/rollback-evidence/
 
-# Save Rust data snapshot
-cassandra-tools snapshot rollback-evidence
+# Save validation report
+cargo run -p cassandra-migration -- validate \
+  --report /tmp/rollback-evidence/validation.json 2>&1 || true
 ```
 
-## Rollback After Decommission
+## Rollback After Java Decommission
 
 If Java cluster has been stopped:
 
 ### Step 1: Restore Java from Snapshot
 
 ```bash
-# Restore Java data from pre-migration snapshot
 sudo systemctl stop cassandra  # if running
 
-# Restore snapshot
+# Restore data from pre-migration snapshot
 sstableloader -d <java-host> /path/to/snapshot/keyspace/table/
 ```
 
@@ -93,34 +104,44 @@ sudo systemctl start cassandra
 nodetool status  # wait for UN on all nodes
 ```
 
-### Step 3: Verify Data
+### Step 3: Verify Data Integrity
 
 ```bash
-# Run consistency checks
 nodetool verify
-
-# Spot-check data
 cqlsh java-host -e "SELECT count(*) FROM keyspace.table"
+```
+
+### Step 4: Restore CDC
+
+```bash
+# CDC segments from pre-migration are in the snapshot
+# Consumers resume from their last checkpoint
+```
+
+## Automated Rollback Drill
+
+Run before any real migration to validate the procedure:
+
+```bash
+cd rust
+
+# Run the Rust rollback drill test
+cargo test -p cassandra-diff-tests rollback_tests -- --nocapture
+
+# Run the full rollback script
+bash scripts/rollback-drill.sh
+
+# Run full migration validation (includes rollback tests)
+make validate-migration
 ```
 
 ## Post-Rollback Actions
 
-1. **Incident report**: Document the trigger, timeline, and resolution
+1. **Incident report**: Document trigger, timeline, and resolution
 2. **Root cause analysis**: Identify what caused the failure
-3. **Test fix**: Apply fix to Rust implementation
-4. **Re-validate**: Run shadow traffic again with the fix
-5. **Retry migration**: Only after the fix is verified
-
-## Automated Rollback Drill
-
-Run the automated rollback validation:
-
-```bash
-cd rust
-bash scripts/rollback-drill.sh
-# Or via cargo:
-cargo test -p cassandra-diff-tests --test backup_restore_tests -- --nocapture
-```
+3. **Fix**: Apply fix to Rust implementation
+4. **Re-validate**: Run shadow traffic again with fix applied
+5. **Retry**: Only after fix is verified and team signs off
 
 ## Contacts
 
@@ -129,3 +150,4 @@ cargo test -p cassandra-diff-tests --test backup_restore_tests -- --nocapture
 | On-call DBA | Execute rollback steps |
 | Platform Engineer | DNS/LB changes |
 | Cassandra Rust Owner | Root cause analysis |
+| CDC Team | Consumer reconfiguration |

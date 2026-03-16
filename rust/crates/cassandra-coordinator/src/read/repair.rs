@@ -24,8 +24,8 @@
 //! - `org.apache.cassandra.service.reads.repair.ReadRepairStrategy`
 
 use cassandra_cluster_metadata::Endpoint;
-use cassandra_storage::memtable::partition::PartitionData;
 use cassandra_messaging::{MessagingService, frame::Message, verb::Verb};
+use cassandra_storage::memtable::partition::PartitionData;
 use std::sync::Arc;
 
 use tracing::{debug, info};
@@ -183,9 +183,18 @@ mod tests {
 
     #[test]
     fn read_repair_strategy_parse() {
-        assert_eq!(ReadRepairStrategy::from_str_cql("BLOCKING"), ReadRepairStrategy::Blocking);
-        assert_eq!(ReadRepairStrategy::from_str_cql("NONE"), ReadRepairStrategy::None);
-        assert_eq!(ReadRepairStrategy::from_str_cql("blocking"), ReadRepairStrategy::Blocking);
+        assert_eq!(
+            ReadRepairStrategy::from_str_cql("BLOCKING"),
+            ReadRepairStrategy::Blocking
+        );
+        assert_eq!(
+            ReadRepairStrategy::from_str_cql("NONE"),
+            ReadRepairStrategy::None
+        );
+        assert_eq!(
+            ReadRepairStrategy::from_str_cql("blocking"),
+            ReadRepairStrategy::Blocking
+        );
     }
 
     #[test]
@@ -211,7 +220,13 @@ mod tests {
         let mut handler = ReadRepairHandler::new(ReadRepairStrategy::Blocking);
         let pd = PartitionData::new();
 
-        handler.stage_repair(ep(7002), "ks".into(), "t1".into(), b"pk".to_vec(), pd.clone());
+        handler.stage_repair(
+            ep(7002),
+            "ks".into(),
+            "t1".into(),
+            b"pk".to_vec(),
+            pd.clone(),
+        );
         handler.stage_repair(ep(7003), "ks".into(), "t1".into(), b"pk".to_vec(), pd);
 
         let count = handler.execute_repairs(None).await;

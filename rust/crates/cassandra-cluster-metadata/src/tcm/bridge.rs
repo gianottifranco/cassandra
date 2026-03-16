@@ -3,8 +3,8 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::gossip::{ApplicationState, Gossiper};
-use crate::tcm::{Epoch, TcmMetadata};
 use crate::node::Endpoint;
+use crate::tcm::{Epoch, TcmMetadata};
 
 /// Control plane mode for the cluster.
 ///
@@ -100,10 +100,7 @@ impl ControlPlaneBridge {
             return;
         }
 
-        gossiper.set_local_state(
-            ApplicationState::TcmEpoch,
-            epoch.value().to_string(),
-        );
+        gossiper.set_local_state(ApplicationState::TcmEpoch, epoch.value().to_string());
     }
 
     /// Detect peers that are behind the current epoch.
@@ -151,8 +148,8 @@ impl ControlPlaneBridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
     use crate::gossip::{SeedProvider, VersionedValue};
+    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
     fn ep(port: u16) -> Endpoint {
         Endpoint::new(SocketAddr::V4(SocketAddrV4::new(
@@ -235,4 +232,3 @@ mod tests {
         assert!(state.get_state(&ApplicationState::TcmEpoch).is_none());
     }
 }
-

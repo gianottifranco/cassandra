@@ -31,11 +31,11 @@
 //! - Zero external grammar files or build-time codegen
 //! - Streaming-friendly design for future zero-copy parsing
 
-pub mod lexer;
 pub mod ast;
+pub mod lexer;
 pub mod parser;
 pub mod planner;
 pub mod prepared;
-pub mod udf;
-pub mod uda;
 pub mod triggers;
+pub mod uda;
+pub mod udf;

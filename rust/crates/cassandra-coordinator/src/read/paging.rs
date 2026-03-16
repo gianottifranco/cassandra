@@ -63,9 +63,8 @@ impl PagingState {
     ///
     /// Format: `[pk_len:4][pk:N][rm_len:4][rm:M][remaining:4][remaining_in_partition:4]`
     pub fn serialize(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(
-            4 + self.partition_key.len() + 4 + self.row_mark.len() + 8
-        );
+        let mut buf =
+            Vec::with_capacity(4 + self.partition_key.len() + 4 + self.row_mark.len() + 8);
         buf.extend_from_slice(&(self.partition_key.len() as u32).to_be_bytes());
         buf.extend_from_slice(&self.partition_key);
         buf.extend_from_slice(&(self.row_mark.len() as u32).to_be_bytes());
@@ -84,18 +83,26 @@ impl PagingState {
 
         let pk_len = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        if pos + pk_len > data.len() { return None; }
+        if pos + pk_len > data.len() {
+            return None;
+        }
         let partition_key = data[pos..pos + pk_len].to_vec();
         pos += pk_len;
 
-        if pos + 4 > data.len() { return None; }
+        if pos + 4 > data.len() {
+            return None;
+        }
         let rm_len = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
         pos += 4;
-        if pos + rm_len > data.len() { return None; }
+        if pos + rm_len > data.len() {
+            return None;
+        }
         let row_mark = data[pos..pos + rm_len].to_vec();
         pos += rm_len;
 
-        if pos + 8 > data.len() { return None; }
+        if pos + 8 > data.len() {
+            return None;
+        }
         let remaining = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?);
         pos += 4;
         let remaining_in_partition = u32::from_be_bytes(data[pos..pos + 4].try_into().ok()?);
@@ -166,12 +173,7 @@ mod tests {
 
     #[test]
     fn paging_state_roundtrip() {
-        let state = PagingState::new(
-            b"pk123".to_vec(),
-            b"ck456".to_vec(),
-            42,
-            10,
-        );
+        let state = PagingState::new(b"pk123".to_vec(), b"ck456".to_vec(), 42, 10);
         let bytes = state.serialize();
         let recovered = PagingState::deserialize(&bytes).unwrap();
         assert_eq!(state, recovered);
@@ -179,12 +181,7 @@ mod tests {
 
     #[test]
     fn paging_state_empty_row_mark() {
-        let state = PagingState::new(
-            b"pk".to_vec(),
-            Vec::new(),
-            100,
-            0,
-        );
+        let state = PagingState::new(b"pk".to_vec(), Vec::new(), 100, 0);
         let bytes = state.serialize();
         let recovered = PagingState::deserialize(&bytes).unwrap();
         assert_eq!(recovered.row_mark, Vec::<u8>::new());

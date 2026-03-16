@@ -6,22 +6,21 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.schema.*`
 
-pub mod schema_constants;
-pub mod table_id;
+pub mod catalog;
 pub mod column;
 pub mod index;
-pub mod table;
 pub mod keyspace;
-pub mod catalog;
 pub mod persistence;
-pub mod system_keyspaces;
 pub mod schema_agreement;
+pub mod schema_constants;
+pub mod system_keyspaces;
+pub mod table;
+pub mod table_id;
 
-pub use table_id::TableId;
-pub use column::{ColumnMetadata, ColumnKind, ClusteringOrder};
-pub use index::{IndexMetadata, IndexKind};
-pub use table::{TableMetadata, TableMetadataBuilder, TableParams, TableFlag};
-pub use keyspace::{KeyspaceMetadata, KeyspaceParams, ReplicationParams, KeyspaceKind};
 pub use catalog::{SchemaCatalog, SchemaSnapshot};
-pub use system_keyspaces::{SystemTableDef, SystemColumnSpec, BootstrapState};
-
+pub use column::{ClusteringOrder, ColumnKind, ColumnMetadata};
+pub use index::{IndexKind, IndexMetadata};
+pub use keyspace::{KeyspaceKind, KeyspaceMetadata, KeyspaceParams, ReplicationParams};
+pub use system_keyspaces::{BootstrapState, SystemColumnSpec, SystemTableDef};
+pub use table::{TableFlag, TableMetadata, TableMetadataBuilder, TableParams};
+pub use table_id::TableId;

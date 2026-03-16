@@ -19,11 +19,11 @@
 //! | TWCS     | twcs    | Functional  | Time-window: groups by time window   |
 //! | UCS      | ucs     | Experimental| Unified: adaptive tiered/leveled     |
 
+pub mod anticompaction;
 pub mod lcs;
 pub mod twcs;
 pub mod ucs;
 pub mod validation;
-pub mod anticompaction;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -52,19 +52,13 @@ impl Default for CompactionStrategyType {
 /// Create a compaction strategy from the type enum.
 pub fn create_strategy(strategy_type: CompactionStrategyType) -> Box<dyn CompactionStrategy> {
     match strategy_type {
-        CompactionStrategyType::SizeTiered => {
-            Box::new(SizeTieredCompactionStrategy::default())
-        }
-        CompactionStrategyType::Leveled => {
-            Box::new(lcs::LeveledCompactionStrategy::default())
-        }
+        CompactionStrategyType::SizeTiered => Box::new(SizeTieredCompactionStrategy::default()),
+        CompactionStrategyType::Leveled => Box::new(lcs::LeveledCompactionStrategy::default()),
         CompactionStrategyType::TimeWindow => {
             Box::new(twcs::TimeWindowCompactionStrategy::default())
         }
         #[cfg(feature = "ucs")]
-        CompactionStrategyType::Unified => {
-            Box::new(ucs::UnifiedCompactionStrategy::default())
-        }
+        CompactionStrategyType::Unified => Box::new(ucs::UnifiedCompactionStrategy::default()),
     }
 }
 
@@ -181,10 +175,7 @@ pub fn find_fully_expired(
 pub fn anticompact_partitions<F>(
     partitions: Vec<(Vec<u8>, PartitionData)>,
     in_range: F,
-) -> (
-    Vec<(Vec<u8>, PartitionData)>,
-    Vec<(Vec<u8>, PartitionData)>,
-)
+) -> (Vec<(Vec<u8>, PartitionData)>, Vec<(Vec<u8>, PartitionData)>)
 where
     F: Fn(&[u8]) -> bool,
 {
@@ -370,10 +361,34 @@ mod tests {
         };
 
         let sstables = vec![
-            SSTableMetadata { id: 1, data_size: 100, partition_count: 10, min_timestamp: 0, max_timestamp: 100 },
-            SSTableMetadata { id: 2, data_size: 110, partition_count: 10, min_timestamp: 0, max_timestamp: 100 },
-            SSTableMetadata { id: 3, data_size: 105, partition_count: 10, min_timestamp: 0, max_timestamp: 100 },
-            SSTableMetadata { id: 4, data_size: 10000, partition_count: 10, min_timestamp: 0, max_timestamp: 100 },
+            SSTableMetadata {
+                id: 1,
+                data_size: 100,
+                partition_count: 10,
+                min_timestamp: 0,
+                max_timestamp: 100,
+            },
+            SSTableMetadata {
+                id: 2,
+                data_size: 110,
+                partition_count: 10,
+                min_timestamp: 0,
+                max_timestamp: 100,
+            },
+            SSTableMetadata {
+                id: 3,
+                data_size: 105,
+                partition_count: 10,
+                min_timestamp: 0,
+                max_timestamp: 100,
+            },
+            SSTableMetadata {
+                id: 4,
+                data_size: 10000,
+                partition_count: 10,
+                min_timestamp: 0,
+                max_timestamp: 100,
+            },
         ];
 
         let picks = stcs.pick_compaction(&sstables);
@@ -386,9 +401,13 @@ mod tests {
     #[test]
     fn stcs_below_threshold() {
         let stcs = SizeTieredCompactionStrategy::default();
-        let sstables = vec![
-            SSTableMetadata { id: 1, data_size: 100, partition_count: 10, min_timestamp: 0, max_timestamp: 100 },
-        ];
+        let sstables = vec![SSTableMetadata {
+            id: 1,
+            data_size: 100,
+            partition_count: 10,
+            min_timestamp: 0,
+            max_timestamp: 100,
+        }];
         let picks = stcs.pick_compaction(&sstables);
         assert!(picks.is_empty());
     }
@@ -445,12 +464,19 @@ mod tests {
     #[test]
     fn merge_multiple_sources_sorted_output() {
         let source1 = vec![
-            (b"a".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"1", 100)])])),
-            (b"c".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"3", 100)])])),
+            (
+                b"a".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"1", 100)])]),
+            ),
+            (
+                b"c".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"3", 100)])]),
+            ),
         ];
-        let source2 = vec![
-            (b"b".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"2", 100)])])),
-        ];
+        let source2 = vec![(
+            b"b".to_vec(),
+            make_partition(vec![make_row(b"ck", vec![make_cell("x", b"2", 100)])]),
+        )];
 
         let merged = merge_partitions(vec![source1, source2], 86400, 1000);
         assert_eq!(merged.len(), 3);
@@ -474,9 +500,18 @@ mod tests {
     #[test]
     fn anticompaction_splits() {
         let partitions = vec![
-            (b"a".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"1", 100)])])),
-            (b"b".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"2", 100)])])),
-            (b"c".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"3", 100)])])),
+            (
+                b"a".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"1", 100)])]),
+            ),
+            (
+                b"b".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"2", 100)])]),
+            ),
+            (
+                b"c".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"3", 100)])]),
+            ),
         ];
 
         let (inside, outside) = anticompact_partitions(partitions, |pk| pk == b"b");

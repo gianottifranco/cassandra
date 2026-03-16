@@ -25,8 +25,8 @@ pub mod partition;
 pub mod trie;
 
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use parking_lot::RwLock;
 
@@ -123,9 +123,7 @@ impl MemtableBackend for SkipListMemtable {
 
     fn iter_partitions(&self) -> Vec<(Vec<u8>, PartitionData)> {
         let data = self.data.read();
-        data.iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect()
+        data.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
     fn memory_usage(&self) -> usize {
@@ -192,7 +190,8 @@ impl Memtable {
     }
 
     pub fn update_commitlog_upper_bound(&self, segment_id: u64) {
-        self.commitlog_upper_bound.fetch_max(segment_id, Ordering::Relaxed);
+        self.commitlog_upper_bound
+            .fetch_max(segment_id, Ordering::Relaxed);
     }
 }
 
@@ -243,7 +242,11 @@ impl MemtableManager {
             .entry(cf_name.to_string())
             .or_insert_with(|| {
                 let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-                Arc::new(Memtable::with_type(id, commitlog_segment_id, self.memtable_type))
+                Arc::new(Memtable::with_type(
+                    id,
+                    commitlog_segment_id,
+                    self.memtable_type,
+                ))
             })
             .clone()
     }
@@ -270,7 +273,11 @@ impl MemtableManager {
     ) -> Option<Arc<Memtable>> {
         let mut active = self.active.write();
         let new_id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let new_mt = Arc::new(Memtable::with_type(new_id, commitlog_segment_id, self.memtable_type));
+        let new_mt = Arc::new(Memtable::with_type(
+            new_id,
+            commitlog_segment_id,
+            self.memtable_type,
+        ));
 
         let old = active.insert(cf_name.to_string(), new_mt);
 

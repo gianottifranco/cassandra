@@ -41,11 +41,7 @@ pub const VIRTUAL_METRICS_KEYSPACE: &str = "system_metrics";
 // ─── Keyspace Sets ─────────────────────────────────────────────────────────
 
 /// Local system keyspaces (LocalStrategy replication).
-pub const LOCAL_SYSTEM_KEYSPACES: &[&str] = &[
-    SYSTEM_KEYSPACE,
-    SCHEMA_KEYSPACE,
-    ACCORD_KEYSPACE,
-];
+pub const LOCAL_SYSTEM_KEYSPACES: &[&str] = &[SYSTEM_KEYSPACE, SCHEMA_KEYSPACE, ACCORD_KEYSPACE];
 
 /// Virtual system keyspaces (no physical storage).
 pub const VIRTUAL_SYSTEM_KEYSPACES: &[&str] = &[

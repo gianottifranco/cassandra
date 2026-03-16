@@ -23,9 +23,9 @@
 //! 1. SFUNC is called for each row → accumulates state
 //! 2. FINALFUNC (optional) transforms final state → result
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 use crate::udf::{UdfExecutor, UdfValue};
 
@@ -167,7 +167,9 @@ mod tests {
                 }
                 Ok(UdfValue::Int(total))
             }
-            fn language(&self) -> &str { "rust" }
+            fn language(&self) -> &str {
+                "rust"
+            }
         }
 
         let meta = UdaMetadata {
@@ -180,12 +182,7 @@ mod tests {
             initcond: Some("0".into()),
         };
 
-        let mut agg = AggregateState::new(
-            meta,
-            Arc::new(SumFn),
-            None,
-            UdfValue::Int(0),
-        );
+        let mut agg = AggregateState::new(meta, Arc::new(SumFn), None, UdfValue::Int(0));
 
         agg.accumulate(&[UdfValue::Int(10)]).unwrap();
         agg.accumulate(&[UdfValue::Int(20)]).unwrap();

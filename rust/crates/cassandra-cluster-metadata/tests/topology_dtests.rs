@@ -2,13 +2,13 @@
 
 //! Integration tests for topology operations: chained sequences, error recovery.
 
-use std::sync::Arc;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::sync::Arc;
 
-use cassandra_cluster_metadata::node::{Endpoint, NodeId, NodeInfo, NodeState};
 use cassandra_cluster_metadata::cluster::ClusterMetadata;
+use cassandra_cluster_metadata::node::{Endpoint, NodeId, NodeInfo, NodeState};
 use cassandra_cluster_metadata::topology::{
-    TopologyCoordinator, TopologyOperation, TopologyState, TopologyError,
+    TopologyCoordinator, TopologyError, TopologyOperation, TopologyState,
 };
 use cassandra_common::Token;
 
@@ -48,7 +48,8 @@ fn chained_bootstrap_then_decommission() {
     let mut n4 = node(7004, vec![]);
     let plan = tc.begin_bootstrap(&n4, vec![Token::from_raw(50)]).unwrap();
     assert_eq!(plan.operation, TopologyOperation::Bootstrap);
-    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)]).unwrap();
+    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)])
+        .unwrap();
     assert_eq!(cm.snapshot().node_count(), 4);
 
     // Reset to idle.
@@ -91,7 +92,8 @@ fn bootstrap_then_cleanup() {
     // Bootstrap node 4.
     let mut n4 = node(7004, vec![]);
     tc.begin_bootstrap(&n4, vec![Token::from_raw(50)]).unwrap();
-    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)]).unwrap();
+    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)])
+        .unwrap();
     tc.reset().unwrap();
 
     // Existing node 1 runs cleanup.
@@ -199,7 +201,8 @@ fn epoch_monotonic_advance() {
     let epoch_after_bootstrap = tc.epoch();
     assert!(epoch_after_bootstrap > initial_epoch);
 
-    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)]).unwrap();
+    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)])
+        .unwrap();
     tc.reset().unwrap();
 
     let n1_fresh = node(7001, vec![-100, 0]);
@@ -222,7 +225,8 @@ fn pending_ranges_lifecycle() {
     // May or may not have pending ranges depending on ring, but structure works.
     let _ = pr.total_count();
 
-    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)]).unwrap();
+    tc.finish_bootstrap(&mut n4, vec![Token::from_raw(50)])
+        .unwrap();
 
     // After completion, pending ranges should be cleared.
     assert!(tc.pending_ranges().is_empty());

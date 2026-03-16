@@ -56,10 +56,14 @@
 //! - `org.apache.cassandra.db.marshal.*` (type system)
 //! - `org.apache.cassandra.exceptions.*` (error codes)
 
+pub mod cdc_tests;
 pub mod comparators;
 pub mod fuzz;
 pub mod golden;
+pub mod perf_report;
+pub mod rollback_tests;
 pub mod shadow_traffic;
+pub mod upgrade_harness;
 
 #[cfg(test)]
 mod gap_guards;

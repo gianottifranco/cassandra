@@ -174,12 +174,16 @@ impl CounterContext {
     /// `total()` before cleanup == `total()` after cleanup.
     /// The cleanup only reduces the number of shards for storage efficiency.
     pub fn cleanup(&mut self, local_node: Uuid) {
-        let remote_sum: i64 = self.shards.iter()
+        let remote_sum: i64 = self
+            .shards
+            .iter()
             .filter(|(id, _)| **id != local_node)
             .map(|(_, s)| s.count)
             .sum();
 
-        let remote_max_clock: i64 = self.shards.iter()
+        let remote_max_clock: i64 = self
+            .shards
+            .iter()
             .filter(|(id, _)| **id != local_node)
             .map(|(_, s)| s.clock)
             .max()
@@ -227,35 +231,50 @@ impl CounterContext {
     /// Deserialize from the binary counter context format.
     pub fn deserialize(data: &[u8]) -> Result<Self, CounterError> {
         if data.len() < HEADER_SIZE {
-            return Err(CounterError::InvalidFormat("data too short for header".into()));
+            return Err(CounterError::InvalidFormat(
+                "data too short for header".into(),
+            ));
         }
 
         let mut cursor = std::io::Cursor::new(data);
-        let _header = cursor.read_u16::<BigEndian>()
+        let _header = cursor
+            .read_u16::<BigEndian>()
             .map_err(|e| CounterError::InvalidFormat(e.to_string()))?;
 
         let remaining = data.len() - HEADER_SIZE;
         if remaining % SHARD_SIZE != 0 {
-            return Err(CounterError::InvalidFormat(
-                format!("remaining bytes {} not divisible by shard size {}", remaining, SHARD_SIZE),
-            ));
+            return Err(CounterError::InvalidFormat(format!(
+                "remaining bytes {} not divisible by shard size {}",
+                remaining, SHARD_SIZE
+            )));
         }
 
         let shard_count = remaining / SHARD_SIZE;
         let mut shards = BTreeMap::new();
 
         for _ in 0..shard_count {
-            let msb = cursor.read_u64::<BigEndian>()
+            let msb = cursor
+                .read_u64::<BigEndian>()
                 .map_err(|e| CounterError::InvalidFormat(e.to_string()))?;
-            let lsb = cursor.read_u64::<BigEndian>()
+            let lsb = cursor
+                .read_u64::<BigEndian>()
                 .map_err(|e| CounterError::InvalidFormat(e.to_string()))?;
             let node_id = Uuid::from_u64_pair(msb, lsb);
-            let clock = cursor.read_i64::<BigEndian>()
+            let clock = cursor
+                .read_i64::<BigEndian>()
                 .map_err(|e| CounterError::InvalidFormat(e.to_string()))?;
-            let count = cursor.read_i64::<BigEndian>()
+            let count = cursor
+                .read_i64::<BigEndian>()
                 .map_err(|e| CounterError::InvalidFormat(e.to_string()))?;
 
-            shards.insert(node_id, CounterShard { node_id, clock, count });
+            shards.insert(
+                node_id,
+                CounterShard {
+                    node_id,
+                    clock,
+                    count,
+                },
+            );
         }
 
         Ok(Self { shards })
@@ -270,7 +289,12 @@ impl Default for CounterContext {
 
 impl fmt::Display for CounterContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Counter(total={}, shards={})", self.total(), self.shard_count())
+        write!(
+            f,
+            "Counter(total={}, shards={})",
+            self.total(),
+            self.shard_count()
+        )
     }
 }
 
@@ -453,8 +477,16 @@ mod tests {
     #[test]
     fn from_shards() {
         let shards = vec![
-            CounterShard { node_id: node_a(), clock: 1, count: 10 },
-            CounterShard { node_id: node_b(), clock: 2, count: 20 },
+            CounterShard {
+                node_id: node_a(),
+                clock: 1,
+                count: 10,
+            },
+            CounterShard {
+                node_id: node_b(),
+                clock: 2,
+                count: 20,
+            },
         ];
         let ctx = CounterContext::from_shards(shards);
         assert_eq!(ctx.total(), 30);
@@ -564,14 +596,13 @@ mod proptests {
     }
 
     fn arb_counter() -> impl Strategy<Value = CounterContext> {
-        prop::collection::vec((arb_uuid(), -1000i64..1000i64), 0..5)
-            .prop_map(|ops| {
-                let mut ctx = CounterContext::new();
-                for (node, delta) in ops {
-                    ctx.apply_local(node, delta);
-                }
-                ctx
-            })
+        prop::collection::vec((arb_uuid(), -1000i64..1000i64), 0..5).prop_map(|ops| {
+            let mut ctx = CounterContext::new();
+            for (node, delta) in ops {
+                ctx.apply_local(node, delta);
+            }
+            ctx
+        })
     }
 
     proptest! {
@@ -624,4 +655,3 @@ mod proptests {
         }
     }
 }
-

@@ -35,18 +35,17 @@
 //! - [`metrics`] — per-verb counters and latency tracking
 //! - [`service`] — central messaging hub with handler dispatch
 
-pub mod verb;
 pub mod frame;
 pub mod metrics;
 pub mod service;
+pub mod verb;
 
-pub use verb::Verb;
 pub use frame::{
-    Message, MessageHeader, MessageCodec, VersionNegotiation,
-    CURRENT_MESSAGING_VERSION, MIN_MESSAGING_VERSION,
+    CURRENT_MESSAGING_VERSION, MIN_MESSAGING_VERSION, Message, MessageCodec, MessageHeader,
+    VersionNegotiation,
 };
 pub use metrics::{MessagingMetrics, VerbMetrics, VerbMetricsSnapshot};
 pub use service::{
-    MessagingService, MessagingError, MessageHandler,
-    ConnectionPool, VerbTimeoutConfig,
+    ConnectionPool, MessageHandler, MessagingError, MessagingService, VerbTimeoutConfig,
 };
+pub use verb::Verb;

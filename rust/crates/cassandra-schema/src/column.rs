@@ -5,9 +5,9 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.schema.ColumnMetadata`
 
-use std::fmt;
-use serde::{Deserialize, Serialize};
 use cassandra_types::CqlType;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// The kind of column within a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -49,7 +49,9 @@ pub enum ClusteringOrder {
 }
 
 impl Default for ClusteringOrder {
-    fn default() -> Self { Self::None }
+    fn default() -> Self {
+        Self::None
+    }
 }
 
 /// Metadata for a single column in a table.
@@ -84,27 +86,67 @@ impl ColumnMetadata {
         clustering_order: ClusteringOrder,
         masked_with: Option<(String, Vec<String>)>,
     ) -> Self {
-        Self { name, kind, position, column_type, clustering_order, masked_with }
+        Self {
+            name,
+            kind,
+            position,
+            column_type,
+            clustering_order,
+            masked_with,
+        }
     }
 
     /// Convenience: create a partition key column.
     pub fn partition_key(name: impl Into<String>, position: u32, cql_type: CqlType) -> Self {
-        Self::new(name.into(), ColumnKind::PartitionKey, position, cql_type, ClusteringOrder::None, None)
+        Self::new(
+            name.into(),
+            ColumnKind::PartitionKey,
+            position,
+            cql_type,
+            ClusteringOrder::None,
+            None,
+        )
     }
 
     /// Convenience: create a clustering column.
-    pub fn clustering(name: impl Into<String>, position: u32, cql_type: CqlType, order: ClusteringOrder) -> Self {
-        Self::new(name.into(), ColumnKind::Clustering, position, cql_type, order, None)
+    pub fn clustering(
+        name: impl Into<String>,
+        position: u32,
+        cql_type: CqlType,
+        order: ClusteringOrder,
+    ) -> Self {
+        Self::new(
+            name.into(),
+            ColumnKind::Clustering,
+            position,
+            cql_type,
+            order,
+            None,
+        )
     }
 
     /// Convenience: create a regular column.
     pub fn regular(name: impl Into<String>, cql_type: CqlType) -> Self {
-        Self::new(name.into(), ColumnKind::Regular, 0, cql_type, ClusteringOrder::None, None)
+        Self::new(
+            name.into(),
+            ColumnKind::Regular,
+            0,
+            cql_type,
+            ClusteringOrder::None,
+            None,
+        )
     }
 
     /// Convenience: create a static column.
     pub fn static_col(name: impl Into<String>, cql_type: CqlType) -> Self {
-        Self::new(name.into(), ColumnKind::Static, 0, cql_type, ClusteringOrder::None, None)
+        Self::new(
+            name.into(),
+            ColumnKind::Static,
+            0,
+            cql_type,
+            ClusteringOrder::None,
+            None,
+        )
     }
 
     /// Add masking configuration to this column.

@@ -27,9 +27,9 @@
 //! 2. A feature-gated WASM sandbox stub for future implementation
 //! 3. A native Rust function extension point
 
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 
 /// Metadata for a registered UDF.
 #[derive(Debug, Clone)]
@@ -119,12 +119,7 @@ impl UdfRegistry {
     }
 
     /// Remove a UDF.
-    pub fn unregister(
-        &self,
-        keyspace: &str,
-        name: &str,
-        arg_types: &[(String, String)],
-    ) -> bool {
+    pub fn unregister(&self, keyspace: &str, name: &str, arg_types: &[(String, String)]) -> bool {
         let key = Self::make_key(keyspace, name, arg_types);
         self.functions.write().remove(&key).is_some()
     }
@@ -186,7 +181,9 @@ mod tests {
             body: String::new(),
             called_on_null_input: false,
         };
-        registry.register(meta.clone(), Arc::new(TestExecutor)).unwrap();
+        registry
+            .register(meta.clone(), Arc::new(TestExecutor))
+            .unwrap();
         assert_eq!(registry.len(), 1);
 
         let (got_meta, executor) = registry

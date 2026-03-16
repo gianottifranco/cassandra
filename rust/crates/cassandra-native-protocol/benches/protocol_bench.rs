@@ -10,7 +10,7 @@
 //! cargo bench -p cassandra-native-protocol --bench protocol_bench
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 use bytes::{Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};

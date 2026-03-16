@@ -36,7 +36,9 @@ pub const NO_TIMESTAMP: i64 = i64::MIN;
 /// Cassandra uses microsecond-resolution wall-clock timestamps for cell-level
 /// conflict resolution (last-write-wins). This type wraps the raw `i64` value
 /// and provides ordering, serialization, and convenience methods.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Timestamp(pub i64);
 
 impl Timestamp {

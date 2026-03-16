@@ -26,8 +26,8 @@ use hyper_util::rt::TokioIo;
 use tokio::net::TcpListener;
 use tracing::{error, info};
 
-use crate::prometheus_metrics::MetricsRegistry;
 use crate::operations::OperationTracker;
+use crate::prometheus_metrics::MetricsRegistry;
 use crate::virtual_tables::VirtualTableRegistry;
 
 /// Shared state for the admin HTTP server.
@@ -78,10 +78,10 @@ async fn handle_request(
         (Method::GET, "/health") => handle_health(),
         (Method::GET, "/api/v1/operations") => handle_operations(&state),
         (Method::POST, "/api/v1/operations/repair") => handle_repair_request(req, &state).await,
-        (Method::GET, p) if p.starts_with("/api/v1/virtual/") => {
-            handle_virtual_table(p, &state)
+        (Method::GET, p) if p.starts_with("/api/v1/virtual/") => handle_virtual_table(p, &state),
+        (Method::POST, "/api/v1/operations/rebuild_index") => {
+            handle_rebuild_index(req, &state).await
         }
-        (Method::POST, "/api/v1/operations/rebuild_index") => handle_rebuild_index(req, &state).await,
         _ => not_found(),
     };
 
@@ -90,7 +90,9 @@ async fn handle_request(
 
 fn handle_metrics(state: &AdminState) -> Response<Full<Bytes>> {
     if let Some(ref coordinator) = state.repair_coordinator {
-        state.metrics.sync_from_repair_metrics(&coordinator.metrics.snapshot());
+        state
+            .metrics
+            .sync_from_repair_metrics(&coordinator.metrics.snapshot());
     }
     let body = state.metrics.gather_text();
     Response::builder()
@@ -116,7 +118,10 @@ fn handle_operations(state: &AdminState) -> Response<Full<Bytes>> {
 
 fn handle_virtual_table(path: &str, state: &AdminState) -> Response<Full<Bytes>> {
     // Parse /api/v1/virtual/<keyspace>/<table>
-    let parts: Vec<&str> = path.trim_start_matches("/api/v1/virtual/").split('/').collect();
+    let parts: Vec<&str> = path
+        .trim_start_matches("/api/v1/virtual/")
+        .split('/')
+        .collect();
     if parts.len() != 2 {
         return json_response(
             StatusCode::BAD_REQUEST,
@@ -161,7 +166,12 @@ async fn handle_repair_request(
 
     let body_bytes = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(e) => return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({"error": format!("Failed to read body: {}", e)})),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": format!("Failed to read body: {}", e)}),
+            );
+        }
     };
 
     #[derive(serde::Deserialize)]
@@ -177,7 +187,12 @@ async fn handle_repair_request(
 
     let payload: RepairRequestBody = match serde_json::from_slice(&body_bytes) {
         Ok(p) => p,
-        Err(e) => return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({"error": format!("Invalid JSON: {}", e)})),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": format!("Invalid JSON: {}", e)}),
+            );
+        }
     };
 
     if let Some(ref coordinator) = state.repair_coordinator {
@@ -191,29 +206,52 @@ async fn handle_repair_request(
 
         // Stub ranges to the whole ring, and local endpoint for now
         let local_ep = cassandra_cluster_metadata::Endpoint::new("127.0.0.1:7000".parse().unwrap());
-        let ranges = vec![(cassandra_common::Token::from_raw(i64::MIN), cassandra_common::Token::from_raw(i64::MAX))];
-        
-        match coordinator.start_repair(repair_type, &payload.keyspace, &payload.tables, &ranges, &[local_ep]) {
+        let ranges = vec![(
+            cassandra_common::Token::from_raw(i64::MIN),
+            cassandra_common::Token::from_raw(i64::MAX),
+        )];
+
+        match coordinator.start_repair(
+            repair_type,
+            &payload.keyspace,
+            &payload.tables,
+            &ranges,
+            &[local_ep],
+        ) {
             Ok(id) => {
-                let op_id = state.operations.register(crate::operations::OperationType::Repair, format!("Repair keyspace: {}", payload.keyspace));
-                json_response(StatusCode::OK, &serde_json::json!({ "repair_id": id.to_string(), "operation_id": op_id.to_string() }))
+                let op_id = state.operations.register(
+                    crate::operations::OperationType::Repair,
+                    format!("Repair keyspace: {}", payload.keyspace),
+                );
+                json_response(
+                    StatusCode::OK,
+                    &serde_json::json!({ "repair_id": id.to_string(), "operation_id": op_id.to_string() }),
+                )
             }
-            Err(e) => json_response(StatusCode::CONFLICT, &serde_json::json!({"error": e.to_string()})),
+            Err(e) => json_response(
+                StatusCode::CONFLICT,
+                &serde_json::json!({"error": e.to_string()}),
+            ),
         }
     } else {
-        json_response(StatusCode::SERVICE_UNAVAILABLE, &serde_json::json!({"error": "repair coordinator not configured"}))
+        json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &serde_json::json!({"error": "repair coordinator not configured"}),
+        )
     }
 }
 
-async fn handle_rebuild_index(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+async fn handle_rebuild_index(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(e) => return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({"error": format!("Failed to read body: {}", e)})),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": format!("Failed to read body: {}", e)}),
+            );
+        }
     };
 
     #[derive(serde::Deserialize)]
@@ -225,7 +263,12 @@ async fn handle_rebuild_index(
 
     let payload: RebuildIndexRequestBody = match serde_json::from_slice(&body_bytes) {
         Ok(p) => p,
-        Err(e) => return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({"error": format!("Invalid JSON: {}", e)})),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &serde_json::json!({"error": format!("Invalid JSON: {}", e)}),
+            );
+        }
     };
 
     if let Some(ref catalog) = state.schema_catalog {
@@ -241,7 +284,10 @@ async fn handle_rebuild_index(
         let index_meta = match table_meta.index(&payload.index_name) {
             Some(i) => i,
             None => {
-                let msg = format!("Index {} not found on {}.{}", payload.index_name, payload.keyspace, payload.table);
+                let msg = format!(
+                    "Index {} not found on {}.{}",
+                    payload.index_name, payload.keyspace, payload.table
+                );
                 return json_response(StatusCode::NOT_FOUND, &serde_json::json!({"error": msg}));
             }
         };
@@ -250,24 +296,41 @@ async fn handle_rebuild_index(
             let column_name = match index_meta.target_column() {
                 Some(c) => c.clone(),
                 None => {
-                    return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({"error": "Index target column not defined"}));
+                    return json_response(
+                        StatusCode::BAD_REQUEST,
+                        &serde_json::json!({"error": "Index target column not defined"}),
+                    );
                 }
             };
-            
+
             // Map IndexKind to IndexType
             let index_type = match index_meta.kind {
                 cassandra_schema::IndexKind::Keys => cassandra_storage::index::IndexType::Legacy,
                 cassandra_schema::IndexKind::Custom => {
-                    let class = index_meta.options.get("class_name").map(|s| s.as_str()).unwrap_or("");
+                    let class = index_meta
+                        .options
+                        .get("class_name")
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
                     if class.contains("SASIIndex") {
                         #[cfg(feature = "sasi")]
-                        { cassandra_storage::index::IndexType::Sasi }
+                        {
+                            cassandra_storage::index::IndexType::Sasi
+                        }
                         #[cfg(not(feature = "sasi"))]
-                        { return json_response(StatusCode::NOT_IMPLEMENTED, &serde_json::json!({"error": "SASI index support not enabled"})); }
+                        {
+                            return json_response(
+                                StatusCode::NOT_IMPLEMENTED,
+                                &serde_json::json!({"error": "SASI index support not enabled"}),
+                            );
+                        }
                     } else if class.contains("StorageAttachedIndex") {
                         cassandra_storage::index::IndexType::Sai
                     } else {
-                        return json_response(StatusCode::BAD_REQUEST, &serde_json::json!({"error": format!("Unsupported custom index class: {}", class)}));
+                        return json_response(
+                            StatusCode::BAD_REQUEST,
+                            &serde_json::json!({"error": format!("Unsupported custom index class: {}", class)}),
+                        );
                     }
                 }
             };
@@ -284,18 +347,28 @@ async fn handle_rebuild_index(
             let cf_name = format!("{}.{}", payload.keyspace, payload.table);
             match engine.rebuild_index(&cf_name, definition) {
                 Ok(_) => {
-                    let msg = format!("Rebuild of index {} completed successfully", payload.index_name);
+                    let msg = format!(
+                        "Rebuild of index {} completed successfully",
+                        payload.index_name
+                    );
                     json_response(StatusCode::OK, &serde_json::json!({"status": msg}))
                 }
-                Err(e) => {
-                    json_response(StatusCode::INTERNAL_SERVER_ERROR, &serde_json::json!({"error": e.to_string()}))
-                }
+                Err(e) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &serde_json::json!({"error": e.to_string()}),
+                ),
             }
         } else {
-            json_response(StatusCode::SERVICE_UNAVAILABLE, &serde_json::json!({"error": "storage engine not configured"}))
+            json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &serde_json::json!({"error": "storage engine not configured"}),
+            )
         }
     } else {
-        json_response(StatusCode::SERVICE_UNAVAILABLE, &serde_json::json!({"error": "schema catalog not configured"}))
+        json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &serde_json::json!({"error": "schema catalog not configured"}),
+        )
     }
 }
 

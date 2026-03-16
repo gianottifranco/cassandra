@@ -10,7 +10,7 @@
 //! definitions to produce a deterministic UUID. This matches the Java
 //! `SchemaConstants.emptyVersion` computation approach.
 
-use md5::{Md5, Digest};
+use md5::{Digest, Md5};
 use uuid::Uuid;
 
 use crate::catalog::SchemaSnapshot;
@@ -124,7 +124,10 @@ mod tests {
         let catalog = bootstrap_system_schema();
         let v_with_sys = compute_schema_version(&catalog.snapshot());
 
-        assert_ne!(v_empty, v_with_sys, "version should change when schema changes");
+        assert_ne!(
+            v_empty, v_with_sys,
+            "version should change when schema changes"
+        );
     }
 
     #[test]
@@ -139,10 +142,7 @@ mod tests {
     #[test]
     fn agreement_with_matching_peers() {
         let v = empty_schema_version();
-        let peers = vec![
-            ("node1".to_string(), v),
-            ("node2".to_string(), v),
-        ];
+        let peers = vec![("node1".to_string(), v), ("node2".to_string(), v)];
         assert_eq!(
             check_schema_agreement(v, &peers),
             SchemaAgreementStatus::Agreed(v)
@@ -153,10 +153,7 @@ mod tests {
     fn disagreement_detected() {
         let v1 = empty_schema_version();
         let v2 = Uuid::new_v4();
-        let peers = vec![
-            ("node1".to_string(), v1),
-            ("node2".to_string(), v2),
-        ];
+        let peers = vec![("node1".to_string(), v1), ("node2".to_string(), v2)];
         match check_schema_agreement(v1, &peers) {
             SchemaAgreementStatus::Disagreed { local_version, .. } => {
                 assert_eq!(local_version, v1);

@@ -2,24 +2,20 @@
 
 //! Security benchmarks: bcrypt hashing, audit event throughput.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use cassandra_security::audit::{AuditEvent, AuditEventType, NoOpAuditLogger, AuditLogger};
+use cassandra_security::audit::{AuditEvent, AuditEventType, AuditLogger, NoOpAuditLogger};
 use cassandra_security::fql::FqlRecord;
+use criterion::{Criterion, black_box, criterion_group, criterion_main};
 
 fn bench_bcrypt_hash(c: &mut Criterion) {
     c.bench_function("bcrypt_hash_cost_4", |b| {
-        b.iter(|| {
-            bcrypt::hash(black_box("password123"), 4).unwrap()
-        });
+        b.iter(|| bcrypt::hash(black_box("password123"), 4).unwrap());
     });
 }
 
 fn bench_bcrypt_verify(c: &mut Criterion) {
     let hashed = bcrypt::hash("password123", 4).unwrap();
     c.bench_function("bcrypt_verify_cost_4", |b| {
-        b.iter(|| {
-            bcrypt::verify(black_box("password123"), black_box(&hashed)).unwrap()
-        });
+        b.iter(|| bcrypt::verify(black_box("password123"), black_box(&hashed)).unwrap());
     });
 }
 
@@ -30,9 +26,7 @@ fn bench_audit_event_serialize(c: &mut Criterion) {
         .with_query("SELECT * FROM test_ks.users WHERE id = 1");
 
     c.bench_function("audit_event_serialize", |b| {
-        b.iter(|| {
-            serde_json::to_string(black_box(&event)).unwrap()
-        });
+        b.iter(|| serde_json::to_string(black_box(&event)).unwrap());
     });
 }
 
@@ -56,9 +50,7 @@ fn bench_fql_encode(c: &mut Criterion) {
     };
 
     c.bench_function("fql_encode", |b| {
-        b.iter(|| {
-            black_box(&record).encode()
-        });
+        b.iter(|| black_box(&record).encode());
     });
 }
 
@@ -72,9 +64,7 @@ fn bench_fql_decode(c: &mut Criterion) {
     let encoded = record.encode();
 
     c.bench_function("fql_decode", |b| {
-        b.iter(|| {
-            FqlRecord::decode(black_box(&encoded)).unwrap()
-        });
+        b.iter(|| FqlRecord::decode(black_box(&encoded)).unwrap());
     });
 }
 

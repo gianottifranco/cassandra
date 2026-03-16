@@ -27,20 +27,18 @@ use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::backup::{self, IncrementalBackupConfig};
-use crate::commitlog::{
-    CommitLog, CommitLogConfig, Mutation,
-};
+use crate::commitlog::{CommitLog, CommitLogConfig, Mutation};
 use crate::compaction::{
-    CompactionMetrics, CompactionStrategy, CompactionStrategyType,
-    SSTableMetadata, create_strategy, merge_partitions,
+    CompactionMetrics, CompactionStrategy, CompactionStrategyType, SSTableMetadata,
+    create_strategy, merge_partitions,
 };
-use crate::memtable::{MemtableManager, MemtableType};
-use crate::memtable::partition::{Cell, PartitionData, Row};
-use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
-use crate::sstable::{SSTableReader, SSTableWriter, BtiReader, BtiWriter};
 use crate::index::{IndexDefinition, IndexManager, IndexType, SecondaryIndex};
 #[cfg(feature = "materialized-views")]
 use crate::materialized_views::{MaterializedViewDefinition, ViewManager};
+use crate::memtable::partition::{Cell, PartitionData, Row};
+use crate::memtable::{MemtableManager, MemtableType};
+use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
+use crate::sstable::{BtiReader, BtiWriter, SSTableReader, SSTableWriter};
 use std::sync::Arc;
 
 // ─── Configuration ─────────────────────────────────────────────────────────
@@ -317,7 +315,10 @@ impl StorageEngine {
 
         // 3. Generate and apply materialized view mutations
         #[cfg(feature = "materialized-views")]
-        if self.view_manager.has_views_for(&mutation.keyspace, &mutation.table) {
+        if self
+            .view_manager
+            .has_views_for(&mutation.keyspace, &mutation.table)
+        {
             for mrow in &mutation.rows {
                 let mut cols_map = std::collections::HashMap::new();
                 for cell in &mrow.cells {
@@ -422,10 +423,12 @@ impl StorageEngine {
     ) -> Result<Vec<PartitionData>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
-        let mgr = mgrs.get(&cf_name).ok_or_else(|| "Index manager not found")?;
-        
+        let mgr = mgrs
+            .get(&cf_name)
+            .ok_or_else(|| "Index manager not found")?;
+
         let entries = mgr.search(index_name, term)?;
-        
+
         let mut results = Vec::new();
         // Resolve raw partition data
         // In production this returns Iterators to avoid holding whole partitions in RAM.
@@ -448,10 +451,12 @@ impl StorageEngine {
     ) -> Result<Vec<(PartitionData, f32)>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
-        let mgr = mgrs.get(&cf_name).ok_or_else(|| "Index manager not found")?;
-        
+        let mgr = mgrs
+            .get(&cf_name)
+            .ok_or_else(|| "Index manager not found")?;
+
         let entries = mgr.search_vector(index_name, vector, top_k)?;
-        
+
         let mut results = Vec::new();
         for (entry, score) in entries {
             if let Some(pd) = self.read_partition(keyspace, table, &entry.partition_key) {
@@ -463,10 +468,10 @@ impl StorageEngine {
 
     /// Flush a column family's memtable to disk.
     pub fn flush_cf(&self, cf_name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let old_memtable = match self.memtable_manager.switch_memtable(
-            cf_name,
-            self.commitlog.current_segment_id(),
-        ) {
+        let old_memtable = match self
+            .memtable_manager
+            .switch_memtable(cf_name, self.commitlog.current_segment_id())
+        {
             Some(mt) => mt,
             None => return Ok(()),
         };
@@ -524,9 +529,7 @@ impl StorageEngine {
         self.flushes_completed.fetch_add(1, Ordering::Relaxed);
 
         // Record truncation point
-        let upper = old_memtable
-            .commitlog_upper_bound
-            .load(Ordering::Relaxed);
+        let upper = old_memtable.commitlog_upper_bound.load(Ordering::Relaxed);
         self.commitlog.mark_cf_flushed(cf_name, upper, 0);
 
         // Discard old commit log segments
@@ -599,15 +602,16 @@ impl StorageEngine {
             .flat_map(|sst| sst.descriptor_component_files())
             .collect();
 
-        let manifest = backup::create_snapshot(
-            name, data_dir, keyspace, table, &all_files, schema_cql,
-        )?;
+        let manifest =
+            backup::create_snapshot(name, data_dir, keyspace, table, &all_files, schema_cql)?;
 
         Ok(manifest)
     }
 
     /// List snapshots.
-    pub fn list_snapshots(&self) -> Result<Vec<backup::SnapshotManifest>, Box<dyn std::error::Error>> {
+    pub fn list_snapshots(
+        &self,
+    ) -> Result<Vec<backup::SnapshotManifest>, Box<dyn std::error::Error>> {
         let data_dir = &self.config.data_directories[0];
         Ok(backup::list_snapshots(data_dir)?)
     }
@@ -677,27 +681,37 @@ impl StorageEngine {
     }
 
     /// Add a new index and rebuild it from existing data.
-    pub fn rebuild_index(&self, cf_name: &str, definition: IndexDefinition) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn rebuild_index(
+        &self,
+        cf_name: &str,
+        definition: IndexDefinition,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let index_name = definition.name.clone();
 
         // Ensure index manager exists
         let _idx_mgr = {
             let mut mgrs = self.index_managers.write();
-            let entry = mgrs.entry(cf_name.to_string()).or_insert_with(|| std::sync::Arc::new(IndexManager::new()));
+            let entry = mgrs
+                .entry(cf_name.to_string())
+                .or_insert_with(|| std::sync::Arc::new(IndexManager::new()));
             entry.clone()
         };
 
         // For now, if the index exists, we just let it be, but ideally we drop and recreate.
         // Create the index instance
         let index: Box<dyn SecondaryIndex> = match definition.index_type {
-            IndexType::Legacy => Box::new(crate::index::legacy::LegacyIndex::new(definition.clone())),
+            IndexType::Legacy => {
+                Box::new(crate::index::legacy::LegacyIndex::new(definition.clone()))
+            }
             #[cfg(feature = "sasi")]
             IndexType::Sasi => Box::new(crate::index::sasi::SasiIndex::new(definition.clone())),
             #[cfg(not(feature = "sasi"))]
-            IndexType::Sasi => return Err(Box::new(std::io::Error::new(
+            IndexType::Sasi => {
+                return Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Unsupported,
                     "SASI index not enabled in build metrics",
-                ))),
+                )));
+            }
             IndexType::Sai => {
                 // SAI is built differently per SSTable
                 return Err(Box::new(std::io::Error::new(
@@ -756,13 +770,21 @@ impl StorageEngine {
         // We can't register unless `IndexManager` allows interior mutability.
         // We will fix `IndexManager` next.
 
-        info!(cf = cf_name, index = index_name, entries = count, "Finished index rebuild");
+        info!(
+            cf = cf_name,
+            index = index_name,
+            entries = count,
+            "Finished index rebuild"
+        );
         Ok(())
     }
 
     /// Build a materialized view by backfilling all existing base table data.
     #[cfg(feature = "materialized-views")]
-    pub fn build_view(&self, def: MaterializedViewDefinition) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn build_view(
+        &self,
+        def: MaterializedViewDefinition,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let view_name = def.name.clone();
         let ks = def.keyspace.clone();
         let base_table = def.base_table.clone();
@@ -837,11 +859,11 @@ impl StorageEngine {
         }
         drop(sstables);
 
-        // Also note: For a complete backfill we would also need to iterate Memtables, 
-        // but since `iter_partitions` on `Memtable` isn't fully structured for generic scans, 
-        // and this MVP replicates `rebuild_index` which also only scans SSTables, we stop here. 
+        // Also note: For a complete backfill we would also need to iterate Memtables,
+        // but since `iter_partitions` on `Memtable` isn't fully structured for generic scans,
+        // and this MVP replicates `rebuild_index` which also only scans SSTables, we stop here.
         // We assume Memtables will be flushed eventually or have been flushed.
-        
+
         info!(view = %view_name, mutations_applied = count, "Finished materialized view backfill");
         Ok(())
     }
@@ -893,7 +915,8 @@ impl StorageEngine {
         // Write new SSTable
         let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
         let data_dir = &self.config.data_directories[0];
-        let mut descriptor = SSTableDescriptor::new(data_dir, &group_keyspace, &group_table, generation);
+        let mut descriptor =
+            SSTableDescriptor::new(data_dir, &group_keyspace, &group_table, generation);
         descriptor.format = self.config.sstable_format;
 
         // Give SAI indexes a chance to build segments
@@ -954,10 +977,8 @@ impl StorageEngine {
 
     fn maybe_backup(&self, files: &[PathBuf]) {
         if self.config.incremental_backup.enabled {
-            if let Err(e) = backup::backup_sstable(
-                &self.config.incremental_backup.directory,
-                files,
-            ) {
+            if let Err(e) = backup::backup_sstable(&self.config.incremental_backup.directory, files)
+            {
                 warn!(error = %e, "Incremental backup failed");
             }
         }
@@ -982,18 +1003,18 @@ impl StorageEngine {
                     if let Some((desc, generation)) = parse_toc_filename(&fname, data_dir) {
                         max_gen = max_gen.max(generation);
                         match desc.format {
-                            SSTableFormat::Big => {
-                                match SSTableReader::open(desc) {
-                                    Ok(reader) => handles.push(SSTableHandle::Big(reader)),
-                                    Err(e) => warn!(file = %fname, error = %e, "Failed to open Big SSTable"),
+                            SSTableFormat::Big => match SSTableReader::open(desc) {
+                                Ok(reader) => handles.push(SSTableHandle::Big(reader)),
+                                Err(e) => {
+                                    warn!(file = %fname, error = %e, "Failed to open Big SSTable")
                                 }
-                            }
-                            SSTableFormat::Bti => {
-                                match BtiReader::open(desc) {
-                                    Ok(reader) => handles.push(SSTableHandle::Bti(reader)),
-                                    Err(e) => warn!(file = %fname, error = %e, "Failed to open BTI SSTable"),
+                            },
+                            SSTableFormat::Bti => match BtiReader::open(desc) {
+                                Ok(reader) => handles.push(SSTableHandle::Bti(reader)),
+                                Err(e) => {
+                                    warn!(file = %fname, error = %e, "Failed to open BTI SSTable")
                                 }
-                            }
+                            },
                         }
                     }
                 }
@@ -1037,7 +1058,7 @@ fn parse_toc_filename(fname: &str, dir: &Path) -> Option<(SSTableDescriptor, u64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commitlog::{MutationRow, CellMutation};
+    use crate::commitlog::{CellMutation, MutationRow};
     use tempfile::TempDir;
 
     fn test_engine_config(dir: &Path) -> EngineConfig {
@@ -1117,8 +1138,12 @@ mod tests {
         let config = test_engine_config(dir.path());
         let engine = StorageEngine::open(config).unwrap();
 
-        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1")).unwrap();
-        engine.apply_mutation(&test_mutation("ks", "t2", b"pk1", "n", b"v2")).unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1"))
+            .unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t2", b"pk1", "n", b"v2"))
+            .unwrap();
         engine.flush_all().unwrap();
 
         let stats = engine.stats();
@@ -1131,7 +1156,9 @@ mod tests {
         let config = test_engine_config(dir.path());
         let engine = StorageEngine::open(config).unwrap();
 
-        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1")).unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1"))
+            .unwrap();
         engine.flush_cf("ks.t1").unwrap();
 
         let manifest = engine
@@ -1154,8 +1181,12 @@ mod tests {
         // Write and sync
         {
             let engine = StorageEngine::open(config.clone()).unwrap();
-            engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1")).unwrap();
-            engine.apply_mutation(&test_mutation("ks", "t1", b"pk2", "n", b"v2")).unwrap();
+            engine
+                .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1"))
+                .unwrap();
+            engine
+                .apply_mutation(&test_mutation("ks", "t1", b"pk2", "n", b"v2"))
+                .unwrap();
             engine.sync_commitlog().unwrap();
         }
 
@@ -1172,7 +1203,9 @@ mod tests {
         config.sstable_format = SSTableFormat::Bti;
 
         let engine = StorageEngine::open(config).unwrap();
-        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"bti_val")).unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"bti_val"))
+            .unwrap();
         engine.flush_cf("ks.t1").unwrap();
 
         let result = engine.read_partition("ks", "t1", b"pk1");
@@ -1189,7 +1222,9 @@ mod tests {
         config.memtable_type = MemtableType::Trie;
 
         let engine = StorageEngine::open(config).unwrap();
-        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"trie_val")).unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"trie_val"))
+            .unwrap();
 
         let result = engine.read_partition("ks", "t1", b"pk1");
         assert!(result.is_some());

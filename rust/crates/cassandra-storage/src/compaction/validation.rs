@@ -6,9 +6,9 @@
 //! - `org.apache.cassandra.db.compaction.ValidationCompactionController`
 //! - `org.apache.cassandra.repair.Validator`
 
-use cassandra_common::Token;
-use crate::memtable::partition::PartitionData;
 use crate::compaction::merge_partitions;
+use crate::memtable::partition::PartitionData;
+use cassandra_common::Token;
 
 /// Validate a token range across a set of SSTable partitions.
 /// Returns a sorted list of (Token, Hash) covering the specified range.
@@ -26,23 +26,23 @@ where
     // First, merge the sources using standard compaction logic
     // This resolves conflicts and applies GC to tombstones.
     let merged = merge_partitions(sources, gc_grace_seconds, now_seconds);
-    
+
     let mut results = Vec::new();
     for (pk, pd) in merged {
         let pk_token = Token::from_partition_key(&pk);
-        
+
         let in_range = if range.0.value() <= range.1.value() {
             pk_token.value() >= range.0.value() && pk_token.value() < range.1.value()
         } else {
             pk_token.value() >= range.0.value() || pk_token.value() < range.1.value()
         };
-        
+
         if in_range {
             let hash = hash_fn(&pk, &pd);
             results.push((pk_token, hash));
         }
     }
-    
+
     // The result must be sorted by token for Merkle tree leaves.
     results.sort_by_key(|(t, _)| t.value());
     results

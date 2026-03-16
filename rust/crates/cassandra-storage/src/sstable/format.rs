@@ -141,7 +141,10 @@ impl SSTableDescriptor {
             SSTableFormat::Big => "big",
             SSTableFormat::Bti => "bti",
         };
-        format!("{}-{}-{fmt_tag}-{}", self.keyspace, self.table, self.generation)
+        format!(
+            "{}-{}-{fmt_tag}-{}",
+            self.keyspace, self.table, self.generation
+        )
     }
 
     /// Complete path for a component file.

@@ -19,24 +19,10 @@
 //! Provides proptest strategies for generating random CQL protocol frames,
 //! CQL values, and error codes. These are used for property-based testing
 //! of protocol codecs and type serialization roundtrips.
-//!
-//! ## Usage
-//!
-//! ```rust,ignore
-//! use proptest::prelude::*;
-//! use cassandra_diff_tests::fuzz;
-//!
-//! proptest! {
-//!     #[test]
-//!     fn frame_header_roundtrip(header in fuzz::arb_frame_header()) {
-//!         let encoded = fuzz::encode_header(&header);
-//!         let decoded = cassandra_diff_tests::comparators::protocol::parse_header(&encoded);
-//!         prop_assert_eq!(decoded.unwrap(), header);
-//!     }
-//! }
-//! ```
 
 use crate::comparators::protocol::FrameHeader;
+
+use proptest::prelude::*;
 
 /// Encode a frame header to bytes.
 pub fn encode_header(header: &FrameHeader) -> Vec<u8> {
@@ -99,19 +85,167 @@ pub fn serialize_cql_text(value: &str) -> Vec<u8> {
     value.as_bytes().to_vec()
 }
 
-// TODO(phase-3): Add proptest strategies when proptest is integrated into test suite:
-// - arb_frame_header() -> Strategy<FrameHeader>
-// - arb_error_code() -> Strategy<i32>
-// - arb_cql_value() -> Strategy<CqlValue>
-// - arb_query() -> Strategy<String>
-//
-// TODO(harry-integration): When the Rust node supports enough CQL, wire
-// Harry (ci/harry_simulation.sh) to run against both Java and Rust and
-// compare outcomes via this crate's comparators.
-//
-// TODO(fql-replay): When FQL fixtures become available, add a replay
-// function that reads a Chronicle-queue FQL file, replays the queries
-// against both nodes, and diffs the results.
+/// Deserialize a CQL [int] value from 4 big-endian bytes.
+pub fn deserialize_cql_int(data: &[u8]) -> Option<i32> {
+    if data.len() != 4 {
+        return None;
+    }
+    Some(i32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// Deserialize a CQL [bigint] value from 8 big-endian bytes.
+pub fn deserialize_cql_bigint(data: &[u8]) -> Option<i64> {
+    if data.len() != 8 {
+        return None;
+    }
+    Some(i64::from_be_bytes(data.try_into().ok()?))
+}
+
+/// Deserialize a CQL [smallint] value from 2 big-endian bytes.
+pub fn deserialize_cql_smallint(data: &[u8]) -> Option<i16> {
+    if data.len() != 2 {
+        return None;
+    }
+    Some(i16::from_be_bytes([data[0], data[1]]))
+}
+
+/// Deserialize a CQL [tinyint] value from 1 byte.
+pub fn deserialize_cql_tinyint(data: &[u8]) -> Option<i8> {
+    if data.len() != 1 {
+        return None;
+    }
+    Some(data[0] as i8)
+}
+
+/// Deserialize a CQL [boolean] value from 1 byte.
+pub fn deserialize_cql_boolean(data: &[u8]) -> Option<bool> {
+    if data.len() != 1 {
+        return None;
+    }
+    Some(data[0] != 0)
+}
+
+/// Deserialize a CQL [float] value from 4 big-endian bytes.
+pub fn deserialize_cql_float(data: &[u8]) -> Option<f32> {
+    if data.len() != 4 {
+        return None;
+    }
+    Some(f32::from_be_bytes([data[0], data[1], data[2], data[3]]))
+}
+
+/// Deserialize a CQL [double] value from 8 big-endian bytes.
+pub fn deserialize_cql_double(data: &[u8]) -> Option<f64> {
+    if data.len() != 8 {
+        return None;
+    }
+    Some(f64::from_be_bytes(data.try_into().ok()?))
+}
+
+// ── Proptest strategies ────────────────────────────────────────────────
+
+/// CQL typed value for property-based testing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CqlTestValue {
+    Int(i32),
+    Bigint(i64),
+    Smallint(i16),
+    Tinyint(i8),
+    Boolean(bool),
+    Float(f32),
+    Double(f64),
+    Text(String),
+    Blob(Vec<u8>),
+}
+
+impl CqlTestValue {
+    /// Serialize to CQL wire format bytes.
+    pub fn serialize(&self) -> Vec<u8> {
+        match self {
+            CqlTestValue::Int(v) => serialize_cql_int(*v),
+            CqlTestValue::Bigint(v) => serialize_cql_bigint(*v),
+            CqlTestValue::Smallint(v) => serialize_cql_smallint(*v),
+            CqlTestValue::Tinyint(v) => serialize_cql_tinyint(*v),
+            CqlTestValue::Boolean(v) => serialize_cql_boolean(*v),
+            CqlTestValue::Float(v) => serialize_cql_float(*v),
+            CqlTestValue::Double(v) => serialize_cql_double(*v),
+            CqlTestValue::Text(v) => serialize_cql_text(v),
+            CqlTestValue::Blob(v) => v.clone(),
+        }
+    }
+}
+
+// ── Proptest strategies (behind #[cfg(test)]) ──────────────────────────
+
+pub fn arb_frame_header() -> impl Strategy<Value = FrameHeader> {
+    (
+        prop_oneof![Just(0x04u8), Just(0x84u8), Just(0x05u8), Just(0x85u8)], // version
+        0u8..=0x0F,                                                          // flags (4 bits used)
+        any::<i16>(),                                                        // stream_id
+        0u8..=0x10,                                                          // opcode (valid range)
+        0u32..=1_000_000,                                                    // body_length
+    )
+        .prop_map(
+            |(version, flags, stream_id, opcode, body_length)| FrameHeader {
+                version,
+                flags,
+                stream_id,
+                opcode,
+                body_length,
+            },
+        )
+}
+
+pub fn arb_error_code() -> impl Strategy<Value = i32> {
+    prop_oneof![
+        // Known Cassandra error codes
+        Just(0x0000i32), // Server error
+        Just(0x000A),    // Protocol error
+        Just(0x0100),    // Bad credentials
+        Just(0x1000),    // Unavailable
+        Just(0x1001),    // Overloaded
+        Just(0x1002),    // Is bootstrapping
+        Just(0x1003),    // Truncation error
+        Just(0x1100),    // Write timeout
+        Just(0x1200),    // Read timeout
+        Just(0x1300),    // Read failure
+        Just(0x1400),    // Function failure
+        Just(0x1500),    // Write failure
+        Just(0x2000),    // Syntax error
+        Just(0x2100),    // Unauthorized
+        Just(0x2200),    // Invalid
+        Just(0x2300),    // Config error
+        Just(0x2400),    // Already exists
+        Just(0x2500),    // Unprepared
+        // Out-of-range codes for robustness testing
+        any::<i32>(),
+    ]
+}
+
+pub fn arb_cql_value() -> impl Strategy<Value = CqlTestValue> {
+    prop_oneof![
+        any::<i32>().prop_map(CqlTestValue::Int),
+        any::<i64>().prop_map(CqlTestValue::Bigint),
+        any::<i16>().prop_map(CqlTestValue::Smallint),
+        any::<i8>().prop_map(CqlTestValue::Tinyint),
+        any::<bool>().prop_map(CqlTestValue::Boolean),
+        // Use finite floats to avoid NaN comparison issues
+        (-1e10f32..1e10f32).prop_map(CqlTestValue::Float),
+        (-1e20f64..1e20f64).prop_map(CqlTestValue::Double),
+        "[a-zA-Z0-9 ]{0,256}".prop_map(CqlTestValue::Text),
+        proptest::collection::vec(any::<u8>(), 0..512).prop_map(CqlTestValue::Blob),
+    ]
+}
+
+/// Strategy for generating a random mutation row for the storage engine.
+pub fn arb_mutation() -> impl Strategy<Value = (String, String, Vec<u8>, Vec<u8>, i64)> {
+    (
+        "[a-z]{1,8}",                                   // keyspace
+        "[a-z]{1,8}",                                   // table
+        proptest::collection::vec(any::<u8>(), 1..64),  // partition key
+        proptest::collection::vec(any::<u8>(), 1..256), // value
+        0i64..1_000_000_000,                            // timestamp
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -238,5 +372,44 @@ mod tests {
         let empty_ref = types.get("empty_text").unwrap();
         let expected_hex = empty_ref.get("serialized_hex").unwrap().as_str().unwrap();
         assert_eq!(hex::encode(serialize_cql_text("")), expected_hex);
+    }
+
+    // ── Proptest roundtrip tests ───────────────────────────────────────
+
+    proptest! {
+        #[test]
+        fn prop_int_roundtrip(v in any::<i32>()) {
+            let bytes = serialize_cql_int(v);
+            let decoded = deserialize_cql_int(&bytes).unwrap();
+            prop_assert_eq!(v, decoded);
+        }
+
+        #[test]
+        fn prop_bigint_roundtrip(v in any::<i64>()) {
+            let bytes = serialize_cql_bigint(v);
+            let decoded = deserialize_cql_bigint(&bytes).unwrap();
+            prop_assert_eq!(v, decoded);
+        }
+
+        #[test]
+        fn prop_smallint_roundtrip(v in any::<i16>()) {
+            let bytes = serialize_cql_smallint(v);
+            let decoded = deserialize_cql_smallint(&bytes).unwrap();
+            prop_assert_eq!(v, decoded);
+        }
+
+        #[test]
+        fn prop_tinyint_roundtrip(v in any::<i8>()) {
+            let bytes = serialize_cql_tinyint(v);
+            let decoded = deserialize_cql_tinyint(&bytes).unwrap();
+            prop_assert_eq!(v, decoded);
+        }
+
+        #[test]
+        fn prop_boolean_roundtrip(v in any::<bool>()) {
+            let bytes = serialize_cql_boolean(v);
+            let decoded = deserialize_cql_boolean(&bytes).unwrap();
+            prop_assert_eq!(v, decoded);
+        }
     }
 }

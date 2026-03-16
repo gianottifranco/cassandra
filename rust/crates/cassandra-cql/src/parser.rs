@@ -9,9 +9,9 @@
 //! Hand-rolled recursive descent. Each parse_* method corresponds
 //! to a grammar production. Errors include position information.
 
-use std::collections::HashMap;
 use crate::ast::*;
 use crate::lexer::{Keyword, Lexer, Token, TokenKind};
+use std::collections::HashMap;
 
 /// Parse a CQL statement string into an AST.
 pub fn parse(input: &str) -> Result<Statement, ParseError> {
@@ -162,7 +162,9 @@ impl Parser {
                 if *self.peek_kind() != TokenKind::RParen {
                     loop {
                         args.push(self.parse_term()?);
-                        if !self.eat_if(TokenKind::Comma) { break; }
+                        if !self.eat_if(TokenKind::Comma) {
+                            break;
+                        }
                     }
                 }
                 self.expect(TokenKind::RParen)?;
@@ -405,9 +407,15 @@ impl Parser {
                     } else {
                         break;
                     }
-                    if !self.eat_keyword(Keyword::And) { break; }
+                    if !self.eat_keyword(Keyword::And) {
+                        break;
+                    }
                 }
-                Ok(Statement::AlterKeyspace(AlterKeyspace { name, replication, durable_writes }))
+                Ok(Statement::AlterKeyspace(AlterKeyspace {
+                    name,
+                    replication,
+                    durable_writes,
+                }))
             }
             TokenKind::Keyword(Keyword::Table) => {
                 self.expect_keyword(Keyword::Table)?;
@@ -417,7 +425,12 @@ impl Parser {
                     let cql_type = self.parse_cql_type()?;
                     let is_static = self.eat_keyword(Keyword::Static);
                     let masked_with = self.parse_masked_with()?;
-                    AlterTableOp::AddColumn(ColumnDef { name: col_name, cql_type, is_static, masked_with })
+                    AlterTableOp::AddColumn(ColumnDef {
+                        name: col_name,
+                        cql_type,
+                        is_static,
+                        masked_with,
+                    })
                 } else if self.eat_keyword(Keyword::Alter) {
                     self.eat_keyword(Keyword::Column); // Optional COLUMN keyword
                     let col_name = self.expect_ident()?;
@@ -444,13 +457,21 @@ impl Parser {
                         self.expect(TokenKind::Eq)?;
                         let val = self.parse_option_value()?;
                         opts.insert(key, val);
-                        if !self.eat_keyword(Keyword::And) { break; }
+                        if !self.eat_keyword(Keyword::And) {
+                            break;
+                        }
                     }
                     AlterTableOp::WithOptions(opts)
                 } else {
-                    return Err(self.error("expected ADD, ALTER, DROP, or WITH after ALTER TABLE".into()));
+                    return Err(
+                        self.error("expected ADD, ALTER, DROP, or WITH after ALTER TABLE".into())
+                    );
                 };
-                Ok(Statement::AlterTable(AlterTable { keyspace: ks, name, operation }))
+                Ok(Statement::AlterTable(AlterTable {
+                    keyspace: ks,
+                    name,
+                    operation,
+                }))
             }
             TokenKind::Keyword(Keyword::Role) => {
                 self.expect_keyword(Keyword::Role)?;
@@ -473,10 +494,18 @@ impl Parser {
                         } else {
                             break;
                         }
-                        if !self.eat_keyword(Keyword::And) { break; }
+                        if !self.eat_keyword(Keyword::And) {
+                            break;
+                        }
                     }
                 }
-                Ok(Statement::AlterRole(AlterRole { name, password, superuser, login, options }))
+                Ok(Statement::AlterRole(AlterRole {
+                    name,
+                    password,
+                    superuser,
+                    login,
+                    options,
+                }))
             }
             _ => Err(self.error("expected KEYSPACE, TABLE, or ROLE after ALTER".into())),
         }
@@ -763,7 +792,10 @@ impl Parser {
             let col = self.expect_ident()?;
             self.expect(TokenKind::Eq)?;
             let val = self.parse_term()?;
-            assignments.push(Assignment { column: col, value: val });
+            assignments.push(Assignment {
+                column: col,
+                value: val,
+            });
             if !self.eat_if(TokenKind::Comma) {
                 break;
             }
@@ -921,7 +953,11 @@ impl Parser {
             let col = self.expect_ident()?;
             let op = self.parse_relation_op()?;
             let value = self.parse_term()?;
-            relations.push(Relation { column: col, op, value });
+            relations.push(Relation {
+                column: col,
+                op,
+                value,
+            });
             if !self.eat_keyword(Keyword::And) {
                 break;
             }
@@ -931,13 +967,34 @@ impl Parser {
 
     fn parse_relation_op(&mut self) -> Result<RelationOp, ParseError> {
         match self.peek_kind().clone() {
-            TokenKind::Eq => { self.advance(); Ok(RelationOp::Eq) }
-            TokenKind::Neq => { self.advance(); Ok(RelationOp::Neq) }
-            TokenKind::Lt => { self.advance(); Ok(RelationOp::Lt) }
-            TokenKind::Gt => { self.advance(); Ok(RelationOp::Gt) }
-            TokenKind::Lte => { self.advance(); Ok(RelationOp::Lte) }
-            TokenKind::Gte => { self.advance(); Ok(RelationOp::Gte) }
-            TokenKind::Keyword(Keyword::In) => { self.advance(); Ok(RelationOp::In) }
+            TokenKind::Eq => {
+                self.advance();
+                Ok(RelationOp::Eq)
+            }
+            TokenKind::Neq => {
+                self.advance();
+                Ok(RelationOp::Neq)
+            }
+            TokenKind::Lt => {
+                self.advance();
+                Ok(RelationOp::Lt)
+            }
+            TokenKind::Gt => {
+                self.advance();
+                Ok(RelationOp::Gt)
+            }
+            TokenKind::Lte => {
+                self.advance();
+                Ok(RelationOp::Lte)
+            }
+            TokenKind::Gte => {
+                self.advance();
+                Ok(RelationOp::Gte)
+            }
+            TokenKind::Keyword(Keyword::In) => {
+                self.advance();
+                Ok(RelationOp::In)
+            }
             TokenKind::Keyword(Keyword::Contains) => {
                 self.advance();
                 if self.eat_keyword(Keyword::Key) {
@@ -946,7 +1003,10 @@ impl Parser {
                     Ok(RelationOp::Contains)
                 }
             }
-            _ => Err(self.error(format!("expected comparison operator, got {}", self.peek_kind()))),
+            _ => Err(self.error(format!(
+                "expected comparison operator, got {}",
+                self.peek_kind()
+            ))),
         }
     }
 
@@ -1068,7 +1128,10 @@ impl Parser {
                     Err(self.error("expected number after minus".into()))
                 }
             }
-            _ => Err(self.error(format!("expected value or bind marker, got {}", self.peek_kind()))),
+            _ => Err(self.error(format!(
+                "expected value or bind marker, got {}",
+                self.peek_kind()
+            ))),
         }
     }
 
@@ -1115,13 +1178,22 @@ impl Parser {
         if *self.peek_kind() != TokenKind::RBrace {
             loop {
                 let key = match self.peek_kind().clone() {
-                    TokenKind::StringLiteral(s) => { self.advance(); s }
+                    TokenKind::StringLiteral(s) => {
+                        self.advance();
+                        s
+                    }
                     _ => return Err(self.error("expected string key in map".into())),
                 };
                 self.expect(TokenKind::Colon)?;
                 let value = match self.peek_kind().clone() {
-                    TokenKind::StringLiteral(s) => { self.advance(); s }
-                    TokenKind::IntegerLiteral(n) => { self.advance(); n.to_string() }
+                    TokenKind::StringLiteral(s) => {
+                        self.advance();
+                        s
+                    }
+                    TokenKind::IntegerLiteral(n) => {
+                        self.advance();
+                        n.to_string()
+                    }
                     _ => return Err(self.error("expected string or integer value in map".into())),
                 };
                 map.insert(key, value);
@@ -1136,10 +1208,22 @@ impl Parser {
 
     fn parse_option_value(&mut self) -> Result<String, ParseError> {
         match self.peek_kind().clone() {
-            TokenKind::StringLiteral(s) => { self.advance(); Ok(s) }
-            TokenKind::IntegerLiteral(n) => { self.advance(); Ok(n.to_string()) }
-            TokenKind::FloatLiteral(f) => { self.advance(); Ok(f.to_string()) }
-            TokenKind::BooleanLiteral(b) => { self.advance(); Ok(b.to_string()) }
+            TokenKind::StringLiteral(s) => {
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::IntegerLiteral(n) => {
+                self.advance();
+                Ok(n.to_string())
+            }
+            TokenKind::FloatLiteral(f) => {
+                self.advance();
+                Ok(f.to_string())
+            }
+            TokenKind::BooleanLiteral(b) => {
+                self.advance();
+                Ok(b.to_string())
+            }
             TokenKind::LBrace => {
                 let map = self.parse_map_literal_strings()?;
                 Ok(format!("{:?}", map))
@@ -1193,8 +1277,14 @@ impl Parser {
             None
         };
         Ok(Statement::CreateIndex(CreateIndex {
-            name, if_not_exists, keyspace: ks, table, column,
-            index_target: None, custom_class, options: HashMap::new(),
+            name,
+            if_not_exists,
+            keyspace: ks,
+            table,
+            column,
+            index_target: None,
+            custom_class,
+            options: HashMap::new(),
         }))
     }
 
@@ -1210,10 +1300,17 @@ impl Parser {
             let fname = self.expect_ident()?;
             let ftype = self.parse_cql_type()?;
             fields.push((fname, ftype));
-            if !self.eat_if(TokenKind::Comma) { break; }
+            if !self.eat_if(TokenKind::Comma) {
+                break;
+            }
         }
         self.expect(TokenKind::RParen)?;
-        Ok(Statement::CreateType(CreateType { keyspace: ks, name, if_not_exists, fields }))
+        Ok(Statement::CreateType(CreateType {
+            keyspace: ks,
+            name,
+            if_not_exists,
+            fields,
+        }))
     }
 
     // ─── CREATE FUNCTION ────────────────────────────────────────────────
@@ -1229,7 +1326,9 @@ impl Parser {
                 let arg_name = self.expect_ident()?;
                 let arg_type = self.parse_cql_type()?;
                 args.push((arg_name, arg_type));
-                if !self.eat_if(TokenKind::Comma) { break; }
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
             }
         }
         self.expect(TokenKind::RParen)?;
@@ -1268,8 +1367,15 @@ impl Parser {
         self.expect_keyword(Keyword::As)?;
         let body = self.parse_string_literal()?;
         Ok(Statement::CreateFunction(CreateFunction {
-            keyspace: ks, name, or_replace, if_not_exists,
-            args, called_on_null_input, return_type, language, body,
+            keyspace: ks,
+            name,
+            or_replace,
+            if_not_exists,
+            args,
+            called_on_null_input,
+            return_type,
+            language,
+            body,
         }))
     }
 
@@ -1284,7 +1390,9 @@ impl Parser {
         if *self.peek_kind() != TokenKind::RParen {
             loop {
                 arg_types.push(self.parse_cql_type()?);
-                if !self.eat_if(TokenKind::Comma) { break; }
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
             }
         }
         self.expect(TokenKind::RParen)?;
@@ -1303,8 +1411,15 @@ impl Parser {
             None
         };
         Ok(Statement::CreateAggregate(CreateAggregate {
-            keyspace: ks, name, or_replace, if_not_exists,
-            arg_types, sfunc, stype, finalfunc, initcond,
+            keyspace: ks,
+            name,
+            or_replace,
+            if_not_exists,
+            arg_types,
+            sfunc,
+            stype,
+            finalfunc,
+            initcond,
         }))
     }
 
@@ -1319,7 +1434,11 @@ impl Parser {
         self.expect_keyword(Keyword::Using)?;
         let trigger_class = self.parse_string_literal()?;
         Ok(Statement::CreateTrigger(CreateTrigger {
-            name, if_not_exists, keyspace: ks, table, trigger_class,
+            name,
+            if_not_exists,
+            keyspace: ks,
+            table,
+            trigger_class,
         }))
     }
 
@@ -1347,11 +1466,18 @@ impl Parser {
                 } else {
                     break;
                 }
-                if !self.eat_keyword(Keyword::And) { break; }
+                if !self.eat_keyword(Keyword::And) {
+                    break;
+                }
             }
         }
         Ok(Statement::CreateRole(CreateRole {
-            name, if_not_exists, password, superuser, login, options,
+            name,
+            if_not_exists,
+            password,
+            superuser,
+            login,
+            options,
         }))
     }
 
@@ -1385,8 +1511,14 @@ impl Parser {
         let options = HashMap::new();
         let clustering_order = Vec::new();
         Ok(Statement::CreateMaterializedView(CreateMaterializedView {
-            keyspace: ks, name, if_not_exists, select,
-            partition_key, clustering_key, clustering_order, options,
+            keyspace: ks,
+            name,
+            if_not_exists,
+            select,
+            partition_key,
+            clustering_key,
+            clustering_order,
+            options,
         }))
     }
 
@@ -1404,7 +1536,11 @@ impl Parser {
             return Err(self.error(format!("expected TO, got {}", to)));
         }
         let role = self.expect_ident()?;
-        Ok(Statement::Grant(GrantStatement { permissions, resource, role }))
+        Ok(Statement::Grant(GrantStatement {
+            permissions,
+            resource,
+            role,
+        }))
     }
 
     fn parse_revoke(&mut self) -> Result<Statement, ParseError> {
@@ -1417,7 +1553,11 @@ impl Parser {
             return Err(self.error(format!("expected FROM, got {}", from)));
         }
         let role = self.expect_ident()?;
-        Ok(Statement::Revoke(RevokeStatement { permissions, resource, role }))
+        Ok(Statement::Revoke(RevokeStatement {
+            permissions,
+            resource,
+            role,
+        }))
     }
 
     fn parse_permission_list(&mut self) -> Result<Vec<String>, ParseError> {
@@ -1450,7 +1590,10 @@ impl Parser {
         }
         if self.eat_keyword(Keyword::Table) {
             let (ks, table) = self.parse_table_name()?;
-            return Ok(Resource::Table { keyspace: ks, table });
+            return Ok(Resource::Table {
+                keyspace: ks,
+                table,
+            });
         }
         if self.eat_keyword(Keyword::Role) {
             let name = self.expect_ident()?;
@@ -1458,7 +1601,10 @@ impl Parser {
         }
         // Default: try as table reference
         let (ks, table) = self.parse_table_name()?;
-        Ok(Resource::Table { keyspace: ks, table })
+        Ok(Resource::Table {
+            keyspace: ks,
+            table,
+        })
     }
 
     // ─── LIST ───────────────────────────────────────────────────────────
@@ -1472,7 +1618,10 @@ impl Parser {
                 None
             };
             let no_recursive = self.eat_keyword(Keyword::Norecursive);
-            Ok(Statement::ListRoles(ListRolesStatement { of_role, no_recursive }))
+            Ok(Statement::ListRoles(ListRolesStatement {
+                of_role,
+                no_recursive,
+            }))
         } else if self.eat_keyword(Keyword::Permissions) || self.eat_keyword(Keyword::Permission) {
             let permissions = vec!["ALL".to_string()];
             let resource = if self.eat_keyword(Keyword::On) {
@@ -1486,7 +1635,9 @@ impl Parser {
                 None
             };
             Ok(Statement::ListPermissions(ListPermissionsStatement {
-                permissions, resource, of_role,
+                permissions,
+                resource,
+                of_role,
             }))
         } else {
             Err(self.error("expected ROLES or PERMISSIONS after LIST".into()))
@@ -1497,14 +1648,20 @@ impl Parser {
 
     fn parse_string_literal(&mut self) -> Result<String, ParseError> {
         match self.peek_kind().clone() {
-            TokenKind::StringLiteral(s) => { self.advance(); Ok(s) }
+            TokenKind::StringLiteral(s) => {
+                self.advance();
+                Ok(s)
+            }
             _ => Err(self.error(format!("expected string literal, got {}", self.peek_kind()))),
         }
     }
 
     fn parse_boolean(&mut self) -> Result<bool, ParseError> {
         match self.peek_kind().clone() {
-            TokenKind::BooleanLiteral(b) => { self.advance(); Ok(b) }
+            TokenKind::BooleanLiteral(b) => {
+                self.advance();
+                Ok(b)
+            }
             _ => Err(self.error(format!("expected boolean, got {}", self.peek_kind()))),
         }
     }
@@ -1579,7 +1736,11 @@ pub struct ParseError {
 
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Parse error at position {}: {}", self.position, self.message)
+        write!(
+            f,
+            "Parse error at position {}: {}",
+            self.position, self.message
+        )
     }
 }
 impl std::error::Error for ParseError {}
@@ -1625,9 +1786,8 @@ mod tests {
 
     #[test]
     fn parse_create_table() {
-        let stmt = parse(
-            "CREATE TABLE ks.users (id uuid, name text, age int, PRIMARY KEY (id))"
-        ).unwrap();
+        let stmt =
+            parse("CREATE TABLE ks.users (id uuid, name text, age int, PRIMARY KEY (id))").unwrap();
         match stmt {
             Statement::CreateTable(ct) => {
                 assert_eq!(ct.keyspace, Some("ks".into()));
@@ -1642,9 +1802,8 @@ mod tests {
 
     #[test]
     fn parse_create_table_composite_pk() {
-        let stmt = parse(
-            "CREATE TABLE t (a int, b int, c int, d int, PRIMARY KEY ((a, b), c))"
-        ).unwrap();
+        let stmt =
+            parse("CREATE TABLE t (a int, b int, c int, d int, PRIMARY KEY ((a, b), c))").unwrap();
         match stmt {
             Statement::CreateTable(ct) => {
                 assert_eq!(ct.partition_key, vec!["a", "b"]);
@@ -1822,7 +1981,10 @@ mod tests {
         ).unwrap();
         match stmt {
             Statement::CreateTable(ct) => {
-                assert_eq!(ct.options.get("gc_grace_seconds"), Some(&"86400".to_string()));
+                assert_eq!(
+                    ct.options.get("gc_grace_seconds"),
+                    Some(&"86400".to_string())
+                );
                 assert_eq!(ct.options.get("comment"), Some(&"test".to_string()));
             }
             _ => panic!("expected CreateTable"),
@@ -1882,7 +2044,10 @@ mod tests {
 
     #[test]
     fn parse_create_role() {
-        let stmt = parse("CREATE ROLE admin WITH PASSWORD = 'secret' AND SUPERUSER = true AND LOGIN = true").unwrap();
+        let stmt = parse(
+            "CREATE ROLE admin WITH PASSWORD = 'secret' AND SUPERUSER = true AND LOGIN = true",
+        )
+        .unwrap();
         match stmt {
             Statement::CreateRole(cr) => {
                 assert_eq!(cr.name, "admin");
@@ -1908,7 +2073,8 @@ mod tests {
 
     #[test]
     fn parse_create_trigger() {
-        let stmt = parse("CREATE TRIGGER my_trigger ON ks.t USING 'org.example.MyTrigger'").unwrap();
+        let stmt =
+            parse("CREATE TRIGGER my_trigger ON ks.t USING 'org.example.MyTrigger'").unwrap();
         match stmt {
             Statement::CreateTrigger(ct) => {
                 assert_eq!(ct.name, "my_trigger");

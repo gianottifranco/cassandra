@@ -52,14 +52,12 @@ async fn main() -> anyhow::Result<()> {
             ..CommitLogConfig::default()
         },
         memtable_flush_threshold: 128 * 1024 * 1024, // 128 MiB
-        gc_grace_seconds: 864_000,                     // 10 days
+        gc_grace_seconds: 864_000,                   // 10 days
         ..EngineConfig::default()
     };
 
-    let engine = Arc::new(
-        StorageEngine::open(engine_config)
-            .expect("Failed to open storage engine"),
-    );
+    let engine =
+        Arc::new(StorageEngine::open(engine_config).expect("Failed to open storage engine"));
 
     // 4. Schema catalog
     let catalog = Arc::new(RwLock::new(SchemaCatalog::new()));
@@ -76,7 +74,8 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // 7. Load CassandraConfig to configure TLS
-    let config_path = std::env::var("CASSANDRA_CONFIG").unwrap_or_else(|_| "conf/cassandra.yaml".to_string());
+    let config_path =
+        std::env::var("CASSANDRA_CONFIG").unwrap_or_else(|_| "conf/cassandra.yaml".to_string());
     let cassandra_config = cassandra_config::load_config(std::path::Path::new(&config_path))
         .unwrap_or_else(|e| {
             tracing::warn!("Failed to parse config from {}: {}", config_path, e);
@@ -109,31 +108,63 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // 8. FQL and Audit Logger initialization
-    let fql_enabled = cassandra_config.full_query_logging_options.as_ref().map(|o| o.enabled).unwrap_or(false);
-    let fql_dir = cassandra_config.full_query_logging_options.as_ref().and_then(|o| o.log_dir.clone()).unwrap_or_else(|| "logs/fql".to_string());
-    let fql_max_size = cassandra_config.full_query_logging_options.as_ref().and_then(|o| o.max_log_size_mb).unwrap_or(500);
-    
-    let fql_logger = Arc::new(cassandra_security::fql::FqlLogger::new(
-        PathBuf::from(fql_dir),
-        fql_max_size,
-        fql_enabled
-    ).expect("Failed to initialize FQL logger"));
+    let fql_enabled = cassandra_config
+        .full_query_logging_options
+        .as_ref()
+        .map(|o| o.enabled)
+        .unwrap_or(false);
+    let fql_dir = cassandra_config
+        .full_query_logging_options
+        .as_ref()
+        .and_then(|o| o.log_dir.clone())
+        .unwrap_or_else(|| "logs/fql".to_string());
+    let fql_max_size = cassandra_config
+        .full_query_logging_options
+        .as_ref()
+        .and_then(|o| o.max_log_size_mb)
+        .unwrap_or(500);
 
-    let audit_enabled = cassandra_config.audit_logging_options.as_ref().map(|o| o.enabled).unwrap_or(false);
-    let audit_logger_type = cassandra_config.audit_logging_options.as_ref().map(|o| o.logger.clone()).unwrap_or_else(|| "NoOpAuditLogger".to_string());
-    let audit_dir = cassandra_config.audit_logging_options.as_ref().and_then(|o| o.audit_logs_dir.clone()).unwrap_or_else(|| "logs/audit".to_string());
-    
-    let base_audit_logger: Box<dyn cassandra_security::audit::AuditLogger> = if audit_enabled && audit_logger_type == "FileAuditLogger" {
-        // max_log_size or default
-        let max_size = cassandra_config.audit_logging_options.as_ref().and_then(|o| o.max_log_size).unwrap_or(100 * 1024 * 1024);
-        let fl = cassandra_security::audit::FileAuditLogger::new(PathBuf::from(audit_dir), max_size).expect("Failed to create FileAuditLogger");
-        Box::new(fl)
-    } else {
-        Box::new(cassandra_security::audit::NoOpAuditLogger)
-    };
+    let fql_logger = Arc::new(
+        cassandra_security::fql::FqlLogger::new(PathBuf::from(fql_dir), fql_max_size, fql_enabled)
+            .expect("Failed to initialize FQL logger"),
+    );
 
-    let (async_audit_logger, _audit_handle) = cassandra_security::audit::AsyncAuditLogger::new(base_audit_logger);
-    let audit_logger = Arc::new(async_audit_logger) as Arc<dyn cassandra_security::audit::AuditLogger>;
+    let audit_enabled = cassandra_config
+        .audit_logging_options
+        .as_ref()
+        .map(|o| o.enabled)
+        .unwrap_or(false);
+    let audit_logger_type = cassandra_config
+        .audit_logging_options
+        .as_ref()
+        .map(|o| o.logger.clone())
+        .unwrap_or_else(|| "NoOpAuditLogger".to_string());
+    let audit_dir = cassandra_config
+        .audit_logging_options
+        .as_ref()
+        .and_then(|o| o.audit_logs_dir.clone())
+        .unwrap_or_else(|| "logs/audit".to_string());
+
+    let base_audit_logger: Box<dyn cassandra_security::audit::AuditLogger> =
+        if audit_enabled && audit_logger_type == "FileAuditLogger" {
+            // max_log_size or default
+            let max_size = cassandra_config
+                .audit_logging_options
+                .as_ref()
+                .and_then(|o| o.max_log_size)
+                .unwrap_or(100 * 1024 * 1024);
+            let fl =
+                cassandra_security::audit::FileAuditLogger::new(PathBuf::from(audit_dir), max_size)
+                    .expect("Failed to create FileAuditLogger");
+            Box::new(fl)
+        } else {
+            Box::new(cassandra_security::audit::NoOpAuditLogger)
+        };
+
+    let (async_audit_logger, _audit_handle) =
+        cassandra_security::audit::AsyncAuditLogger::new(base_audit_logger);
+    let audit_logger =
+        Arc::new(async_audit_logger) as Arc<dyn cassandra_security::audit::AuditLogger>;
 
     // 9. Build executor
     let executor = Arc::new(QueryExecutor::new(
@@ -144,13 +175,15 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     // 10. Start Native Protocol Server
-    let native_auth = Arc::new(crate::server::NativeAuthWrapper::new(
-        Arc::new(PasswordAuthenticator::new(Arc::clone(&role_manager)))
-            as Arc<dyn cassandra_security::auth::Authenticator>,
-    ));
-    
+    let native_auth = Arc::new(crate::server::NativeAuthWrapper::new(Arc::new(
+        PasswordAuthenticator::new(Arc::clone(&role_manager)),
+    )
+        as Arc<dyn cassandra_security::auth::Authenticator>));
+
     let server_config = ServerConfig {
-        listen_address: cassandra_config.listen_address.unwrap_or_else(|| "127.0.0.1:9042".to_string()),
+        listen_address: cassandra_config
+            .listen_address
+            .unwrap_or_else(|| "127.0.0.1:9042".to_string()),
         client_encryption_enabled,
     };
 
@@ -167,6 +200,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Block on the server
     server.run().await?;
-    
+
     Ok(())
 }

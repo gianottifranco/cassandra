@@ -407,8 +407,7 @@ mod tests {
             max_attempts: 2,
             ..StreamRetryPolicy::default()
         };
-        let mut session = StreamSession::new(ep(7002), "test")
-            .with_retry_policy(policy);
+        let mut session = StreamSession::new(ep(7002), "test").with_retry_policy(policy);
 
         // Use up all reconnect attempts
         session.fail("timeout");

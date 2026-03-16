@@ -37,24 +37,29 @@
 //! - [`audit`] — Audit logging with configurable sinks
 //! - [`fql`] — Full Query Logging (binary format)
 
-pub mod tls;
-pub mod auth;
-pub mod roles;
-pub mod authz;
-pub mod masking;
-pub mod cidr;
 pub mod audit;
+pub mod auth;
+pub mod authz;
+pub mod cidr;
 pub mod fql;
+pub mod masking;
+pub mod roles;
+pub mod tls;
 
 // Re-export key types
-pub use auth::{Authenticator, AuthenticatedUser, Credentials, AllowAllAuthenticator, PasswordAuthenticator};
-pub use roles::{Role, RoleManager, RoleOptions, InMemoryRoleManager};
-pub use authz::{Authorizer, AllowAllAuthorizer, CassandraAuthorizer, Permission, Resource};
-pub use masking::{MaskingFunction, MaskingRegistry};
+pub use audit::{
+    AsyncAuditLogger, AuditEvent, AuditEventType, AuditLogger, AuditLoggingOptions, AuditStatus,
+    FileAuditLogger, NoOpAuditLogger,
+};
+pub use auth::{
+    AllowAllAuthenticator, AuthenticatedUser, Authenticator, Credentials, PasswordAuthenticator,
+};
+pub use authz::{AllowAllAuthorizer, Authorizer, CassandraAuthorizer, Permission, Resource};
 pub use cidr::CidrAuthorizer;
-pub use audit::{AuditEvent, AuditEventType, AuditLogger, AuditStatus, NoOpAuditLogger, FileAuditLogger, AsyncAuditLogger, AuditLoggingOptions};
-pub use fql::{FqlLogger, FqlReader, FqlRecord, FqlOptions};
-pub use tls::{TlsConfig, TlsVersion, ReloadableTlsAcceptor};
+pub use fql::{FqlLogger, FqlOptions, FqlReader, FqlRecord};
+pub use masking::{MaskingFunction, MaskingRegistry};
+pub use roles::{InMemoryRoleManager, Role, RoleManager, RoleOptions};
+pub use tls::{ReloadableTlsAcceptor, TlsConfig, TlsVersion};
 
 // ─── Security Error ────────────────────────────────────────────────────────
 

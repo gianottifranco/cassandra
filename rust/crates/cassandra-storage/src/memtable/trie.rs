@@ -40,10 +40,7 @@ impl TrieNode {
             let pd = self.data.get_or_insert_with(PartitionData::new);
             pd.apply_row(row);
         } else {
-            let child = self
-                .children
-                .entry(key[0])
-                .or_insert_with(TrieNode::new);
+            let child = self.children.entry(key[0]).or_insert_with(TrieNode::new);
             child.insert(&key[1..], row);
         }
     }

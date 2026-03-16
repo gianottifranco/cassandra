@@ -13,8 +13,8 @@
 //! combines results via intersection (AND) or union (OR), and returns
 //! base-table row locations for the coordinator to fetch.
 
-use super::posting::PostingList;
 use super::SaiIndex;
+use super::posting::PostingList;
 use crate::index::{IndexEntry, IndexError, SecondaryIndex};
 
 /// A predicate on an indexed column.
@@ -61,20 +61,14 @@ impl SaiQuery {
 }
 
 /// Execute a SAI query against an index.
-pub fn execute_query(
-    index: &SaiIndex,
-    query: &SaiQuery,
-) -> Result<Vec<IndexEntry>, IndexError> {
+pub fn execute_query(index: &SaiIndex, query: &SaiQuery) -> Result<Vec<IndexEntry>, IndexError> {
     let mut posting_lists: Vec<PostingList> = Vec::new();
 
     for predicate in &query.predicates {
         let entries = match predicate {
             SaiPredicate::Eq(term) => index.search(term)?,
             SaiPredicate::Range { start, end } => {
-                index.range_search(
-                    start.as_deref(),
-                    end.as_deref(),
-                )?
+                index.range_search(start.as_deref(), end.as_deref())?
             }
         };
 

@@ -23,8 +23,8 @@
 //! - `org.apache.cassandra.service.DatacenterWriteResponseHandler`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
@@ -337,8 +337,8 @@ mod tests {
             Duration::from_secs(2),
         );
 
-        assert!(!handler.on_response(&ep(7001)));  // 1 of 2, not yet
-        assert!(handler.on_response(&ep(7002)));   // 2 of 2, done!
+        assert!(!handler.on_response(&ep(7001))); // 1 of 2, not yet
+        assert!(handler.on_response(&ep(7002))); // 2 of 2, done!
 
         let result = handler.await_completion().await;
         assert!(result.is_ok());
@@ -394,7 +394,9 @@ mod tests {
         let result = handler.await_completion().await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            WriteError::Timeout { received, required, .. } => {
+            WriteError::Timeout {
+                received, required, ..
+            } => {
                 assert_eq!(received, 1);
                 assert_eq!(required, 3);
             }

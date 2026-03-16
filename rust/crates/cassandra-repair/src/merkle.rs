@@ -79,7 +79,8 @@ impl MerkleTree {
             (end_raw - start_raw) as u128
         } else {
             // Wrapping range: from start to i64::MAX, then i64::MIN to end
-            ((i64::MAX as i128 - start_raw as i128) + (end_raw as i128 - i64::MIN as i128) + 1) as u128
+            ((i64::MAX as i128 - start_raw as i128) + (end_raw as i128 - i64::MIN as i128) + 1)
+                as u128
         };
 
         let leaf_width = total_width / leaf_count as u128;

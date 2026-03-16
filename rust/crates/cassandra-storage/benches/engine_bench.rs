@@ -11,7 +11,7 @@
 //! cargo bench -p cassandra-storage --bench engine_bench
 //! ```
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BatchSize};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 
 use cassandra_storage::commitlog::CommitLogConfig;
 use cassandra_storage::engine::{EngineConfig, StorageEngine};
@@ -82,7 +82,8 @@ fn bench_memtable_read(c: &mut Criterion) {
         let pk = format!("pk-{i}");
         engine
             .apply_mutation(
-                "bench_ks", "bench_table",
+                "bench_ks",
+                "bench_table",
                 pk.as_bytes().to_vec(),
                 vec![make_row(b"ck", "v", b"value", i as i64)],
                 i as i64,
@@ -114,7 +115,8 @@ fn bench_sstable_read(c: &mut Criterion) {
         let pk = format!("sst-pk-{i}");
         engine
             .apply_mutation(
-                "bench_ks", "sst_table",
+                "bench_ks",
+                "sst_table",
                 pk.as_bytes().to_vec(),
                 vec![make_row(b"ck", "v", b"sstable-data", i as i64)],
                 i as i64,
@@ -149,7 +151,8 @@ fn bench_flush(c: &mut Criterion) {
                     let pk = format!("flush-pk-{i}");
                     engine
                         .apply_mutation(
-                            "bench_ks", "flush_table",
+                            "bench_ks",
+                            "flush_table",
                             pk.as_bytes().to_vec(),
                             vec![make_row(b"ck", "v", &vec![0u8; 256], i as i64)],
                             i as i64,
@@ -175,7 +178,8 @@ fn bench_snapshot(c: &mut Criterion) {
         let pk = format!("snap-pk-{i}");
         engine
             .apply_mutation(
-                "bench_ks", "snap_table",
+                "bench_ks",
+                "snap_table",
                 pk.as_bytes().to_vec(),
                 vec![make_row(b"ck", "v", &vec![0u8; 512], i as i64)],
                 i as i64,

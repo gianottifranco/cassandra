@@ -15,9 +15,9 @@
 //! fqltool dump --json <FQL_LOG_FILE>
 //! ```
 
-use std::path::PathBuf;
-use clap::{Parser, Subcommand};
 use cassandra_security::fql::{FqlReader, FqlRecord};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 /// FQL Tool — inspect Full Query Log binary files.
 #[derive(Parser)]
@@ -75,8 +75,16 @@ fn main() -> anyhow::Result<()> {
         Commands::Stats { path } => {
             let records = FqlReader::read_all(&path)?;
             let total = records.len();
-            let min_ts = records.iter().map(|r| r.timestamp_micros).min().unwrap_or(0);
-            let max_ts = records.iter().map(|r| r.timestamp_micros).max().unwrap_or(0);
+            let min_ts = records
+                .iter()
+                .map(|r| r.timestamp_micros)
+                .min()
+                .unwrap_or(0);
+            let max_ts = records
+                .iter()
+                .map(|r| r.timestamp_micros)
+                .max()
+                .unwrap_or(0);
 
             let unique_queries: std::collections::HashSet<&str> =
                 records.iter().map(|r| r.query.as_str()).collect();

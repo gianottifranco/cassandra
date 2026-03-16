@@ -13,8 +13,8 @@ use std::fmt;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
-use crate::roles::RoleManager;
 use crate::SecurityError;
+use crate::roles::RoleManager;
 
 // ─── Permission ────────────────────────────────────────────────────────────
 
@@ -145,11 +145,7 @@ pub trait Authorizer: Send + Sync {
     ) -> Result<(), SecurityError>;
 
     /// List permissions for a role on a resource.
-    fn list_permissions(
-        &self,
-        role: &str,
-        resource: &Resource,
-    ) -> Vec<(Permission, Resource)>;
+    fn list_permissions(&self, role: &str, resource: &Resource) -> Vec<(Permission, Resource)>;
 
     /// Whether authorization is required.
     fn require_authorization(&self) -> bool;
@@ -192,11 +188,7 @@ impl Authorizer for AllowAllAuthorizer {
         Ok(())
     }
 
-    fn list_permissions(
-        &self,
-        _role: &str,
-        _resource: &Resource,
-    ) -> Vec<(Permission, Resource)> {
+    fn list_permissions(&self, _role: &str, _resource: &Resource) -> Vec<(Permission, Resource)> {
         Permission::all()
             .iter()
             .map(|&p| (p, Resource::Root))
@@ -317,11 +309,7 @@ impl<R: RoleManager + Send + Sync> Authorizer for CassandraAuthorizer<R> {
         Ok(())
     }
 
-    fn list_permissions(
-        &self,
-        role: &str,
-        resource: &Resource,
-    ) -> Vec<(Permission, Resource)> {
+    fn list_permissions(&self, role: &str, resource: &Resource) -> Vec<(Permission, Resource)> {
         let all_roles = self.role_manager.get_all_roles(role);
         let mut result = Vec::new();
 
@@ -352,7 +340,10 @@ mod tests {
     use super::*;
     use crate::roles::{InMemoryRoleManager, Role};
 
-    fn setup() -> (InMemoryRoleManager, CassandraAuthorizer<InMemoryRoleManager>) {
+    fn setup() -> (
+        InMemoryRoleManager,
+        CassandraAuthorizer<InMemoryRoleManager>,
+    ) {
         let mgr = InMemoryRoleManager::new();
         // Note: InMemoryRoleManager uses DashMap, can't clone easily.
         // For testing, we build two separate managers with same data.
@@ -416,12 +407,16 @@ mod tests {
             .grant("cassandra", "reader", &resource, Permission::Select)
             .unwrap();
 
-        assert!(authz
-            .authorize("reader", &resource, Permission::Select)
-            .is_ok());
-        assert!(authz
-            .authorize("reader", &resource, Permission::Modify)
-            .is_err());
+        assert!(
+            authz
+                .authorize("reader", &resource, Permission::Select)
+                .is_ok()
+        );
+        assert!(
+            authz
+                .authorize("reader", &resource, Permission::Modify)
+                .is_err()
+        );
     }
 
     #[test]
@@ -435,16 +430,20 @@ mod tests {
         authz
             .grant("cassandra", "writer", &resource, Permission::Modify)
             .unwrap();
-        assert!(authz
-            .authorize("writer", &resource, Permission::Modify)
-            .is_ok());
+        assert!(
+            authz
+                .authorize("writer", &resource, Permission::Modify)
+                .is_ok()
+        );
 
         authz
             .revoke("cassandra", "writer", &resource, Permission::Modify)
             .unwrap();
-        assert!(authz
-            .authorize("writer", &resource, Permission::Modify)
-            .is_err());
+        assert!(
+            authz
+                .authorize("writer", &resource, Permission::Modify)
+                .is_err()
+        );
     }
 
     #[test]
@@ -456,24 +455,28 @@ mod tests {
             .unwrap();
 
         // Should have access to any keyspace/table through root grant
-        assert!(authz
-            .authorize(
-                "reader",
-                &Resource::Table {
-                    keyspace: "any".into(),
-                    table: "any".into()
-                },
-                Permission::Select
-            )
-            .is_ok());
+        assert!(
+            authz
+                .authorize(
+                    "reader",
+                    &Resource::Table {
+                        keyspace: "any".into(),
+                        table: "any".into()
+                    },
+                    Permission::Select
+                )
+                .is_ok()
+        );
     }
 
     #[test]
     fn allow_all_authorizer() {
         let authz = AllowAllAuthorizer;
-        assert!(authz
-            .authorize("anyone", &Resource::Root, Permission::Drop)
-            .is_ok());
+        assert!(
+            authz
+                .authorize("anyone", &Resource::Root, Permission::Drop)
+                .is_ok()
+        );
         assert!(!authz.require_authorization());
     }
 

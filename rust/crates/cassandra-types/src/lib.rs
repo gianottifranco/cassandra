@@ -30,19 +30,19 @@
 //! trait-based hierarchy. This enables exhaustive pattern matching, avoids
 //! virtual dispatch on hot paths, and keeps the type information inline.
 
-pub mod native;
-pub mod collections;
-pub mod udt;
-pub mod codec;
-pub mod comparator;
-pub mod partition_key;
 pub mod clustering_key;
+pub mod codec;
+pub mod collections;
+pub mod comparator;
+pub mod native;
+pub mod partition_key;
+pub mod udt;
 pub mod vector;
 
-pub use native::CqlType;
-pub use collections::{ListType, SetType, MapType, TupleType};
-pub use udt::UserDefinedType;
 pub use codec::CqlValue;
+pub use collections::{ListType, MapType, SetType, TupleType};
+pub use native::CqlType;
+pub use udt::UserDefinedType;
 pub use vector::VectorValue;
 
 #[cfg(test)]

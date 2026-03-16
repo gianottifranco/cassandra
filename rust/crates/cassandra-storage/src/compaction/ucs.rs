@@ -108,11 +108,7 @@ impl UnifiedCompactionStrategy {
     /// - W = 0: fan = 2 (balanced)
     fn fan_factor(&self, level: usize) -> u32 {
         let w = self.scaling.get(level);
-        if w > 0 {
-            (2 + w) as u32
-        } else {
-            2
-        }
+        if w > 0 { (2 + w) as u32 } else { 2 }
     }
 
     /// Group SSTables into density buckets.
@@ -239,9 +235,9 @@ mod tests {
 
         // SSTables with similar density
         let sstables = vec![
-            make_meta(1, 1000, 100), // density 10
-            make_meta(2, 1200, 100), // density 12
-            make_meta(3, 1100, 100), // density 11
+            make_meta(1, 1000, 100),   // density 10
+            make_meta(2, 1200, 100),   // density 12
+            make_meta(3, 1100, 100),   // density 11
             make_meta(4, 100000, 100), // density 1000 (different bucket)
         ];
 

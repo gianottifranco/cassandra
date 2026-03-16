@@ -219,9 +219,18 @@ mod tests {
             warn_threshold: Some(20),
             fail_threshold: Some(100),
         };
-        assert_eq!(g.check_threshold("columns_per_table", 10), GuardrailAction::Disabled);
-        assert_eq!(g.check_threshold("columns_per_table", 20), GuardrailAction::Warn);
-        assert_eq!(g.check_threshold("columns_per_table", 100), GuardrailAction::Fail);
+        assert_eq!(
+            g.check_threshold("columns_per_table", 10),
+            GuardrailAction::Disabled
+        );
+        assert_eq!(
+            g.check_threshold("columns_per_table", 20),
+            GuardrailAction::Warn
+        );
+        assert_eq!(
+            g.check_threshold("columns_per_table", 100),
+            GuardrailAction::Fail
+        );
         assert_eq!(g.check_threshold("unknown", 100), GuardrailAction::Disabled);
     }
 

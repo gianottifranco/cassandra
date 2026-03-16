@@ -44,11 +44,7 @@ pub struct SnapshotTransferRef {
 
 impl SnapshotTransferRef {
     /// Create a new snapshot reference for streaming.
-    pub fn new(
-        session_id: Uuid,
-        keyspace: impl Into<String>,
-        table: impl Into<String>,
-    ) -> Self {
+    pub fn new(session_id: Uuid, keyspace: impl Into<String>, table: impl Into<String>) -> Self {
         let tag = format!("stream-{session_id}-{}", Uuid::new_v4().as_simple());
         Self {
             id: Uuid::new_v4(),
@@ -74,9 +70,7 @@ impl SnapshotTransferRef {
 
     /// Duration since the snapshot was taken.
     pub fn age(&self) -> std::time::Duration {
-        self.created_at
-            .map(|t| t.elapsed())
-            .unwrap_or_default()
+        self.created_at.map(|t| t.elapsed()).unwrap_or_default()
     }
 }
 

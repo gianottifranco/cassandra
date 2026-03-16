@@ -47,11 +47,7 @@ pub trait Snitch: Send + Sync {
 
     /// Sort endpoints by proximity to the source endpoint.
     /// Default implementation returns them in the original order.
-    fn sort_by_proximity(
-        &self,
-        source: &Endpoint,
-        endpoints: &mut [Endpoint],
-    ) {
+    fn sort_by_proximity(&self, source: &Endpoint, endpoints: &mut [Endpoint]) {
         // Default: prefer same DC, then same rack
         let source_dc = self.datacenter(source);
         let source_rack = self.rack(source);
@@ -344,11 +340,7 @@ impl Snitch for DynamicEndpointSnitch {
         self.inner.rack(endpoint)
     }
 
-    fn sort_by_proximity(
-        &self,
-        source: &Endpoint,
-        endpoints: &mut [Endpoint],
-    ) {
+    fn sort_by_proximity(&self, source: &Endpoint, endpoints: &mut [Endpoint]) {
         self.maybe_reset();
 
         // First sort by inner snitch (static topology)
@@ -372,7 +364,9 @@ impl Snitch for DynamicEndpointSnitch {
                 }
             }
 
-            a_score.partial_cmp(&b_score).unwrap_or(std::cmp::Ordering::Equal)
+            a_score
+                .partial_cmp(&b_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
@@ -731,11 +725,8 @@ mod tests {
     #[test]
     fn dynamic_snitch_badness_threshold() {
         let inner = PropertyFileSnitch::new(HashMap::new(), "dc1", "rack1");
-        let snitch = DynamicEndpointSnitch::with_config(
-            Box::new(inner),
-            0.10,
-            Duration::from_secs(600),
-        );
+        let snitch =
+            DynamicEndpointSnitch::with_config(Box::new(inner), 0.10, Duration::from_secs(600));
 
         // Record very similar latencies (< 10% difference)
         for _ in 0..20 {

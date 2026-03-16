@@ -4,20 +4,20 @@
 //!
 //! Listens for incoming CQL client connections (typically port 9042).
 
+use bytes::{Buf, BytesMut};
 use std::sync::Arc;
-use tokio::net::TcpListener;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tracing::{info, error, debug};
-use bytes::{BytesMut, Buf};
+use tokio::net::TcpListener;
+use tracing::{debug, error, info};
 
-use cassandra_native_protocol::auth::{Authenticator as NativeAuthenticator, AuthResult};
+use cassandra_native_protocol::auth::{AuthResult, Authenticator as NativeAuthenticator};
 use cassandra_native_protocol::connection::ConnectionContext;
 use cassandra_native_protocol::frame::{self, Frame, FrameCodec};
-use tokio_util::codec::{Decoder, Encoder};
-use cassandra_security::tls::ReloadableTlsAcceptor;
+use cassandra_security::audit::{AuditEvent, AuditEventType, AuditLogger, AuditStatus};
 use cassandra_security::auth::{Authenticator as SecAuthenticator, Credentials};
-use cassandra_security::audit::{AuditLogger, AuditEvent, AuditEventType, AuditStatus};
 use cassandra_security::fql::{FqlLogger, FqlRecord};
+use cassandra_security::tls::ReloadableTlsAcceptor;
+use tokio_util::codec::{Decoder, Encoder};
 
 use crate::executor::{QueryExecutor, QueryResult};
 
@@ -57,7 +57,10 @@ impl NativeServer {
 
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
         let listener = TcpListener::bind(&self.config.listen_address).await?;
-        info!("Native protocol server listening on {}", self.config.listen_address);
+        info!(
+            "Native protocol server listening on {}",
+            self.config.listen_address
+        );
 
         if self.config.client_encryption_enabled && self.tls_acceptor.is_none() {
             tracing::warn!("Client encryption is enabled but no TLS acceptor was provided!");
@@ -113,7 +116,8 @@ impl NativeServer {
             // Parse as many frames as we can from the buffer
             while let Some(frame) = self.decode_frame(&mut buffer)? {
                 let response_frame = {
-                    let mut resp_opt = ctx.process_lifecycle(&frame, self.authenticator.as_ref())?;
+                    let mut resp_opt =
+                        ctx.process_lifecycle(&frame, self.authenticator.as_ref())?;
                     if resp_opt.is_none() {
                         // Protocol lifecycle didn't handle it, must be a query.
                         resp_opt = self.handle_query(&mut ctx, &frame).await?;
@@ -123,7 +127,7 @@ impl NativeServer {
 
                 if let Some(mut r_frame) = response_frame {
                     r_frame = ctx.wrap_response(r_frame, None, &[], None);
-                    
+
                     let mut out_buf = bytes::BytesMut::new();
                     let mut codec = FrameCodec;
                     codec.encode(r_frame, &mut out_buf)?;
@@ -144,8 +148,8 @@ impl NativeServer {
         frame: &Frame,
     ) -> anyhow::Result<Option<Frame>> {
         use cassandra_native_protocol::message::*;
-        use cassandra_native_protocol::response;
         use cassandra_native_protocol::request;
+        use cassandra_native_protocol::response;
 
         let msg = request::decode_request(frame)?;
         let version = ctx.protocol_version;
@@ -154,12 +158,18 @@ impl NativeServer {
         match msg {
             Message::Query(q) => {
                 let cql = q.query;
-                let user_str = ctx.authenticated_user.clone().unwrap_or_else(|| "anonymous".to_string());
-                
+                let user_str = ctx
+                    .authenticated_user
+                    .clone()
+                    .unwrap_or_else(|| "anonymous".to_string());
+
                 // 1. FQL Logging
                 if self.fql_logger.is_enabled() {
                     let record = FqlRecord {
-                        timestamp_micros: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_micros() as i64,
+                        timestamp_micros: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_micros() as i64,
                         consistency_level: 1, // mapping ONE for now
                         query: cql.clone(),
                         bind_values: vec![], // No bind values in simple Query
@@ -168,13 +178,16 @@ impl NativeServer {
                         tracing::warn!("Failed to append to FQL log: {}", e);
                     }
                 }
-                
+
                 // Parse the CQL
                 let stmt = match cassandra_cql::parser::parse(&cql) {
                     Ok(s) => s,
                     Err(e) => {
                         return Ok(Some(response::error_frame(
-                            version, stream_id, 0x2000, &e.to_string(), // SYNTAX_ERROR
+                            version,
+                            stream_id,
+                            0x2000,
+                            &e.to_string(), // SYNTAX_ERROR
                         )));
                     }
                 };
@@ -184,22 +197,32 @@ impl NativeServer {
                 // We'll parse assuming active keyspace.
                 let schema_catalog = self.executor.catalog();
                 let schema = schema_catalog.read().snapshot();
-                
-                let plan = match cassandra_cql::planner::plan(&stmt, &schema, ctx.keyspace.as_deref()) {
-                    Ok(p) => p,
-                    Err(e) => {
-                         return Ok(Some(response::error_frame(
-                            version, stream_id, 0x2200, &e.to_string(), // INVALID
-                        )));
-                    }
-                };
+
+                let plan =
+                    match cassandra_cql::planner::plan(&stmt, &schema, ctx.keyspace.as_deref()) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return Ok(Some(response::error_frame(
+                                version,
+                                stream_id,
+                                0x2200,
+                                &e.to_string(), // INVALID
+                            )));
+                        }
+                    };
 
                 // Execute the query
-                let result = self.executor.execute(&plan, ctx.authenticated_user.as_deref());
-                
+                let result = self
+                    .executor
+                    .execute(&plan, ctx.authenticated_user.as_deref());
+
                 // 2. Audit Logging
                 if self.audit_logger.is_enabled() {
-                    let status = if result.is_ok() { AuditStatus::Success } else { AuditStatus::Failure };
+                    let status = if result.is_ok() {
+                        AuditStatus::Success
+                    } else {
+                        AuditStatus::Failure
+                    };
                     let mut event = AuditEvent::now(AuditEventType::Query, &user_str, "127.0.0.1");
                     event.query = Some(cql.clone());
                     event.keyspace = ctx.keyspace.clone();
@@ -208,51 +231,73 @@ impl NativeServer {
                 }
 
                 match result {
-                    Ok(QueryResult::Void) => {
-                        Ok(Some(response::encode_response(
-                            &Message::Result(cassandra_native_protocol::message::ResultMessage::Void), version, stream_id
-                        )))
-                    }
+                    Ok(QueryResult::Void) => Ok(Some(response::encode_response(
+                        &Message::Result(cassandra_native_protocol::message::ResultMessage::Void),
+                        version,
+                        stream_id,
+                    ))),
                     Ok(QueryResult::SetKeyspace(ks)) => {
                         ctx.keyspace = Some(ks.clone());
                         Ok(Some(response::encode_response(
-                            &Message::Result(cassandra_native_protocol::message::ResultMessage::SetKeyspace(ks)), version, stream_id
-                        )))
-                    }
-                    Ok(QueryResult::SchemaChange { change_type, target, keyspace, name }) => {
-                        Ok(Some(response::encode_response(
-                            &Message::Result(cassandra_native_protocol::message::ResultMessage::SchemaChange(
-                                cassandra_native_protocol::message::SchemaChange {
-                                    change_type,
-                                    target,
-                                    keyspace,
-                                    name,
-                                    arg_types: None, // Used for functions/aggregates, omit for now
-                                }
-                            )),
+                            &Message::Result(
+                                cassandra_native_protocol::message::ResultMessage::SetKeyspace(ks),
+                            ),
                             version,
-                            stream_id
+                            stream_id,
                         )))
                     }
-                    Ok(QueryResult::Rows { columns: _, rows: _ }) => {
+                    Ok(QueryResult::SchemaChange {
+                        change_type,
+                        target,
+                        keyspace,
+                        name,
+                    }) => {
+                        Ok(Some(response::encode_response(
+                            &Message::Result(
+                                cassandra_native_protocol::message::ResultMessage::SchemaChange(
+                                    cassandra_native_protocol::message::SchemaChange {
+                                        change_type,
+                                        target,
+                                        keyspace,
+                                        name,
+                                        arg_types: None, // Used for functions/aggregates, omit for now
+                                    },
+                                ),
+                            ),
+                            version,
+                            stream_id,
+                        )))
+                    }
+                    Ok(QueryResult::Rows {
+                        columns: _,
+                        rows: _,
+                    }) => {
                         // TODO: Map to actual Row results
                         // For now we just return a stub result because `Rows` isn't fully mapped to Message::ResultRows yet.
-                         Ok(Some(response::encode_response(
-                            &Message::Result(cassandra_native_protocol::message::ResultMessage::Void), version, stream_id
+                        Ok(Some(response::encode_response(
+                            &Message::Result(
+                                cassandra_native_protocol::message::ResultMessage::Void,
+                            ),
+                            version,
+                            stream_id,
                         )))
                     }
                     Err(e) => {
                         Ok(Some(response::error_frame(
-                            version, stream_id, 0x2200, &e.to_string(), // INVALID
+                            version,
+                            stream_id,
+                            0x2200,
+                            &e.to_string(), // INVALID
                         )))
                     }
                 }
             }
-            _ => {
-                Ok(Some(response::error_frame(
-                    version, stream_id, 0x000A, "Message not supported in this state",
-                )))
-            }
+            _ => Ok(Some(response::error_frame(
+                version,
+                stream_id,
+                0x000A,
+                "Message not supported in this state",
+            ))),
         }
     }
 }
@@ -271,11 +316,11 @@ impl NativeAuthenticator for NativeAuthWrapper {
     fn class_name(&self) -> &str {
         self.inner.name()
     }
-    
+
     fn requires_auth(&self) -> bool {
         self.inner.require_authentication()
     }
-    
+
     fn authenticate(&self, token: Option<&[u8]>) -> Result<AuthResult, String> {
         let token = token.ok_or("No authentication token provided")?;
 
@@ -284,10 +329,8 @@ impl NativeAuthenticator for NativeAuthWrapper {
             return Err("Invalid PLAIN credentials format".to_string());
         }
 
-        let username = std::str::from_utf8(parts[1])
-            .map_err(|_| "Invalid UTF-8 in username")?;
-        let password = std::str::from_utf8(parts[2])
-            .map_err(|_| "Invalid UTF-8 in password")?;
+        let username = std::str::from_utf8(parts[1]).map_err(|_| "Invalid UTF-8 in username")?;
+        let password = std::str::from_utf8(parts[2]).map_err(|_| "Invalid UTF-8 in password")?;
 
         let creds = Credentials {
             username: username.to_string(),

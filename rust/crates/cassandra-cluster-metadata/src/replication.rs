@@ -40,11 +40,17 @@ pub struct Replica {
 
 impl Replica {
     pub fn full(endpoint: Endpoint) -> Self {
-        Self { endpoint, is_transient: false }
+        Self {
+            endpoint,
+            is_transient: false,
+        }
     }
 
     pub fn transient(endpoint: Endpoint) -> Self {
-        Self { endpoint, is_transient: true }
+        Self {
+            endpoint,
+            is_transient: true,
+        }
     }
 
     pub fn is_full(&self) -> bool {
@@ -163,10 +169,7 @@ impl ReplicationStrategy for NetworkTopologyStrategy {
         let mut result = Vec::with_capacity(total_rf);
 
         // Collect all ring entries in clockwise order from token
-        let all_entries: Vec<(Token, Endpoint)> = ring
-            .iter()
-            .map(|(t, e)| (*t, *e))
-            .collect();
+        let all_entries: Vec<(Token, Endpoint)> = ring.iter().map(|(t, e)| (*t, *e)).collect();
 
         if all_entries.is_empty() {
             return Vec::new();
@@ -205,9 +208,7 @@ impl ReplicationStrategy for NetworkTopologyStrategy {
             let racks_used = dc_racks_used.entry(dc.clone()).or_default();
             let dc_nodes_in_ring: usize = all_entries
                 .iter()
-                .filter(|(_, e)| {
-                    !seen_endpoints.contains(e) && snitch.datacenter(e) == dc
-                })
+                .filter(|(_, e)| !seen_endpoints.contains(e) && snitch.datacenter(e) == dc)
                 .map(|(_, e)| *e)
                 .collect::<HashSet<_>>()
                 .len();
@@ -436,23 +437,23 @@ impl ReplicationStrategy for TransientReplicationStrategy {
         snitch: &dyn Snitch,
     ) -> Vec<Replica> {
         let endpoints = self.inner.calculate_natural_endpoints(token, ring, snitch);
-        
+
         let mut dc_totals = HashMap::new();
         for ep in &endpoints {
             *dc_totals.entry(snitch.datacenter(ep)).or_insert(0) += 1;
         }
-        
+
         let mut dc_seen = HashMap::new();
         let mut result = Vec::with_capacity(endpoints.len());
-        
+
         for ep in endpoints {
             let dc = snitch.datacenter(&ep);
             let seen = dc_seen.entry(dc.clone()).or_insert(0);
             *seen += 1;
-            
+
             let total = *dc_totals.get(&dc).unwrap();
             let transient_count = self.dc_transient.get(&dc).copied().unwrap_or(0);
-            
+
             // The last `transient_count` replicas for a DC are transient.
             let remaining = total - *seen + 1;
             if remaining <= transient_count {
@@ -461,7 +462,7 @@ impl ReplicationStrategy for TransientReplicationStrategy {
                 result.push(Replica::full(ep));
             }
         }
-        
+
         result
     }
 
@@ -496,8 +497,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 1);
         assert_eq!(replicas[0], ep(7002));
     }
@@ -511,8 +511,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 3);
     }
 
@@ -524,8 +523,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7001));
         ring.add_token(Token::from_raw(100), ep(7002));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 2); // can't exceed node count
     }
 
@@ -549,12 +547,14 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 3);
 
         // Verify DC distribution
-        let dc1_count = replicas.iter().filter(|e| **e == ep(7001) || **e == ep(7002)).count();
+        let dc1_count = replicas
+            .iter()
+            .filter(|e| **e == ep(7001) || **e == ep(7002))
+            .count();
         let dc2_count = replicas.iter().filter(|e| **e == ep(7003)).count();
         assert_eq!(dc1_count, 2);
         assert_eq!(dc2_count, 1);
@@ -591,8 +591,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 1);
         assert_eq!(replicas[0], ep(7002)); // primary for token -50
     }
@@ -606,8 +605,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 3); // all nodes
     }
 
@@ -642,4 +640,3 @@ mod tests {
         assert_eq!(strategy.replication_factor(), 3);
     }
 }
-

@@ -28,8 +28,8 @@
 //! 3. Pre/post mutation hook points
 //! The feature is gated behind a compile-time flag.
 
-use std::collections::HashMap;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 
 /// Metadata for a registered trigger.
 #[derive(Debug, Clone)]
@@ -79,10 +79,7 @@ pub trait Trigger: Send + Sync {
     ///
     /// Returns additional mutations to be included in the batch,
     /// or an empty vec for no side effects.
-    fn augment(
-        &self,
-        event: &MutationEvent,
-    ) -> Result<Vec<TriggerMutation>, String>;
+    fn augment(&self, event: &MutationEvent) -> Result<Vec<TriggerMutation>, String>;
 }
 
 /// Registry for triggers, organized by (keyspace, table).
@@ -134,11 +131,7 @@ impl TriggerRegistry {
     /// Get all triggers registered on a table.
     pub fn get_triggers(&self, keyspace: &str, table: &str) -> Vec<TriggerMetadata> {
         let key = Self::make_key(keyspace, table);
-        self.triggers
-            .read()
-            .get(&key)
-            .cloned()
-            .unwrap_or_default()
+        self.triggers.read().get(&key).cloned().unwrap_or_default()
     }
 
     /// Check if any triggers are registered on a table.
@@ -169,12 +162,14 @@ mod tests {
     #[test]
     fn register_and_get() {
         let registry = TriggerRegistry::new();
-        registry.register(TriggerMetadata {
-            name: "audit_log".into(),
-            keyspace: "ks".into(),
-            table: "users".into(),
-            trigger_class: "org.example.AuditTrigger".into(),
-        }).unwrap();
+        registry
+            .register(TriggerMetadata {
+                name: "audit_log".into(),
+                keyspace: "ks".into(),
+                table: "users".into(),
+                trigger_class: "org.example.AuditTrigger".into(),
+            })
+            .unwrap();
 
         let triggers = registry.get_triggers("ks", "users");
         assert_eq!(triggers.len(), 1);
@@ -186,12 +181,14 @@ mod tests {
     #[test]
     fn duplicate_name_rejected() {
         let registry = TriggerRegistry::new();
-        registry.register(TriggerMetadata {
-            name: "t1".into(),
-            keyspace: "ks".into(),
-            table: "t".into(),
-            trigger_class: "class1".into(),
-        }).unwrap();
+        registry
+            .register(TriggerMetadata {
+                name: "t1".into(),
+                keyspace: "ks".into(),
+                table: "t".into(),
+                trigger_class: "class1".into(),
+            })
+            .unwrap();
 
         let result = registry.register(TriggerMetadata {
             name: "t1".into(),
@@ -205,12 +202,14 @@ mod tests {
     #[test]
     fn unregister() {
         let registry = TriggerRegistry::new();
-        registry.register(TriggerMetadata {
-            name: "t1".into(),
-            keyspace: "ks".into(),
-            table: "t".into(),
-            trigger_class: "class1".into(),
-        }).unwrap();
+        registry
+            .register(TriggerMetadata {
+                name: "t1".into(),
+                keyspace: "ks".into(),
+                table: "t".into(),
+                trigger_class: "class1".into(),
+            })
+            .unwrap();
 
         assert!(registry.unregister("ks", "t", "t1"));
         assert!(!registry.has_triggers("ks", "t"));
@@ -221,19 +220,23 @@ mod tests {
     fn total_count() {
         let registry = TriggerRegistry::new();
         for i in 0..3 {
-            registry.register(TriggerMetadata {
-                name: format!("t{}", i),
-                keyspace: "ks".into(),
-                table: "users".into(),
-                trigger_class: format!("class{}", i),
-            }).unwrap();
+            registry
+                .register(TriggerMetadata {
+                    name: format!("t{}", i),
+                    keyspace: "ks".into(),
+                    table: "users".into(),
+                    trigger_class: format!("class{}", i),
+                })
+                .unwrap();
         }
-        registry.register(TriggerMetadata {
-            name: "t0".into(),
-            keyspace: "ks".into(),
-            table: "orders".into(),
-            trigger_class: "class0".into(),
-        }).unwrap();
+        registry
+            .register(TriggerMetadata {
+                name: "t0".into(),
+                keyspace: "ks".into(),
+                table: "orders".into(),
+                trigger_class: "class0".into(),
+            })
+            .unwrap();
         assert_eq!(registry.total_count(), 4);
     }
 }

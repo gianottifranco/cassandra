@@ -39,12 +39,12 @@ pub mod memtable;
 pub mod sstable;
 
 // Feature-gated re-exports
-pub use engine::{EngineConfig, EngineStats, StorageEngine};
 pub use commitlog::{CommitLog, CommitLogConfig, Mutation};
-pub use sstable::{SSTableDescriptor, SSTableReader, SSTableWriter, BtiReader, BtiWriter};
-pub use sstable::format::SSTableFormat;
 pub use compaction::CompactionStrategyType;
+pub use engine::{EngineConfig, EngineStats, StorageEngine};
 pub use memtable::MemtableType;
+pub use sstable::format::SSTableFormat;
+pub use sstable::{BtiReader, BtiWriter, SSTableDescriptor, SSTableReader, SSTableWriter};
 
 // ─── Modules with stubs (from original crate) ─────────────────────────────
 

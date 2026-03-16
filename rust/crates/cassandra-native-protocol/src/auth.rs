@@ -94,12 +94,9 @@ impl Authenticator for PasswordAuthenticator {
             return Err("Invalid PLAIN credentials format".to_string());
         }
 
-        let _authzid = std::str::from_utf8(parts[0])
-            .map_err(|_| "Invalid UTF-8 in authzid")?;
-        let username = std::str::from_utf8(parts[1])
-            .map_err(|_| "Invalid UTF-8 in username")?;
-        let password = std::str::from_utf8(parts[2])
-            .map_err(|_| "Invalid UTF-8 in password")?;
+        let _authzid = std::str::from_utf8(parts[0]).map_err(|_| "Invalid UTF-8 in authzid")?;
+        let username = std::str::from_utf8(parts[1]).map_err(|_| "Invalid UTF-8 in username")?;
+        let password = std::str::from_utf8(parts[2]).map_err(|_| "Invalid UTF-8 in password")?;
 
         if username.is_empty() || password.is_empty() {
             return Err("Username and password must not be empty".to_string());
@@ -152,6 +149,9 @@ mod tests {
     #[test]
     fn password_auth_class_name() {
         let auth = PasswordAuthenticator;
-        assert_eq!(auth.class_name(), "org.apache.cassandra.auth.PasswordAuthenticator");
+        assert_eq!(
+            auth.class_name(),
+            "org.apache.cassandra.auth.PasswordAuthenticator"
+        );
     }
 }

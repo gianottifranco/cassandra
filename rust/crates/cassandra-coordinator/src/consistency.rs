@@ -67,7 +67,7 @@ impl ConsistencyLevel {
             Self::Three => 3.min(rf),
             Self::Quorum | Self::LocalQuorum => rf / 2 + 1,
             Self::All => rf,
-            Self::Any => 1, // hints count
+            Self::Any => 1,                 // hints count
             Self::EachQuorum => rf / 2 + 1, // per-DC
             Self::Serial | Self::LocalSerial => {
                 // Serial CLs are used for LWT; they don't map to block_for

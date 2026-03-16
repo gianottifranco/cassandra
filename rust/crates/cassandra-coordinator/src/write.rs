@@ -24,15 +24,13 @@
 //! - `org.apache.cassandra.db.WriteType`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tracing::{debug, info, warn};
 
-use cassandra_cluster_metadata::{
-    ClusterMetadata, Endpoint, ReplicationStrategy, Snitch,
-};
+use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
 use cassandra_common::Token;
 
 use crate::consistency::ConsistencyLevel;
@@ -152,15 +150,11 @@ impl CoordinatedMutation {
         for row in &self.rows {
             size += row.clustering_key.len() + 2;
             for cell in &row.cells {
-                size += cell.column.len()
-                    + cell.value.as_ref().map_or(0, |v| v.len())
-                    + 16;
+                size += cell.column.len() + cell.value.as_ref().map_or(0, |v| v.len()) + 16;
             }
         }
         for cell in &self.static_cells {
-            size += cell.column.len()
-                + cell.value.as_ref().map_or(0, |v| v.len())
-                + 16;
+            size += cell.column.len() + cell.value.as_ref().map_or(0, |v| v.len()) + 16;
         }
         size
     }
@@ -258,7 +252,9 @@ pub enum WriteError {
         alive: usize,
     },
 
-    #[error("Write failure: CL={cl}, type={write_type}, required={required}, received={received}, failures={num_failures}")]
+    #[error(
+        "Write failure: CL={cl}, type={write_type}, required={required}, received={received}, failures={num_failures}"
+    )]
     WriteFailure {
         cl: ConsistencyLevel,
         write_type: WriteType,
@@ -282,10 +278,7 @@ pub enum WriteError {
     SchemaDisagreement(String),
 
     #[error("Mutation too large: {size} bytes exceeds limit of {limit} bytes")]
-    MutationTooLarge {
-        size: usize,
-        limit: usize,
-    },
+    MutationTooLarge { size: usize, limit: usize },
 
     #[error("Internal error: {0}")]
     Internal(String),
@@ -548,17 +541,13 @@ impl WriteCoordinator {
 
         let live_replicas: Vec<Endpoint> = replicas
             .iter()
-            .filter(|ep| {
-                snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live())
-            })
+            .filter(|ep| snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live()))
             .cloned()
             .collect();
 
         let dead_replicas: Vec<Endpoint> = replicas
             .iter()
-            .filter(|ep| {
-                !snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live())
-            })
+            .filter(|ep| !snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live()))
             .cloned()
             .collect();
 
@@ -684,10 +673,14 @@ impl WriteCoordinator {
         };
 
         let elapsed_us = start.elapsed().as_micros() as u64;
-        self.metrics.write_latency_us_sum.fetch_add(elapsed_us, Ordering::Relaxed);
+        self.metrics
+            .write_latency_us_sum
+            .fetch_add(elapsed_us, Ordering::Relaxed);
 
         if satisfied {
-            self.metrics.writes_succeeded.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .writes_succeeded
+                .fetch_add(1, Ordering::Relaxed);
             debug!(
                 cl = %cl,
                 acks = acks_received,
@@ -703,7 +696,9 @@ impl WriteCoordinator {
                 hints_stored: hints_stored_for_dead,
             })
         } else {
-            self.metrics.writes_timed_out.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .writes_timed_out
+                .fetch_add(1, Ordering::Relaxed);
             Err(WriteError::Timeout {
                 cl,
                 write_type,
@@ -747,7 +742,9 @@ impl WriteCoordinator {
                 .map(|n| n.datacenter.clone())
                 .unwrap_or_else(|| self.local_datacenter.clone());
             let is_live = snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live());
-            let entry = dc_groups.entry(dc).or_insert_with(|| (Vec::new(), Vec::new()));
+            let entry = dc_groups
+                .entry(dc)
+                .or_insert_with(|| (Vec::new(), Vec::new()));
             if is_live {
                 entry.0.push(*ep);
             } else {
@@ -920,9 +917,7 @@ impl WriteCoordinator {
 
         let live_count = replicas
             .iter()
-            .filter(|ep| {
-                snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live())
-            })
+            .filter(|ep| snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live()))
             .count();
 
         cl.is_satisfied(live_count, rf)
@@ -1071,7 +1066,7 @@ impl WriteCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cassandra_cluster_metadata::{NodeId, NodeInfo, SimpleStrategy, SimpleSnitch};
+    use cassandra_cluster_metadata::{NodeId, NodeInfo, SimpleSnitch, SimpleStrategy};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn ep(port: u16) -> Endpoint {
@@ -1193,7 +1188,11 @@ mod tests {
         );
         assert!(result.is_err());
         match result.unwrap_err() {
-            WriteError::Unavailable { cl, required, alive } => {
+            WriteError::Unavailable {
+                cl,
+                required,
+                alive,
+            } => {
                 assert_eq!(cl, ConsistencyLevel::Quorum);
                 assert_eq!(required, 2);
                 assert_eq!(alive, 1);
@@ -1486,12 +1485,7 @@ mod tests {
         let mut m = test_mutation();
         m.rows[0].cells[0].value = Some(vec![0u8; 100]); // exceeds 50 bytes
 
-        let result = coordinator.coordinate_write(
-            &m,
-            ConsistencyLevel::One,
-            &strategy,
-            &snitch,
-        );
+        let result = coordinator.coordinate_write(&m, ConsistencyLevel::One, &strategy, &snitch);
         assert!(result.is_err());
         match result.unwrap_err() {
             WriteError::MutationTooLarge { size, limit } => {
@@ -1510,7 +1504,10 @@ mod tests {
 
     #[test]
     fn mutation_too_large_error_code() {
-        let err = WriteError::MutationTooLarge { size: 100, limit: 50 };
+        let err = WriteError::MutationTooLarge {
+            size: 100,
+            limit: 50,
+        };
         assert_eq!(err.error_code(), 0x2200);
     }
 
@@ -1541,9 +1538,7 @@ mod tests {
 
     #[test]
     fn coordinate_write_with_hooks_mv_fanout() {
-        use cassandra_storage::materialized_views::{
-            MaterializedViewDefinition, ViewManager,
-        };
+        use cassandra_storage::materialized_views::{MaterializedViewDefinition, ViewManager};
 
         let (_cm, coordinator) = setup_cluster();
         let strategy = SimpleStrategy::new(3);
@@ -1580,7 +1575,10 @@ mod tests {
 
         // MV fanout metrics were tracked
         assert_eq!(
-            coordinator.view_fanout_metrics.view_mutations_generated.load(Ordering::Relaxed),
+            coordinator
+                .view_fanout_metrics
+                .view_mutations_generated
+                .load(Ordering::Relaxed),
             1
         );
     }

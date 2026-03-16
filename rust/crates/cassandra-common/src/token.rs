@@ -35,7 +35,9 @@ use crate::murmur3;
 ///
 /// The token space is `[i64::MIN, i64::MAX]`. Murmur3Partitioner uses
 /// the first 64 bits of the Murmur3 128-bit hash as the token value.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Token(pub i64);
 
 impl Token {
@@ -222,7 +224,7 @@ mod tests {
         let range = TokenRange::new(Token::from_raw(10), Token::from_raw(20));
         assert!(!range.contains(Token::from_raw(10))); // exclusive start
         assert!(range.contains(Token::from_raw(11)));
-        assert!(range.contains(Token::from_raw(20)));  // inclusive end
+        assert!(range.contains(Token::from_raw(20))); // inclusive end
         assert!(!range.contains(Token::from_raw(21)));
     }
 

@@ -34,7 +34,10 @@ pub struct ListType {
 
 impl ListType {
     pub fn new(element_type: CqlType, frozen: bool) -> Self {
-        Self { element_type, frozen }
+        Self {
+            element_type,
+            frozen,
+        }
     }
 
     pub fn to_cql_type(&self) -> CqlType {
@@ -51,7 +54,10 @@ pub struct SetType {
 
 impl SetType {
     pub fn new(element_type: CqlType, frozen: bool) -> Self {
-        Self { element_type, frozen }
+        Self {
+            element_type,
+            frozen,
+        }
     }
 
     pub fn to_cql_type(&self) -> CqlType {
@@ -69,7 +75,11 @@ pub struct MapType {
 
 impl MapType {
     pub fn new(key_type: CqlType, value_type: CqlType, frozen: bool) -> Self {
-        Self { key_type, value_type, frozen }
+        Self {
+            key_type,
+            value_type,
+            frozen,
+        }
     }
 
     pub fn to_cql_type(&self) -> CqlType {

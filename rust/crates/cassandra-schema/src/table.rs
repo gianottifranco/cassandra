@@ -5,11 +5,11 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.schema.TableMetadata`
 
-use std::collections::BTreeMap;
-use serde::{Deserialize, Serialize};
-use crate::table_id::TableId;
-use crate::column::{ColumnMetadata, ColumnKind};
+use crate::column::{ColumnKind, ColumnMetadata};
 use crate::index::IndexMetadata;
+use crate::table_id::TableId;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Flags on a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -65,11 +65,21 @@ pub struct TableParams {
     pub transactional_mode: TransactionalMode,
 }
 
-fn default_gc_grace() -> i32 { 864_000 } // 10 days
-fn default_bloom_fp() -> f64 { 0.01 }
-fn default_min_index_interval() -> i32 { 128 }
-fn default_max_index_interval() -> i32 { 2048 }
-fn default_crc_check_chance() -> f64 { 1.0 }
+fn default_gc_grace() -> i32 {
+    864_000
+} // 10 days
+fn default_bloom_fp() -> f64 {
+    0.01
+}
+fn default_min_index_interval() -> i32 {
+    128
+}
+fn default_max_index_interval() -> i32 {
+    2048
+}
+fn default_crc_check_chance() -> f64 {
+    1.0
+}
 
 impl Default for TableParams {
     fn default() -> Self {
@@ -103,7 +113,9 @@ pub struct TableMetadata {
 impl TableMetadata {
     /// Get partition key columns, sorted by position.
     pub fn partition_key_columns(&self) -> Vec<&ColumnMetadata> {
-        let mut cols: Vec<_> = self.columns.iter()
+        let mut cols: Vec<_> = self
+            .columns
+            .iter()
             .filter(|c| c.kind == ColumnKind::PartitionKey)
             .collect();
         cols.sort_by_key(|c| c.position);
@@ -112,7 +124,9 @@ impl TableMetadata {
 
     /// Get clustering columns, sorted by position.
     pub fn clustering_columns(&self) -> Vec<&ColumnMetadata> {
-        let mut cols: Vec<_> = self.columns.iter()
+        let mut cols: Vec<_> = self
+            .columns
+            .iter()
             .filter(|c| c.kind == ColumnKind::Clustering)
             .collect();
         cols.sort_by_key(|c| c.position);
@@ -121,12 +135,18 @@ impl TableMetadata {
 
     /// Get regular columns.
     pub fn regular_columns(&self) -> Vec<&ColumnMetadata> {
-        self.columns.iter().filter(|c| c.kind == ColumnKind::Regular).collect()
+        self.columns
+            .iter()
+            .filter(|c| c.kind == ColumnKind::Regular)
+            .collect()
     }
 
     /// Get static columns.
     pub fn static_columns(&self) -> Vec<&ColumnMetadata> {
-        self.columns.iter().filter(|c| c.kind == ColumnKind::Static).collect()
+        self.columns
+            .iter()
+            .filter(|c| c.kind == ColumnKind::Static)
+            .collect()
     }
 
     /// Look up a column by name.
@@ -177,13 +197,34 @@ impl TableMetadataBuilder {
         }
     }
 
-    pub fn id(mut self, id: TableId) -> Self { self.id = id; self }
-    pub fn add_column(mut self, col: ColumnMetadata) -> Self { self.columns.push(col); self }
-    pub fn add_index(mut self, idx: IndexMetadata) -> Self { self.indexes.push(idx); self }
-    pub fn flags(mut self, flags: Vec<TableFlag>) -> Self { self.flags = flags; self }
-    pub fn params(mut self, params: TableParams) -> Self { self.params = params; self }
-    pub fn gc_grace(mut self, seconds: i32) -> Self { self.params.gc_grace_seconds = seconds; self }
-    pub fn comment(mut self, c: impl Into<String>) -> Self { self.params.comment = c.into(); self }
+    pub fn id(mut self, id: TableId) -> Self {
+        self.id = id;
+        self
+    }
+    pub fn add_column(mut self, col: ColumnMetadata) -> Self {
+        self.columns.push(col);
+        self
+    }
+    pub fn add_index(mut self, idx: IndexMetadata) -> Self {
+        self.indexes.push(idx);
+        self
+    }
+    pub fn flags(mut self, flags: Vec<TableFlag>) -> Self {
+        self.flags = flags;
+        self
+    }
+    pub fn params(mut self, params: TableParams) -> Self {
+        self.params = params;
+        self
+    }
+    pub fn gc_grace(mut self, seconds: i32) -> Self {
+        self.params.gc_grace_seconds = seconds;
+        self
+    }
+    pub fn comment(mut self, c: impl Into<String>) -> Self {
+        self.params.comment = c.into();
+        self
+    }
 
     pub fn build(self) -> TableMetadata {
         TableMetadata {
@@ -201,13 +242,18 @@ impl TableMetadataBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cassandra_types::CqlType;
     use crate::column::ClusteringOrder;
+    use cassandra_types::CqlType;
 
     fn sample_table() -> TableMetadata {
         TableMetadataBuilder::new("test_ks", "users")
             .add_column(ColumnMetadata::partition_key("user_id", 0, CqlType::Uuid))
-            .add_column(ColumnMetadata::clustering("created_at", 0, CqlType::Timestamp, ClusteringOrder::Desc))
+            .add_column(ColumnMetadata::clustering(
+                "created_at",
+                0,
+                CqlType::Timestamp,
+                ClusteringOrder::Desc,
+            ))
             .add_column(ColumnMetadata::regular("name", CqlType::Varchar))
             .add_column(ColumnMetadata::regular("email", CqlType::Varchar))
             .add_column(ColumnMetadata::static_col("account_type", CqlType::Varchar))

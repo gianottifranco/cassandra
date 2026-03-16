@@ -69,18 +69,20 @@ impl CounterReplica {
     /// Reads the current context (or creates empty), applies delta, and returns the serialized result.
     pub fn read_before_write(&self, partition_key: &[u8], delta: i64) -> Vec<u8> {
         let mut ctx = match self.storage.get(partition_key) {
-            Some(data) => cassandra_storage::counter::CounterContext::deserialize(&data)
-                .unwrap_or_default(),
+            Some(data) => {
+                cassandra_storage::counter::CounterContext::deserialize(&data).unwrap_or_default()
+            }
             None => cassandra_storage::counter::CounterContext::new(),
         };
 
         // Apply local delta
         ctx.apply_local(self.node_id, delta);
-        
+
         let serialized = ctx.serialize();
         // Leader persists it immediately before returning
-        self.storage.insert(partition_key.to_vec(), serialized.clone());
-        
+        self.storage
+            .insert(partition_key.to_vec(), serialized.clone());
+
         serialized
     }
 
@@ -90,13 +92,15 @@ impl CounterReplica {
             .unwrap_or_default();
 
         let mut current = match self.storage.get(partition_key) {
-            Some(data) => cassandra_storage::counter::CounterContext::deserialize(&data)
-                .unwrap_or_default(),
+            Some(data) => {
+                cassandra_storage::counter::CounterContext::deserialize(&data).unwrap_or_default()
+            }
             None => cassandra_storage::counter::CounterContext::new(),
         };
 
         current.merge(&incoming);
-        self.storage.insert(partition_key.to_vec(), current.serialize());
+        self.storage
+            .insert(partition_key.to_vec(), current.serialize());
     }
 }
 
@@ -126,7 +130,9 @@ impl CounterCoordinator {
         snitch: &dyn Snitch,
     ) -> Result<WriteResult, WriteError> {
         // 1. Compute Write Plan
-        let plan = self.write_coordinator.compute_write_plan(mutation, cl, strategy, snitch)?;
+        let plan = self
+            .write_coordinator
+            .compute_write_plan(mutation, cl, strategy, snitch)?;
 
         if plan.live_replicas.is_empty() {
             return Err(WriteError::Unavailable {
@@ -138,8 +144,9 @@ impl CounterCoordinator {
 
         // 2. Select Leader (we just pick the first live replica for simplicity here)
         let leader_endpoint = plan.live_replicas[0];
-        let leader = self.replicas.get(&leader_endpoint)
-            .ok_or_else(|| WriteError::Internal("Leader replica not found in registry".to_string()))?;
+        let leader = self.replicas.get(&leader_endpoint).ok_or_else(|| {
+            WriteError::Internal("Leader replica not found in registry".to_string())
+        })?;
 
         // 3. Read Before Write
         debug!(leader = %leader_endpoint, "Sending ReadBeforeWrite to leader");
@@ -162,7 +169,10 @@ impl CounterCoordinator {
         };
 
         if satisfied {
-            self.write_coordinator.metrics.writes_succeeded.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.write_coordinator
+                .metrics
+                .writes_succeeded
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(WriteResult {
                 acks_received: acks,
                 acks_required: plan.block_for,
@@ -170,7 +180,10 @@ impl CounterCoordinator {
                 hints_stored: plan.dead_replicas.len(),
             })
         } else {
-            self.write_coordinator.metrics.writes_timed_out.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.write_coordinator
+                .metrics
+                .writes_timed_out
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Err(WriteError::Timeout {
                 cl,
                 write_type: crate::write::WriteType::Counter,
@@ -185,10 +198,10 @@ impl CounterCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use crate::hints::HintStore;
     use cassandra_cluster_metadata::{NodeId, NodeInfo, SimpleStrategy};
     use cassandra_common::Token;
-    use crate::hints::HintStore;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn ep(port: u16) -> Endpoint {
         Endpoint::new(SocketAddr::new(
@@ -207,14 +220,17 @@ mod tests {
         )
     }
 
-    fn setup_env() -> (Arc<WriteCoordinator>, Arc<DashMap<Endpoint, CounterReplica>>) {
+    fn setup_env() -> (
+        Arc<WriteCoordinator>,
+        Arc<DashMap<Endpoint, CounterReplica>>,
+    ) {
         let replicas_map = Arc::new(DashMap::new());
-        
+
         // Use NodeInfo array to set up cluster
         let n1 = node(7001, vec![100]);
         let n2 = node(7002, vec![200]);
         let n3 = node(7003, vec![300]);
-        
+
         replicas_map.insert(ep(7001), CounterReplica::new(ep(7001), Uuid::new_v4()));
         replicas_map.insert(ep(7002), CounterReplica::new(ep(7002), Uuid::new_v4()));
         replicas_map.insert(ep(7003), CounterReplica::new(ep(7003), Uuid::new_v4()));
@@ -250,14 +266,26 @@ mod tests {
 
         struct DummySnitch;
         impl Snitch for DummySnitch {
-            fn datacenter(&self, _endpoint: &Endpoint) -> String { "dc1".to_string() }
-            fn rack(&self, _endpoint: &Endpoint) -> String { "rack1".to_string() }
+            fn datacenter(&self, _endpoint: &Endpoint) -> String {
+                "dc1".to_string()
+            }
+            fn rack(&self, _endpoint: &Endpoint) -> String {
+                "rack1".to_string()
+            }
         }
         let snitch = DummySnitch;
-        let strategy = SimpleStrategy { replication_factor: 3 };
+        let strategy = SimpleStrategy {
+            replication_factor: 3,
+        };
 
         // 1. Initial increment
-        let res = counter_coord.coordinate_counter(&mutation, 10, ConsistencyLevel::Quorum, &strategy, &snitch);
+        let res = counter_coord.coordinate_counter(
+            &mutation,
+            10,
+            ConsistencyLevel::Quorum,
+            &strategy,
+            &snitch,
+        );
         assert!(res.is_ok());
 
         // Verify across replicas
@@ -268,7 +296,13 @@ mod tests {
         }
 
         // 2. Second increment
-        let res2 = counter_coord.coordinate_counter(&mutation, 5, ConsistencyLevel::Quorum, &strategy, &snitch);
+        let res2 = counter_coord.coordinate_counter(
+            &mutation,
+            5,
+            ConsistencyLevel::Quorum,
+            &strategy,
+            &snitch,
+        );
         assert!(res2.is_ok());
 
         for rep in replicas.iter() {

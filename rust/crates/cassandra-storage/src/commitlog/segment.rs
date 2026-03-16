@@ -104,12 +104,7 @@ impl Segment {
 
     /// Recycle a segment file: truncate and write a fresh header.
     pub fn recycle(path: &Path, new_id: u64, flags: SegmentFlags) -> Result<Self> {
-        let mut file = BufWriter::new(
-            OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(path)?,
-        );
+        let mut file = BufWriter::new(OpenOptions::new().write(true).truncate(true).open(path)?);
 
         file.write_all(&MAGIC)?;
         file.write_u8(VERSION_2)?;
@@ -202,9 +197,10 @@ impl Segment {
     /// Append an entry to this segment. Returns the offset at which it was written.
     /// If compression is enabled and beneficial, the entry is LZ4-compressed.
     pub fn append_entry(&mut self, payload: &[u8]) -> Result<u64> {
-        let writer = self.writer.as_mut().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "Segment not open for writing")
-        })?;
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Segment not open for writing"))?;
 
         let offset = self.size;
 
@@ -511,8 +507,7 @@ mod tests {
         assert!(old_path.exists());
 
         // Recycle
-        let mut recycled =
-            Segment::recycle(&old_path, 200, SegmentFlags::default()).unwrap();
+        let mut recycled = Segment::recycle(&old_path, 200, SegmentFlags::default()).unwrap();
         recycled.append_entry(b"new_data").unwrap();
         recycled.sync().unwrap();
 

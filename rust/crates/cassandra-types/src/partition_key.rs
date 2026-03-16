@@ -36,17 +36,25 @@ pub fn decode_composite(data: &[u8], expected_components: usize) -> Option<Vec<V
     let mut result = Vec::with_capacity(expected_components);
     let mut offset = 0;
     while offset < data.len() && result.len() < expected_components {
-        if offset + 2 > data.len() { return None; }
+        if offset + 2 > data.len() {
+            return None;
+        }
         let len = BigEndian::read_u16(&data[offset..offset + 2]) as usize;
         offset += 2;
-        if offset + len > data.len() { return None; }
+        if offset + len > data.len() {
+            return None;
+        }
         result.push(data[offset..offset + len].to_vec());
         offset += len;
         if offset < data.len() {
             offset += 1; // skip EOC byte
         }
     }
-    if result.len() == expected_components { Some(result) } else { None }
+    if result.len() == expected_components {
+        Some(result)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +91,9 @@ mod tests {
     fn wrong_component_count_fails() {
         let c1 = 42i32.to_be_bytes().to_vec();
         let encoded = encode_composite(&[&c1]);
-        assert!(decode_composite(&encoded, 2).is_none() || decode_composite(&encoded, 2).unwrap().len() != 2);
+        assert!(
+            decode_composite(&encoded, 2).is_none()
+                || decode_composite(&encoded, 2).unwrap().len() != 2
+        );
     }
 }

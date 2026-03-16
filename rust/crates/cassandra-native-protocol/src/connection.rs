@@ -28,13 +28,15 @@
 //!     ↘ OPTIONS → SUPPORTED (stays in New)
 //! ```
 
-use std::collections::HashSet;
-use std::io;
 use crate::auth::{AuthResult, Authenticator};
-use crate::frame::{self, flags, Frame, FrameHeader, Opcode, PROTOCOL_V4, PROTOCOL_V5, RESPONSE_FLAG};
+use crate::frame::{
+    self, Frame, FrameHeader, Opcode, PROTOCOL_V4, PROTOCOL_V5, RESPONSE_FLAG, flags,
+};
 use crate::message::*;
 use crate::request;
 use crate::response;
+use std::collections::HashSet;
+use std::io;
 
 #[cfg(any(feature = "compression-lz4", feature = "compression-snappy"))]
 use crate::compress::Compression;
@@ -168,18 +170,14 @@ impl ConnectionContext {
                             stream_id,
                         )))
                     }
-                    Ok(AuthResult::Challenge(challenge)) => {
-                        Ok(Some(response::encode_response(
-                            &Message::AuthChallenge(challenge),
-                            version,
-                            stream_id,
-                        )))
-                    }
+                    Ok(AuthResult::Challenge(challenge)) => Ok(Some(response::encode_response(
+                        &Message::AuthChallenge(challenge),
+                        version,
+                        stream_id,
+                    ))),
                     Err(e) => {
                         Ok(Some(response::error_frame(
-                            version,
-                            stream_id,
-                            0x0100, // BAD_CREDENTIALS
+                            version, stream_id, 0x0100, // BAD_CREDENTIALS
                             &e,
                         )))
                     }
@@ -204,15 +202,9 @@ impl ConnectionContext {
 
             // Wrong state.
             (state, _) => {
-                let err_msg = format!(
-                    "Received {:?} in state {:?}",
-                    frame.header.opcode, state
-                );
+                let err_msg = format!("Received {:?} in state {:?}", frame.header.opcode, state);
                 Ok(Some(response::error_frame(
-                    version,
-                    stream_id,
-                    0x000A,
-                    &err_msg,
+                    version, stream_id, 0x000A, &err_msg,
                 )))
             }
         }
@@ -226,8 +218,8 @@ impl ConnectionContext {
         warnings: &[String],
         custom_payload: Option<&std::collections::HashMap<String, Vec<u8>>>,
     ) -> Frame {
-        use bytes::{BufMut, BytesMut};
         use crate::types;
+        use bytes::{BufMut, BytesMut};
 
         let mut extra_flags: u8 = 0;
         let mut prefix = BytesMut::new();
@@ -304,7 +296,9 @@ mod tests {
     fn lifecycle_options_in_new_state() {
         let mut ctx = ConnectionContext::new();
         let frame = make_frame(Opcode::Options, &[]);
-        let resp = ctx.process_lifecycle(&frame, &AllowAllAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Supported);
         assert_eq!(ctx.state, ConnectionState::New); // Should stay in New.
@@ -315,7 +309,9 @@ mod tests {
         let mut ctx = ConnectionContext::new();
         let body = startup_body();
         let frame = make_frame(Opcode::Startup, &body);
-        let resp = ctx.process_lifecycle(&frame, &AllowAllAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Ready);
         assert_eq!(ctx.state, ConnectionState::Ready);
@@ -326,7 +322,9 @@ mod tests {
         let mut ctx = ConnectionContext::new();
         let body = startup_body();
         let frame = make_frame(Opcode::Startup, &body);
-        let resp = ctx.process_lifecycle(&frame, &PasswordAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &PasswordAuthenticator)
+            .unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Authenticate);
         assert_eq!(ctx.state, ConnectionState::Authenticating);
@@ -335,7 +333,9 @@ mod tests {
         let mut auth_body = BytesMut::new();
         types::write_bytes_opt(&mut auth_body, Some(b"\0cassandra\0cassandra"));
         let auth_frame = make_frame(Opcode::AuthResponse, &auth_body);
-        let resp2 = ctx.process_lifecycle(&auth_frame, &PasswordAuthenticator).unwrap();
+        let resp2 = ctx
+            .process_lifecycle(&auth_frame, &PasswordAuthenticator)
+            .unwrap();
         assert!(resp2.is_some());
         assert_eq!(resp2.unwrap().header.opcode, Opcode::AuthSuccess);
         assert_eq!(ctx.state, ConnectionState::Ready);
@@ -352,7 +352,9 @@ mod tests {
         types::write_byte(&mut body, 0);
         let frame = make_frame(Opcode::Query, &body);
 
-        let resp = ctx.process_lifecycle(&frame, &AllowAllAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
         assert!(resp.is_none()); // Should be None → caller handles.
     }
 
@@ -362,13 +364,18 @@ mod tests {
         ctx.state = ConnectionState::Ready;
 
         let mut body = BytesMut::new();
-        types::write_string_list(&mut body, &[
-            "TOPOLOGY_CHANGE".to_string(),
-            "STATUS_CHANGE".to_string(),
-            "SCHEMA_CHANGE".to_string(),
-        ]);
+        types::write_string_list(
+            &mut body,
+            &[
+                "TOPOLOGY_CHANGE".to_string(),
+                "STATUS_CHANGE".to_string(),
+                "SCHEMA_CHANGE".to_string(),
+            ],
+        );
         let frame = make_frame(Opcode::Register, &body);
-        let resp = ctx.process_lifecycle(&frame, &AllowAllAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
         assert!(resp.is_some());
         assert_eq!(ctx.registered_events.len(), 3);
         assert!(ctx.registered_events.contains("TOPOLOGY_CHANGE"));
@@ -383,7 +390,9 @@ mod tests {
         types::write_consistency(&mut body, crate::types::Consistency::One);
         types::write_byte(&mut body, 0);
         let frame = make_frame(Opcode::Query, &body);
-        let resp = ctx.process_lifecycle(&frame, &AllowAllAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Error);
     }
@@ -401,7 +410,9 @@ mod tests {
             },
             body: Bytes::new(),
         };
-        let resp = ctx.process_lifecycle(&frame, &AllowAllAuthenticator).unwrap();
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Error);
     }

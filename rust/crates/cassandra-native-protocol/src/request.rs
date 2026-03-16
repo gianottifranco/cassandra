@@ -23,10 +23,10 @@
 //! - `org.apache.cassandra.transport.messages.ExecuteMessage`
 //! - `org.apache.cassandra.transport.messages.BatchMessage`
 
-use std::io;
 use crate::frame::{Frame, Opcode};
 use crate::message::*;
 use crate::types;
+use std::io;
 
 /// Decode a request frame's body into a Message.
 pub fn decode_request(frame: &Frame) -> io::Result<Message> {
@@ -98,7 +98,7 @@ fn decode_batch(body: &mut &[u8], version: u8) -> io::Result<Message> {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("unknown batch type: {}", type_byte),
-            ))
+            ));
         }
     };
 
@@ -125,7 +125,11 @@ fn decode_batch(body: &mut &[u8], version: u8) -> io::Result<Message> {
     }
 
     let consistency = types::read_consistency(body)?;
-    let flags = if !body.is_empty() { types::read_byte(body)? } else { 0 };
+    let flags = if !body.is_empty() {
+        types::read_byte(body)?
+    } else {
+        0
+    };
 
     let serial_consistency = if flags & 0x10 != 0 {
         Some(types::read_consistency(body)?)
@@ -230,8 +234,8 @@ pub fn decode_query_params(body: &mut &[u8], version: u8) -> io::Result<QueryPar
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bytes::{Bytes, BytesMut};
     use crate::frame::{FrameHeader, PROTOCOL_V4};
+    use bytes::{Bytes, BytesMut};
 
     fn make_frame(opcode: Opcode, body: &[u8]) -> Frame {
         Frame {
@@ -308,11 +312,14 @@ mod tests {
     #[test]
     fn decode_register_message() {
         let mut buf = BytesMut::new();
-        types::write_string_list(&mut buf, &[
-            "TOPOLOGY_CHANGE".to_string(),
-            "STATUS_CHANGE".to_string(),
-            "SCHEMA_CHANGE".to_string(),
-        ]);
+        types::write_string_list(
+            &mut buf,
+            &[
+                "TOPOLOGY_CHANGE".to_string(),
+                "STATUS_CHANGE".to_string(),
+                "SCHEMA_CHANGE".to_string(),
+            ],
+        );
         let frame = make_frame(Opcode::Register, &buf);
         let msg = decode_request(&frame).unwrap();
         match msg {

@@ -321,25 +321,47 @@ mod tests {
 
     fn all_verbs() -> Vec<Verb> {
         vec![
-            Verb::Mutation, Verb::MutationResponse,
-            Verb::ReadData, Verb::ReadDataResponse,
-            Verb::ReadDigest, Verb::ReadDigestResponse,
-            Verb::GossipDigestSyn, Verb::GossipDigestAck, Verb::GossipDigestAck2,
-            Verb::Hint, Verb::HintResponse,
-            Verb::BatchStore, Verb::BatchStoreResponse, Verb::BatchRemove,
-            Verb::ReadRepair, Verb::ReadRepairResponse,
-            Verb::SchemaPush, Verb::SchemaPull, Verb::SchemaResponse,
-            Verb::Ping, Verb::Pong,
-            Verb::StreamInit, Verb::StreamInitResponse,
-            Verb::StreamData, Verb::StreamDataResponse,
-            Verb::StreamComplete, Verb::StreamCompleteResponse,
-            Verb::RepairRequest, Verb::RepairResponse,
-            Verb::MerkleTreeRequest, Verb::MerkleTreeResponse,
-            Verb::AntiCompactionRequest, Verb::AntiCompactionResponse,
-            Verb::TopologyChange, Verb::TopologyChangeResponse,
-            Verb::BootstrapRequest, Verb::BootstrapResponse,
-            Verb::TcmCommit, Verb::TcmCommitResponse,
-            Verb::TcmFetch, Verb::TcmFetchResponse,
+            Verb::Mutation,
+            Verb::MutationResponse,
+            Verb::ReadData,
+            Verb::ReadDataResponse,
+            Verb::ReadDigest,
+            Verb::ReadDigestResponse,
+            Verb::GossipDigestSyn,
+            Verb::GossipDigestAck,
+            Verb::GossipDigestAck2,
+            Verb::Hint,
+            Verb::HintResponse,
+            Verb::BatchStore,
+            Verb::BatchStoreResponse,
+            Verb::BatchRemove,
+            Verb::ReadRepair,
+            Verb::ReadRepairResponse,
+            Verb::SchemaPush,
+            Verb::SchemaPull,
+            Verb::SchemaResponse,
+            Verb::Ping,
+            Verb::Pong,
+            Verb::StreamInit,
+            Verb::StreamInitResponse,
+            Verb::StreamData,
+            Verb::StreamDataResponse,
+            Verb::StreamComplete,
+            Verb::StreamCompleteResponse,
+            Verb::RepairRequest,
+            Verb::RepairResponse,
+            Verb::MerkleTreeRequest,
+            Verb::MerkleTreeResponse,
+            Verb::AntiCompactionRequest,
+            Verb::AntiCompactionResponse,
+            Verb::TopologyChange,
+            Verb::TopologyChangeResponse,
+            Verb::BootstrapRequest,
+            Verb::BootstrapResponse,
+            Verb::TcmCommit,
+            Verb::TcmCommitResponse,
+            Verb::TcmFetch,
+            Verb::TcmFetchResponse,
             Verb::TcmNotify,
             Verb::RequestFailure,
         ]
@@ -349,7 +371,11 @@ mod tests {
     fn all_verbs_round_trip() {
         for verb in all_verbs() {
             let id = verb.id();
-            assert_eq!(Verb::from_id(id), Some(verb), "Round-trip failed for {verb}");
+            assert_eq!(
+                Verb::from_id(id),
+                Some(verb),
+                "Round-trip failed for {verb}"
+            );
         }
     }
 
@@ -369,14 +395,38 @@ mod tests {
         assert_eq!(Verb::Ping.response_verb(), Some(Verb::Pong));
         assert_eq!(Verb::Pong.response_verb(), None);
         // New streaming/repair/topology pairs
-        assert_eq!(Verb::StreamInit.response_verb(), Some(Verb::StreamInitResponse));
-        assert_eq!(Verb::StreamData.response_verb(), Some(Verb::StreamDataResponse));
-        assert_eq!(Verb::StreamComplete.response_verb(), Some(Verb::StreamCompleteResponse));
-        assert_eq!(Verb::RepairRequest.response_verb(), Some(Verb::RepairResponse));
-        assert_eq!(Verb::MerkleTreeRequest.response_verb(), Some(Verb::MerkleTreeResponse));
-        assert_eq!(Verb::AntiCompactionRequest.response_verb(), Some(Verb::AntiCompactionResponse));
-        assert_eq!(Verb::TopologyChange.response_verb(), Some(Verb::TopologyChangeResponse));
-        assert_eq!(Verb::BootstrapRequest.response_verb(), Some(Verb::BootstrapResponse));
+        assert_eq!(
+            Verb::StreamInit.response_verb(),
+            Some(Verb::StreamInitResponse)
+        );
+        assert_eq!(
+            Verb::StreamData.response_verb(),
+            Some(Verb::StreamDataResponse)
+        );
+        assert_eq!(
+            Verb::StreamComplete.response_verb(),
+            Some(Verb::StreamCompleteResponse)
+        );
+        assert_eq!(
+            Verb::RepairRequest.response_verb(),
+            Some(Verb::RepairResponse)
+        );
+        assert_eq!(
+            Verb::MerkleTreeRequest.response_verb(),
+            Some(Verb::MerkleTreeResponse)
+        );
+        assert_eq!(
+            Verb::AntiCompactionRequest.response_verb(),
+            Some(Verb::AntiCompactionResponse)
+        );
+        assert_eq!(
+            Verb::TopologyChange.response_verb(),
+            Some(Verb::TopologyChangeResponse)
+        );
+        assert_eq!(
+            Verb::BootstrapRequest.response_verb(),
+            Some(Verb::BootstrapResponse)
+        );
     }
 
     #[test]

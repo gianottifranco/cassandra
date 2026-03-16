@@ -11,7 +11,7 @@
 //! - `org.apache.cassandra.index.sai.plan.QueryController`
 //! - `org.apache.cassandra.cql3.statements.SelectStatement`
 
-use crate::read::command::{RowFilter, Expression, Operator};
+use crate::read::command::{Expression, Operator, RowFilter};
 
 /// Represents the execution strategy chosen by the planner.
 #[derive(Debug, Clone, PartialEq)]
@@ -19,16 +19,27 @@ pub enum QueryPlan {
     /// A sequential scan over the partition(s).
     FullScan,
     /// An index-assisted scan using the specified index name.
-    IndexScan { index_name: String, expression: Expression },
+    IndexScan {
+        index_name: String,
+        expression: Expression,
+    },
     /// An Approximate Nearest Neighbor (ANN) search using a Vector Index.
-    AnnSearch { index_name: String, expression: Expression },
+    AnnSearch {
+        index_name: String,
+        expression: Expression,
+    },
 }
 
 /// A stub schema catalog interface for the planner to query index availability.
 pub trait SchemaCatalogStub {
-    /// Returns the name of the index and its type (e.g. "sai_vector" or "legacy") 
+    /// Returns the name of the index and its type (e.g. "sai_vector" or "legacy")
     /// if an index exists for the given column.
-    fn get_index_for_column(&self, keyspace: &str, table: &str, column: &str) -> Option<(String, String)>;
+    fn get_index_for_column(
+        &self,
+        keyspace: &str,
+        table: &str,
+        column: &str,
+    ) -> Option<(String, String)>;
 }
 
 pub struct QueryPlanner<'a> {
@@ -41,12 +52,7 @@ impl<'a> QueryPlanner<'a> {
     }
 
     /// Generates a query plan for the given keyspace, table, and row filter.
-    pub fn plan_read(
-        &self,
-        keyspace: &str,
-        table: &str,
-        filter: &RowFilter,
-    ) -> QueryPlan {
+    pub fn plan_read(&self, keyspace: &str, table: &str, filter: &RowFilter) -> QueryPlan {
         if filter.is_empty() {
             return QueryPlan::FullScan;
         }
@@ -54,7 +60,10 @@ impl<'a> QueryPlanner<'a> {
         // 1. Look for an ANN (Vector Search) query first, as it dictates ordering.
         for expr in &filter.expressions {
             if expr.operator == Operator::Ann {
-                if let Some((idx_name, _)) = self.catalog.get_index_for_column(keyspace, table, &expr.column) {
+                if let Some((idx_name, _)) =
+                    self.catalog
+                        .get_index_for_column(keyspace, table, &expr.column)
+                {
                     return QueryPlan::AnnSearch {
                         index_name: idx_name,
                         expression: expr.clone(),
@@ -66,7 +75,10 @@ impl<'a> QueryPlanner<'a> {
         // 2. Look for strict equality or bounding exact matches.
         // In a real planner, we'd rank indexes by selectivity or index type (SAI > SASI > Legacy).
         for expr in &filter.expressions {
-            if let Some((idx_name, _)) = self.catalog.get_index_for_column(keyspace, table, &expr.column) {
+            if let Some((idx_name, _)) =
+                self.catalog
+                    .get_index_for_column(keyspace, table, &expr.column)
+            {
                 return QueryPlan::IndexScan {
                     index_name: idx_name,
                     expression: expr.clone(),

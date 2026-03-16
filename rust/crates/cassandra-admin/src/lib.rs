@@ -19,14 +19,14 @@
 //! - [`virtual_tables`] — virtual tables framework and built-in system views
 //! - [`http_admin`] — HTTP admin API server
 
+pub mod http_admin;
 pub mod metrics;
 pub mod operations;
 pub mod prometheus_metrics;
 pub mod virtual_tables;
-pub mod http_admin;
 
+pub use http_admin::{AdminState, start_admin_server};
 pub use metrics::AdminMetrics;
-pub use operations::{OperationTracker, OperationStatus, OperationType};
+pub use operations::{OperationStatus, OperationTracker, OperationType};
 pub use prometheus_metrics::MetricsRegistry;
 pub use virtual_tables::{VirtualTable, VirtualTableRegistry};
-pub use http_admin::{AdminState, start_admin_server};

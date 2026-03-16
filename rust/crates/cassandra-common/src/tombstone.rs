@@ -26,7 +26,7 @@ use std::fmt;
 
 use byteorder::{BigEndian, ByteOrder};
 
-use crate::timestamp::{Timestamp, NO_TIMESTAMP};
+use crate::timestamp::{NO_TIMESTAMP, Timestamp};
 use crate::ttl::{LocalDeletionTime, NO_DELETION_TIME};
 
 /// A point-in-time deletion marker.
@@ -70,8 +70,7 @@ impl DeletionTime {
     /// Returns `true` if this represents a live (non-tombstoned) state.
     #[inline]
     pub const fn is_live(&self) -> bool {
-        self.marked_for_delete_at == NO_TIMESTAMP
-            && self.local_deletion_time == NO_DELETION_TIME
+        self.marked_for_delete_at == NO_TIMESTAMP && self.local_deletion_time == NO_DELETION_TIME
     }
 
     /// Returns the timestamp as a `Timestamp` value.

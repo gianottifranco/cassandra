@@ -70,7 +70,11 @@ impl Row {
 
         // Merge cells by column name
         for other_cell in &other.cells {
-            if let Some(existing) = self.cells.iter_mut().find(|c| c.column == other_cell.column) {
+            if let Some(existing) = self
+                .cells
+                .iter_mut()
+                .find(|c| c.column == other_cell.column)
+            {
                 *existing = existing.merge_with(other_cell);
             } else {
                 self.cells.push(other_cell.clone());

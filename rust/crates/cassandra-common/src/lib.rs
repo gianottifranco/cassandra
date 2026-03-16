@@ -27,21 +27,21 @@
 //! - `org.apache.cassandra.serializers`
 
 pub mod error;
-pub mod version;
-pub mod timestamp;
-pub mod ttl;
-pub mod tombstone;
 pub mod murmur3;
-pub mod token;
 pub mod partitioner;
+pub mod timestamp;
+pub mod token;
+pub mod tombstone;
+pub mod ttl;
+pub mod version;
 
 /// Re-export commonly used types.
 pub use error::{CassandraError, CassandraResult};
+pub use partitioner::{Murmur3Partitioner, Partitioner, create_partitioner};
 pub use timestamp::Timestamp;
-pub use ttl::{Ttl, LocalDeletionTime};
-pub use tombstone::{DeletionTime, RangeTombstone};
 pub use token::Token;
-pub use partitioner::{Partitioner, Murmur3Partitioner, create_partitioner};
+pub use tombstone::{DeletionTime, RangeTombstone};
+pub use ttl::{LocalDeletionTime, Ttl};
 
 /// Crate version, matching the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

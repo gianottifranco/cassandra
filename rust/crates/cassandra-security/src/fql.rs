@@ -76,7 +76,9 @@ impl FqlRecord {
     /// Deserialize a record from binary data.
     pub fn decode(data: &[u8]) -> Result<(Self, usize), FqlError> {
         if data.len() < 4 {
-            return Err(FqlError::CorruptedRecord("too short for length prefix".into()));
+            return Err(FqlError::CorruptedRecord(
+                "too short for length prefix".into(),
+            ));
         }
 
         let record_len = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
@@ -95,47 +97,53 @@ impl FqlRecord {
 
         // Timestamp
         let timestamp = i64::from_be_bytes([
-            data[pos], data[pos+1], data[pos+2], data[pos+3],
-            data[pos+4], data[pos+5], data[pos+6], data[pos+7],
+            data[pos],
+            data[pos + 1],
+            data[pos + 2],
+            data[pos + 3],
+            data[pos + 4],
+            data[pos + 5],
+            data[pos + 6],
+            data[pos + 7],
         ]);
         pos += 8;
 
         // Consistency level
-        let consistency = u16::from_be_bytes([data[pos], data[pos+1]]);
+        let consistency = u16::from_be_bytes([data[pos], data[pos + 1]]);
         pos += 2;
 
         // Query
-        let query_len = u32::from_be_bytes([
-            data[pos], data[pos+1], data[pos+2], data[pos+3],
-        ]) as usize;
+        let query_len =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
         if pos + query_len > 4 + record_len {
             return Err(FqlError::CorruptedRecord("query length overflow".into()));
         }
-        let query = String::from_utf8(data[pos..pos+query_len].to_vec())
+        let query = String::from_utf8(data[pos..pos + query_len].to_vec())
             .map_err(|_| FqlError::CorruptedRecord("invalid UTF-8 in query".into()))?;
         pos += query_len;
 
         // Bind values count
-        let bind_count = u32::from_be_bytes([
-            data[pos], data[pos+1], data[pos+2], data[pos+3],
-        ]) as usize;
+        let bind_count =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as usize;
         pos += 4;
 
         // Bind values
         let mut bind_values = Vec::with_capacity(bind_count);
         for _ in 0..bind_count {
             if pos + 4 > 4 + record_len {
-                return Err(FqlError::CorruptedRecord("bind value length overflow".into()));
+                return Err(FqlError::CorruptedRecord(
+                    "bind value length overflow".into(),
+                ));
             }
-            let val_len = u32::from_be_bytes([
-                data[pos], data[pos+1], data[pos+2], data[pos+3],
-            ]) as usize;
+            let val_len =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
             pos += 4;
             if pos + val_len > 4 + record_len {
                 return Err(FqlError::CorruptedRecord("bind value data overflow".into()));
             }
-            bind_values.push(data[pos..pos+val_len].to_vec());
+            bind_values.push(data[pos..pos + val_len].to_vec());
             pos += val_len;
         }
 
@@ -173,11 +181,7 @@ pub struct FqlLogger {
 }
 
 impl FqlLogger {
-    pub fn new(
-        log_dir: PathBuf,
-        max_file_size_mb: u64,
-        enabled: bool,
-    ) -> Result<Self, FqlError> {
+    pub fn new(log_dir: PathBuf, max_file_size_mb: u64, enabled: bool) -> Result<Self, FqlError> {
         if enabled {
             fs::create_dir_all(&log_dir)?;
         }
@@ -208,10 +212,7 @@ impl FqlLogger {
         }
 
         let data = record.encode();
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         file.write_all(&data)?;
         Ok(())
     }
@@ -323,11 +324,7 @@ mod tests {
             timestamp_micros: 999,
             consistency_level: 7,
             query: "INSERT INTO t (a,b,c) VALUES (?,?,?)".into(),
-            bind_values: vec![
-                b"val1".to_vec(),
-                b"val2".to_vec(),
-                vec![0x00, 0x01, 0x02],
-            ],
+            bind_values: vec![b"val1".to_vec(), b"val2".to_vec(), vec![0x00, 0x01, 0x02]],
         };
         let encoded = record.encode();
         let (decoded, _) = FqlRecord::decode(&encoded).unwrap();

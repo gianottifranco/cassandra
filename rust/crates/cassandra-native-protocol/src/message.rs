@@ -20,8 +20,8 @@
 //! - `org.apache.cassandra.transport.Message`
 //! - `org.apache.cassandra.transport.messages.*`
 
-use std::collections::HashMap;
 use crate::types::Consistency;
+use std::collections::HashMap;
 
 /// Parsed request/response message.
 #[derive(Debug, Clone)]
@@ -336,7 +336,13 @@ impl ColumnType {
             CqlType::Tuple(types) => {
                 ColumnType::Tuple(types.iter().map(Self::from_cql_type).collect())
             }
-            CqlType::Udt { keyspace, name, field_names, field_types, .. } => ColumnType::Udt {
+            CqlType::Udt {
+                keyspace,
+                name,
+                field_names,
+                field_types,
+                ..
+            } => ColumnType::Udt {
                 ks: keyspace.clone(),
                 name: name.clone(),
                 fields: field_names
@@ -346,10 +352,9 @@ impl ColumnType {
                     .collect(),
             },
             CqlType::Reversed(inner) => Self::from_cql_type(inner),
-            CqlType::Vector(inner, dims) => ColumnType::Vector(
-                Box::new(Self::from_cql_type(inner)),
-                *dims,
-            ),
+            CqlType::Vector(inner, dims) => {
+                ColumnType::Vector(Box::new(Self::from_cql_type(inner)), *dims)
+            }
         }
     }
 }
@@ -374,8 +379,14 @@ pub struct SchemaChange {
 /// Event message types.
 #[derive(Debug, Clone)]
 pub enum EventMessage {
-    TopologyChange { change: String, addr: (std::net::IpAddr, u32) },
-    StatusChange { change: String, addr: (std::net::IpAddr, u32) },
+    TopologyChange {
+        change: String,
+        addr: (std::net::IpAddr, u32),
+    },
+    StatusChange {
+        change: String,
+        addr: (std::net::IpAddr, u32),
+    },
     SchemaChange(SchemaChange),
 }
 

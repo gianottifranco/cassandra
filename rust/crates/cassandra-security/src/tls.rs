@@ -135,9 +135,9 @@ pub fn build_root_store(ca_path: &Path) -> Result<RootCertStore, SecurityError> 
     let certs = load_certs(ca_path)?;
     let mut store = RootCertStore::empty();
     for cert in certs {
-        store.add(cert).map_err(|e| {
-            SecurityError::TlsError(format!("invalid CA certificate: {}", e))
-        })?;
+        store
+            .add(cert)
+            .map_err(|e| SecurityError::TlsError(format!("invalid CA certificate: {}", e)))?;
     }
     Ok(store)
 }
@@ -167,8 +167,7 @@ pub fn build_server_config(config: &TlsConfig) -> Result<ServerConfig, SecurityE
         let verifier = rustls::server::WebPkiClientVerifier::builder(Arc::new(root_store))
             .build()
             .map_err(|e| SecurityError::TlsError(format!("client verifier error: {}", e)))?;
-        ServerConfig::builder()
-            .with_client_cert_verifier(verifier)
+        ServerConfig::builder().with_client_cert_verifier(verifier)
     } else {
         ServerConfig::builder().with_no_client_auth()
     };
@@ -236,10 +235,7 @@ impl ReloadableTlsAcceptor {
     }
 
     /// Spawn a background task that reloads certs periodically.
-    pub fn spawn_reload_task(
-        self: &Arc<Self>,
-        config: TlsConfig,
-    ) -> tokio::task::JoinHandle<()> {
+    pub fn spawn_reload_task(self: &Arc<Self>, config: TlsConfig) -> tokio::task::JoinHandle<()> {
         let acceptor = Arc::clone(self);
         let interval = Duration::from_secs(config.reload_interval_secs.max(10));
         tokio::spawn(async move {
@@ -265,7 +261,9 @@ mod tests {
 
     fn generate_self_signed() -> (String, String) {
         let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        let cert = cert_params.self_signed(&rcgen::KeyPair::generate().unwrap()).unwrap();
+        let cert = cert_params
+            .self_signed(&rcgen::KeyPair::generate().unwrap())
+            .unwrap();
         let key_pair = rcgen::KeyPair::generate().unwrap();
         let cert_params2 = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
         let cert2 = cert_params2.self_signed(&key_pair).unwrap();

@@ -6,9 +6,9 @@
 //! - `org.apache.cassandra.db.ClusteringPrefix`
 //! - `org.apache.cassandra.db.ClusteringBound`
 
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
-use serde::{Deserialize, Serialize};
 
 /// The kind of clustering bound (for range queries and tombstones).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -74,7 +74,9 @@ impl fmt::Display for ClusteringKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "CK[")?;
         for (i, v) in self.values.iter().enumerate() {
-            if i > 0 { write!(f, ":")?; }
+            if i > 0 {
+                write!(f, ":")?;
+            }
             write!(f, "{} bytes", v.len())?;
         }
         write!(f, "]")
@@ -90,16 +92,28 @@ pub struct ClusteringBound {
 
 impl ClusteringBound {
     pub fn inclusive_start(key: ClusteringKey) -> Self {
-        Self { kind: ClusteringBoundKind::InclusiveStart, key }
+        Self {
+            kind: ClusteringBoundKind::InclusiveStart,
+            key,
+        }
     }
     pub fn exclusive_start(key: ClusteringKey) -> Self {
-        Self { kind: ClusteringBoundKind::ExclusiveStart, key }
+        Self {
+            kind: ClusteringBoundKind::ExclusiveStart,
+            key,
+        }
     }
     pub fn inclusive_end(key: ClusteringKey) -> Self {
-        Self { kind: ClusteringBoundKind::InclusiveEnd, key }
+        Self {
+            kind: ClusteringBoundKind::InclusiveEnd,
+            key,
+        }
     }
     pub fn exclusive_end(key: ClusteringKey) -> Self {
-        Self { kind: ClusteringBoundKind::ExclusiveEnd, key }
+        Self {
+            kind: ClusteringBoundKind::ExclusiveEnd,
+            key,
+        }
     }
 }
 
@@ -111,7 +125,11 @@ pub fn compare_clustering_keys(
     right: &ClusteringKey,
     comparators: &[fn(&[u8], &[u8]) -> Ordering],
 ) -> Ordering {
-    let len = left.values.len().min(right.values.len()).min(comparators.len());
+    let len = left
+        .values
+        .len()
+        .min(right.values.len())
+        .min(comparators.len());
     for i in 0..len {
         match comparators[i](&left.values[i], &right.values[i]) {
             Ordering::Equal => continue,
@@ -156,6 +174,9 @@ mod tests {
         let short = ClusteringKey::new(vec![vec![0, 1]]);
         let long = ClusteringKey::new(vec![vec![0, 1], vec![0, 2]]);
         let comps: Vec<fn(&[u8], &[u8]) -> Ordering> = vec![|a, b| a.cmp(b), |a, b| a.cmp(b)];
-        assert_eq!(compare_clustering_keys(&short, &long, &comps), Ordering::Less);
+        assert_eq!(
+            compare_clustering_keys(&short, &long, &comps),
+            Ordering::Less
+        );
     }
 }

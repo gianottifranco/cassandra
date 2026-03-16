@@ -151,15 +151,13 @@ impl CqlTypeName {
         use cassandra_types::CqlType;
         match self {
             CqlTypeName::Simple(name) => CqlType::from_cql_name(name),
-            CqlTypeName::List(inner) => {
-                Some(CqlType::List(Box::new(inner.resolve()?), false))
-            }
-            CqlTypeName::Set(inner) => {
-                Some(CqlType::Set(Box::new(inner.resolve()?), false))
-            }
-            CqlTypeName::Map(k, v) => {
-                Some(CqlType::Map(Box::new(k.resolve()?), Box::new(v.resolve()?), false))
-            }
+            CqlTypeName::List(inner) => Some(CqlType::List(Box::new(inner.resolve()?), false)),
+            CqlTypeName::Set(inner) => Some(CqlType::Set(Box::new(inner.resolve()?), false)),
+            CqlTypeName::Map(k, v) => Some(CqlType::Map(
+                Box::new(k.resolve()?),
+                Box::new(v.resolve()?),
+                false,
+            )),
             CqlTypeName::Tuple(types) => {
                 let resolved: Option<Vec<_>> = types.iter().map(|t| t.resolve()).collect();
                 Some(CqlType::Tuple(resolved?))
@@ -233,7 +231,10 @@ pub enum SelectColumns {
 pub enum Selector {
     Column(String),
     Function(String, Vec<Selector>),
-    Alias { selector: Box<Selector>, alias: String },
+    Alias {
+        selector: Box<Selector>,
+        alias: String,
+    },
     Count,
     WritetimeOrTtl(String, String),
 }
@@ -516,12 +517,19 @@ pub struct DropRole {
 pub enum Resource {
     AllKeyspaces,
     Keyspace(String),
-    Table { keyspace: Option<String>, table: String },
+    Table {
+        keyspace: Option<String>,
+        table: String,
+    },
     AllRoles,
     Role(String),
     AllFunctions,
     FunctionInKeyspace(String),
-    Function { keyspace: Option<String>, name: String, arg_types: Vec<CqlTypeName> },
+    Function {
+        keyspace: Option<String>,
+        name: String,
+        arg_types: Vec<CqlTypeName>,
+    },
     AllMBeans,
     MBean(String),
     MBeanPattern(String),
@@ -578,7 +586,10 @@ mod tests {
             Box::new(CqlTypeName::Simple("int".into())),
         )));
         let resolved = t.resolve().unwrap();
-        assert!(matches!(resolved, cassandra_types::CqlType::Map(_, _, true)));
+        assert!(matches!(
+            resolved,
+            cassandra_types::CqlType::Map(_, _, true)
+        ));
     }
 
     #[test]

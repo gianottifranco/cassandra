@@ -24,7 +24,9 @@
 
 use cassandra_storage::memtable::partition::PartitionData;
 
-use super::response::{DataResponse, Digest, PartitionResult, TombstoneThresholds, TombstoneTracker};
+use super::response::{
+    DataResponse, Digest, PartitionResult, TombstoneThresholds, TombstoneTracker,
+};
 
 // ─── Digest Resolver ────────────────────────────────────────────
 
@@ -71,8 +73,8 @@ impl DigestResolver {
 
     /// Check whether enough responses have been received.
     pub fn has_enough_responses(&self) -> bool {
-        let total = (if self.data_response.is_some() { 1 } else { 0 })
-            + self.digest_responses.len();
+        let total =
+            (if self.data_response.is_some() { 1 } else { 0 }) + self.digest_responses.len();
         total >= self.required
     }
 
@@ -191,7 +193,9 @@ impl DataResolver {
             // Gather all PartitionData for this partition key from all responses
             let mut partition_versions: Vec<Option<&PartitionData>> = Vec::new();
             for resp in &self.responses {
-                let pd = resp.partitions.iter()
+                let pd = resp
+                    .partitions
+                    .iter()
                     .find(|p| p.partition_key == *pk)
                     .and_then(|p| p.data.as_ref());
                 partition_versions.push(pd);
@@ -203,7 +207,8 @@ impl DataResolver {
             // Compute repair mutations: for each replica that doesn't have
             // the merged version, generate a repair.
             for (replica_idx, version) in partition_versions.iter().enumerate() {
-                let version_digest = version.map(Digest::from_partition)
+                let version_digest = version
+                    .map(Digest::from_partition)
                     .unwrap_or_else(Digest::empty);
                 let merged_digest = Digest::from_partition(&merged);
                 if version_digest != merged_digest {
@@ -215,9 +220,8 @@ impl DataResolver {
                 }
             }
 
-            let result = PartitionResult::from_partition_data(
-                pk.clone(), merged, now_seconds, &mut tracker,
-            );
+            let result =
+                PartitionResult::from_partition_data(pk.clone(), merged, now_seconds, &mut tracker);
             if result.live_row_count > 0 || result.data.is_some() {
                 merged_partitions.push(result);
             }
@@ -271,7 +275,9 @@ fn merge_partition_data(versions: &[Option<&PartitionData>]) -> PartitionData {
     for version in versions {
         if let Some(pd) = version {
             // Merge partition tombstone
-            if let (Some(ts), Some(ldt)) = (pd.tombstone_timestamp, pd.tombstone_local_deletion_time) {
+            if let (Some(ts), Some(ldt)) =
+                (pd.tombstone_timestamp, pd.tombstone_local_deletion_time)
+            {
                 merged.set_tombstone(ts, ldt);
             }
 
@@ -375,8 +381,14 @@ mod tests {
         let resolved = resolver.resolve(300);
         assert_eq!(resolved.data.row_count(), 1);
 
-        let row = resolved.data.partitions[0].data.as_ref().unwrap()
-            .rows.values().next().unwrap();
+        let row = resolved.data.partitions[0]
+            .data
+            .as_ref()
+            .unwrap()
+            .rows
+            .values()
+            .next()
+            .unwrap();
         let cell = row.cells.iter().find(|c| c.column == "c").unwrap();
         assert_eq!(cell.value.as_deref(), Some(b"new".as_slice()));
         assert_eq!(cell.timestamp, 200);
@@ -394,7 +406,10 @@ mod tests {
         let resolved = resolver.resolve(300);
         // Replica 0 has stale data, so it needs repair
         assert!(!resolved.repair_mutations.is_empty());
-        let repair = resolved.repair_mutations.iter().find(|r| r.replica_index == 0);
+        let repair = resolved
+            .repair_mutations
+            .iter()
+            .find(|r| r.replica_index == 0);
         assert!(repair.is_some());
     }
 
@@ -435,7 +450,10 @@ mod tests {
         let resolved = resolver.resolve(200);
         // The tombstone should win on equal timestamp — no live cells.
         // Either the partition has no live rows, or it's omitted entirely.
-        let total_live: usize = resolved.data.partitions.iter()
+        let total_live: usize = resolved
+            .data
+            .partitions
+            .iter()
             .map(|p| p.live_row_count)
             .sum();
         assert_eq!(total_live, 0);

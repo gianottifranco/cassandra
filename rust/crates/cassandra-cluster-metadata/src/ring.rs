@@ -255,7 +255,11 @@ impl TokenRing {
             return eps.clone();
         }
         // Wrap around
-        self.pending_ranges.values().next().cloned().unwrap_or_default()
+        self.pending_ranges
+            .values()
+            .next()
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Whether there are any pending ranges.
@@ -322,15 +326,9 @@ mod tests {
 
         assert_eq!(ring.token_count(), 1);
         assert_eq!(ring.endpoint_count(), 1);
-        assert_eq!(
-            ring.primary_endpoint(Token::from_raw(0)),
-            Some(ep(7001))
-        );
+        assert_eq!(ring.primary_endpoint(Token::from_raw(0)), Some(ep(7001)));
         // Any token should resolve to the single node
-        assert_eq!(
-            ring.primary_endpoint(Token::from_raw(100)),
-            Some(ep(7001))
-        );
+        assert_eq!(ring.primary_endpoint(Token::from_raw(100)), Some(ep(7001)));
     }
 
     #[test]
@@ -341,22 +339,13 @@ mod tests {
         ring.add_token(Token::from_raw(100), ep(7003));
 
         // Token -50 → first endpoint >= -50 → ep(7002) at token 0
-        assert_eq!(
-            ring.primary_endpoint(Token::from_raw(-50)),
-            Some(ep(7002))
-        );
+        assert_eq!(ring.primary_endpoint(Token::from_raw(-50)), Some(ep(7002)));
 
         // Token 50 → first endpoint >= 50 → ep(7003) at token 100
-        assert_eq!(
-            ring.primary_endpoint(Token::from_raw(50)),
-            Some(ep(7003))
-        );
+        assert_eq!(ring.primary_endpoint(Token::from_raw(50)), Some(ep(7003)));
 
         // Token 200 → wraps around → ep(7001) at token -100
-        assert_eq!(
-            ring.primary_endpoint(Token::from_raw(200)),
-            Some(ep(7001))
-        );
+        assert_eq!(ring.primary_endpoint(Token::from_raw(200)), Some(ep(7001)));
     }
 
     #[test]
@@ -407,10 +396,7 @@ mod tests {
         ring.remove_node(&ep(7001));
         assert_eq!(ring.token_count(), 1);
         assert_eq!(ring.endpoint_count(), 1);
-        assert_eq!(
-            ring.primary_endpoint(Token::from_raw(0)),
-            Some(ep(7002))
-        );
+        assert_eq!(ring.primary_endpoint(Token::from_raw(0)), Some(ep(7002)));
     }
 
     #[test]
@@ -419,7 +405,11 @@ mod tests {
         let mut ring = TokenRing::new();
         ring.add_node(
             ep(7001),
-            &[Token::from_raw(-100), Token::from_raw(0), Token::from_raw(100)],
+            &[
+                Token::from_raw(-100),
+                Token::from_raw(0),
+                Token::from_raw(100),
+            ],
         );
         ring.add_node(ep(7002), &[Token::from_raw(50)]);
 
@@ -483,7 +473,12 @@ mod tests {
         // Only ep(7005) pending at token 100 should remain
         let pending = ring.all_pending_ranges();
         assert_eq!(pending.len(), 1);
-        assert!(pending.get(&Token::from_raw(100)).unwrap().contains(&ep(7005)));
+        assert!(
+            pending
+                .get(&Token::from_raw(100))
+                .unwrap()
+                .contains(&ep(7005))
+        );
     }
 
     #[test]

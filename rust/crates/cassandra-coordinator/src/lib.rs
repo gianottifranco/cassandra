@@ -36,46 +36,40 @@
 //! - [`batch`] — batch coordinator with batchlog protocol
 //! - [`tracing`] — per-request tracing sessions
 
+pub mod batch;
+pub mod consensus;
 pub mod consistency;
+pub mod counter;
+pub mod hint_segment;
+pub mod hints;
+pub mod paxos;
+pub mod read;
+pub mod tracing;
 pub mod write;
 pub mod write_response_handler;
-pub mod read;
-pub mod hints;
-pub mod hint_segment;
-pub mod batch;
-pub mod tracing;
-pub mod paxos;
-pub mod counter;
-pub mod consensus;
 
-pub use consistency::ConsistencyLevel;
-pub use write::{
-    WriteCoordinator, WriteError, WriteResult, WriteType, WritePlan,
-    CoordinatedMutation, MutationKind, MutationRow, CellMutation,
-    CollectionOp, TombstoneMarker, RangeTombstone, WriteMetrics,
-    DatacenterWritePlan, DcReplicaPlan, ViewFanoutResult, WriteGuardrails,
-    ViewFanoutMetrics,
-};
-pub use write_response_handler::{WriteResponseHandler, RequestFailureReason};
-pub use read::{
-    ReadCoordinator, ReadError, ReadResult, CoordinatedRead,
-    ReadMetrics, ReadCommand, SinglePartitionReadCommand, PartitionRangeReadCommand,
-    ReadLimits, ColumnFilter, ClusteringSlice, DataRange,
-    PagingState, PageSizeControl,
-    SpeculativeRetryPolicy, ReadExecutionPlan, ReadExecutorType,
-    DataResolver, DigestResolver, DigestMismatch, ResolvedData,
-    DataResponse, Digest, ReadResponse, PartitionResult,
-    TombstoneThresholds, TombstoneTracker,
-    ShortReadProtection, ShortReadRetry,
-    ReadRepairHandler, ReadRepairMutation, ReadRepairStrategy,
-};
-pub use hints::{HintStore, HintedHandoffManager, HintConfig, HintMetrics, Hint};
-pub use hint_segment::{HintSegmentWriter, HintSegmentReader, HintSegmentManager};
-pub use batch::{
-    BatchLogManager, BatchCoordinator, BatchType, BatchEntry,
-    BatchGuardrails, BatchLogMetrics,
-};
 pub use self::tracing::TraceSession;
-pub use paxos::{Ballot, PaxosState, PaxosCoordinator, PaxosReplica, CasResult, PaxosConfig};
-pub use counter::{CounterCoordinator, CounterReplica};
+pub use batch::{
+    BatchCoordinator, BatchEntry, BatchGuardrails, BatchLogManager, BatchLogMetrics, BatchType,
+};
 pub use consensus::ConsensusRouter;
+pub use consistency::ConsistencyLevel;
+pub use counter::{CounterCoordinator, CounterReplica};
+pub use hint_segment::{HintSegmentManager, HintSegmentReader, HintSegmentWriter};
+pub use hints::{Hint, HintConfig, HintMetrics, HintStore, HintedHandoffManager};
+pub use paxos::{Ballot, CasResult, PaxosConfig, PaxosCoordinator, PaxosReplica, PaxosState};
+pub use read::{
+    ClusteringSlice, ColumnFilter, CoordinatedRead, DataRange, DataResolver, DataResponse, Digest,
+    DigestMismatch, DigestResolver, PageSizeControl, PagingState, PartitionRangeReadCommand,
+    PartitionResult, ReadCommand, ReadCoordinator, ReadError, ReadExecutionPlan, ReadExecutorType,
+    ReadLimits, ReadMetrics, ReadRepairHandler, ReadRepairMutation, ReadRepairStrategy,
+    ReadResponse, ReadResult, ResolvedData, ShortReadProtection, ShortReadRetry,
+    SinglePartitionReadCommand, SpeculativeRetryPolicy, TombstoneThresholds, TombstoneTracker,
+};
+pub use write::{
+    CellMutation, CollectionOp, CoordinatedMutation, DatacenterWritePlan, DcReplicaPlan,
+    MutationKind, MutationRow, RangeTombstone, TombstoneMarker, ViewFanoutMetrics,
+    ViewFanoutResult, WriteCoordinator, WriteError, WriteGuardrails, WriteMetrics, WritePlan,
+    WriteResult, WriteType,
+};
+pub use write_response_handler::{RequestFailureReason, WriteResponseHandler};

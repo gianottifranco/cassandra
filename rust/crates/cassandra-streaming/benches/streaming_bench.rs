@@ -2,7 +2,7 @@
 
 //! Streaming benchmarks: chunkify, checksum, rate limiter.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use uuid::Uuid;
 
 use cassandra_streaming::transfer::{

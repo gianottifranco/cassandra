@@ -43,10 +43,14 @@ fn test_nodetool_status_wrapper() {
         .expect("Failed to execute nodetool wrapper");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // As long as the tool executed (even if it cannot connect to a live node because we don't start one in the test)
     // we verify the header is present, indicating wrapper success.
-    assert!(stdout.contains("Datacenter: datacenter1"), "Wrapper failed to execute `status` correctly: {}", stdout);
+    assert!(
+        stdout.contains("Datacenter: datacenter1"),
+        "Wrapper failed to execute `status` correctly: {}",
+        stdout
+    );
 }
 
 #[test]
@@ -63,16 +67,20 @@ fn test_cassandra_tools_binary() {
         .expect("Failed to execute cassandra-tools");
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    
+
     // Check if the 'cassandra-tools info' mock static output is present
-    assert!(stdout.contains("Gossip active"), "cassandra-tools info output missing details: {}", stdout);
+    assert!(
+        stdout.contains("Gossip active"),
+        "cassandra-tools info output missing details: {}",
+        stdout
+    );
 }
 
 #[test]
 fn test_sstabledump_wrapper_execution() {
     let mut sstabledump = get_cassandra_home();
     sstabledump.push("tools/bin/sstabledump");
-    
+
     if !sstabledump.exists() {
         println!("Skipping sstabledump test: wrapper not found");
         return;
@@ -83,17 +91,20 @@ fn test_sstabledump_wrapper_execution() {
         .arg("nonexistent-file-Data.db")
         .output()
         .expect("Failed to execute sstabledump wrapper");
-        
+
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid SSTable filename format") || stderr.contains("not found"), 
-            "sstabledump stderr mismatch: {}", stderr);
+    assert!(
+        stderr.contains("invalid SSTable filename format") || stderr.contains("not found"),
+        "sstabledump stderr mismatch: {}",
+        stderr
+    );
 }
 
 #[test]
 fn test_sstablemetadata_wrapper_execution() {
     let mut sstablemetadata = get_cassandra_home();
     sstablemetadata.push("tools/bin/sstablemetadata");
-    
+
     if !sstablemetadata.exists() {
         println!("Skipping sstablemetadata test: wrapper not found");
         return;
@@ -103,8 +114,11 @@ fn test_sstablemetadata_wrapper_execution() {
         .arg("nonexistent-file-Data.db")
         .output()
         .expect("Failed to execute sstablemetadata wrapper");
-        
+
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("invalid SSTable filename format") || stderr.contains("not found"), 
-            "sstablemetadata stderr mismatch: {}", stderr);
+    assert!(
+        stderr.contains("invalid SSTable filename format") || stderr.contains("not found"),
+        "sstablemetadata stderr mismatch: {}",
+        stderr
+    );
 }

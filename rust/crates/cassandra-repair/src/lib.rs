@@ -17,12 +17,12 @@
 //! - [`session`] — per-range repair session between coordinator and replicas
 //! - [`metrics`] — atomic counters for repair progress
 
-pub mod merkle;
 pub mod coordinator;
-pub mod session;
-pub mod metrics;
 pub mod history;
+pub mod merkle;
+pub mod metrics;
+pub mod session;
 
+pub use coordinator::{RepairCoordinator, RepairError, RepairType};
+pub use history::{LoggingRepairHistoryTracker, RepairHistoryTracker};
 pub use merkle::MerkleTree;
-pub use coordinator::{RepairCoordinator, RepairType, RepairError};
-pub use history::{RepairHistoryTracker, LoggingRepairHistoryTracker};

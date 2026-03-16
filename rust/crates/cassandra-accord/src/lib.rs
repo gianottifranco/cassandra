@@ -14,4 +14,4 @@
 
 pub mod service;
 
-pub use service::{AccordService, AccordConfig, AccordTxnId};
+pub use service::{AccordConfig, AccordService, AccordTxnId};

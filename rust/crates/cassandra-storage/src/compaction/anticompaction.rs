@@ -5,9 +5,9 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.db.compaction.CompactionManager#performAnticompaction`
 
-use cassandra_common::Token;
-use crate::memtable::partition::PartitionData;
 use crate::compaction::anticompact_partitions;
+use crate::memtable::partition::PartitionData;
+use cassandra_common::Token;
 
 /// Anti-compacts a set of partitions: separates partitions into "repaired" and "unrepaired"
 /// depending on whether they fall within the given token range.
@@ -46,7 +46,10 @@ mod tests {
         partitions.push((pk_1, p_in));
 
         // Let's split using a range that includes t_1
-        let range = (Token::from_raw(t_1.value() - 100), Token::from_raw(t_1.value() + 100));
+        let range = (
+            Token::from_raw(t_1.value() - 100),
+            Token::from_raw(t_1.value() + 100),
+        );
 
         let (inside, outside) = anticompact_range(partitions, range);
 

@@ -32,7 +32,7 @@ pub mod format;
 pub mod reader;
 pub mod writer;
 
+pub use bti::{BtiReader, BtiWriter};
 pub use format::{SSTableDescriptor, SSTableFormat, SSTableId};
 pub use reader::SSTableReader;
 pub use writer::SSTableWriter;
-pub use bti::{BtiReader, BtiWriter};

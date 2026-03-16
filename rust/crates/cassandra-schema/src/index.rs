@@ -5,8 +5,8 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.schema.IndexMetadata`
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// The type of secondary index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -33,7 +33,12 @@ pub struct IndexMetadata {
 }
 
 impl IndexMetadata {
-    pub fn new(id: String, name: String, kind: IndexKind, options: HashMap<String, String>) -> Self {
+    pub fn new(
+        id: String,
+        name: String,
+        kind: IndexKind,
+        options: HashMap<String, String>,
+    ) -> Self {
         Self {
             id,
             name,

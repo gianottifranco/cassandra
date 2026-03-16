@@ -71,10 +71,7 @@ impl LeveledCompactionStrategy {
 
     /// Pick compaction from leveled SSTables.
     /// Returns groups of SSTable IDs to compact together.
-    pub fn pick_leveled_compaction(
-        &self,
-        sstables: &[LeveledSSTable],
-    ) -> Vec<Vec<SSTableId>> {
+    pub fn pick_leveled_compaction(&self, sstables: &[LeveledSSTable]) -> Vec<Vec<SSTableId>> {
         // Group by level
         let mut levels: std::collections::BTreeMap<u32, Vec<&LeveledSSTable>> =
             std::collections::BTreeMap::new();

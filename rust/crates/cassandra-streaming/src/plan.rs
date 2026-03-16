@@ -91,12 +91,15 @@ impl StreamPlan {
         tables: Vec<String>,
         ranges: Vec<(Token, Token)>,
     ) -> Self {
-        self.requests.entry(source).or_default().push(StreamRequest {
-            keyspace: keyspace.into(),
-            tables,
-            ranges,
-            source,
-        });
+        self.requests
+            .entry(source)
+            .or_default()
+            .push(StreamRequest {
+                keyspace: keyspace.into(),
+                tables,
+                ranges,
+                source,
+            });
         self
     }
 
@@ -129,11 +132,9 @@ impl StreamPlan {
 
         // Create sessions for incoming data (requests)
         for (source, requests) in &self.requests {
-            let session = peer_sessions
-                .entry(*source)
-                .or_insert_with(|| {
-                    StreamSession::new(*source, format!("{} from {}", self.operation, source))
-                });
+            let session = peer_sessions.entry(*source).or_insert_with(|| {
+                StreamSession::new(*source, format!("{} from {}", self.operation, source))
+            });
 
             for req in requests {
                 let transfer = StreamTransfer::new(
@@ -151,11 +152,9 @@ impl StreamPlan {
 
         // Create sessions for outgoing data (transfers)
         for (target, transfers) in &self.transfers {
-            let session = peer_sessions
-                .entry(*target)
-                .or_insert_with(|| {
-                    StreamSession::new(*target, format!("{} to {}", self.operation, target))
-                });
+            let session = peer_sessions.entry(*target).or_insert_with(|| {
+                StreamSession::new(*target, format!("{} to {}", self.operation, target))
+            });
 
             for req in transfers {
                 let transfer = StreamTransfer::new(
@@ -212,8 +211,12 @@ mod tests {
     #[test]
     fn single_request() {
         let ranges = vec![(Token::from_raw(-100), Token::from_raw(100))];
-        let plan = StreamPlan::new(StreamOperation::Bootstrap)
-            .request_ranges(ep(7002), "ks", vec!["t1".into()], ranges);
+        let plan = StreamPlan::new(StreamOperation::Bootstrap).request_ranges(
+            ep(7002),
+            "ks",
+            vec!["t1".into()],
+            ranges,
+        );
 
         assert!(!plan.is_empty());
         assert_eq!(plan.peer_count(), 1);

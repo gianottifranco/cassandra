@@ -111,10 +111,7 @@ impl TrieNode {
         Ok(())
     }
 
-    fn write_children<W: Write>(
-        w: &mut W,
-        children: &BTreeMap<u8, TrieNode>,
-    ) -> io::Result<()> {
+    fn write_children<W: Write>(w: &mut W, children: &BTreeMap<u8, TrieNode>) -> io::Result<()> {
         w.write_u16::<BigEndian>(children.len() as u16)?;
         for (&byte, child) in children {
             w.write_u8(byte)?;
@@ -406,10 +403,7 @@ impl BtiWriter {
         Ok(())
     }
 
-    fn write_bloom_filter(
-        &self,
-        partitions: &[(Vec<u8>, PartitionData)],
-    ) -> io::Result<()> {
+    fn write_bloom_filter(&self, partitions: &[(Vec<u8>, PartitionData)]) -> io::Result<()> {
         let filter_path = self.descriptor.component_path(Component::Filter);
         let mut filter_file = BufWriter::new(File::create(&filter_path)?);
         filter_file.write_all(&FILTER_MAGIC)?;
@@ -676,10 +670,7 @@ mod tests {
         let p5 = reader.get_partition(&[5]).unwrap().unwrap();
         assert_eq!(p5.rows.len(), 3);
         let row = p5.rows.get(&vec![0u8]).unwrap();
-        assert_eq!(
-            row.cells[0].value.as_deref(),
-            Some(b"val_5_0".as_slice())
-        );
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"val_5_0".as_slice()));
     }
 
     #[test]

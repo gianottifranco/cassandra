@@ -87,7 +87,12 @@ impl fmt::Display for Epoch {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transformation {
     /// Register a new node in the cluster.
-    Register { node_id: NodeId, endpoint: Endpoint, dc: String, rack: String },
+    Register {
+        node_id: NodeId,
+        endpoint: Endpoint,
+        dc: String,
+        rack: String,
+    },
     /// Unregister (decommission) a node.
     Unregister { node_id: NodeId },
     /// Assign tokens to a node (bootstrap complete).
@@ -95,9 +100,15 @@ pub enum Transformation {
     /// Update a node's state.
     UpdateNodeState { node_id: NodeId, state: NodeState },
     /// Schema change: bump schema version.
-    SchemaChange { schema_version: Uuid, description: String },
+    SchemaChange {
+        schema_version: Uuid,
+        description: String,
+    },
     /// Lock ranges for an in-progress topology operation.
-    LockRanges { operation_id: Uuid, ranges: Vec<TokenRange> },
+    LockRanges {
+        operation_id: Uuid,
+        ranges: Vec<TokenRange>,
+    },
     /// Unlock ranges after topology operation completes.
     UnlockRanges { operation_id: Uuid },
     /// Force snapshot at this epoch (for log compaction).
@@ -156,9 +167,7 @@ impl MetadataLog {
 
     /// Get all entries since a given epoch (exclusive).
     pub fn entries_since(&self, since: Epoch) -> &[MetadataLogEntry] {
-        let start = self
-            .entries
-            .partition_point(|e| e.epoch <= since);
+        let start = self.entries.partition_point(|e| e.epoch <= since);
         &self.entries[start..]
     }
 
@@ -493,17 +502,16 @@ impl TcmMetadata {
         committed_by: NodeId,
     ) -> Result<Epoch, TcmError> {
         match &transformation {
-            Transformation::Register { node_id, endpoint, dc, rack } => {
+            Transformation::Register {
+                node_id,
+                endpoint,
+                dc,
+                rack,
+            } => {
                 if self.directory.get(node_id).is_some() {
                     return Err(TcmError::NodeAlreadyRegistered(*node_id));
                 }
-                let info = NodeInfo::new(
-                    *node_id,
-                    *endpoint,
-                    dc.clone(),
-                    rack.clone(),
-                    Vec::new(),
-                );
+                let info = NodeInfo::new(*node_id, *endpoint, dc.clone(), rack.clone(), Vec::new());
                 self.directory.register(info);
             }
             Transformation::Unregister { node_id } => {
@@ -527,7 +535,10 @@ impl TcmMetadata {
             Transformation::SchemaChange { schema_version, .. } => {
                 self.schema_version = Some(*schema_version);
             }
-            Transformation::LockRanges { operation_id, ranges } => {
+            Transformation::LockRanges {
+                operation_id,
+                ranges,
+            } => {
                 self.locked_ranges
                     .lock(*operation_id, ranges.clone())
                     .map_err(|r| TcmError::RangeConflict(r))?;
@@ -559,7 +570,12 @@ impl TcmMetadata {
     /// Apply a transformation without adding to the log (for replay).
     fn apply_without_logging(&mut self, transformation: &Transformation) -> Result<(), TcmError> {
         match transformation {
-            Transformation::Register { node_id, endpoint, dc, rack } => {
+            Transformation::Register {
+                node_id,
+                endpoint,
+                dc,
+                rack,
+            } => {
                 let info = NodeInfo::new(*node_id, *endpoint, dc.clone(), rack.clone(), Vec::new());
                 self.directory.register(info);
             }
@@ -580,7 +596,10 @@ impl TcmMetadata {
             Transformation::SchemaChange { schema_version, .. } => {
                 self.schema_version = Some(*schema_version);
             }
-            Transformation::LockRanges { operation_id, ranges } => {
+            Transformation::LockRanges {
+                operation_id,
+                ranges,
+            } => {
                 let _ = self.locked_ranges.lock(*operation_id, ranges.clone());
             }
             Transformation::UnlockRanges { operation_id } => {
@@ -812,7 +831,13 @@ mod tests {
         let mut dir = NodeDirectory::new();
         assert!(dir.is_empty());
 
-        let info = NodeInfo::new(node_id(1), ep(7001), "dc1", "rack1", vec![Token::from_raw(0)]);
+        let info = NodeInfo::new(
+            node_id(1),
+            ep(7001),
+            "dc1",
+            "rack1",
+            vec![Token::from_raw(0)],
+        );
         dir.register(info);
         assert_eq!(dir.len(), 1);
 
@@ -845,12 +870,7 @@ mod tests {
 
     #[test]
     fn in_progress_sequence() {
-        let mut seq = InProgressSequence::new(
-            node_id(1),
-            SequenceType::Bootstrap,
-            3,
-            Epoch::FIRST,
-        );
+        let mut seq = InProgressSequence::new(node_id(1), SequenceType::Bootstrap, 3, Epoch::FIRST);
         assert!(!seq.is_complete());
         assert_eq!(seq.current_step, 0);
 
@@ -883,26 +903,30 @@ mod tests {
         let nid = node_id(1);
 
         // Register
-        let e = tcm.apply(
-            Transformation::Register {
-                node_id: nid,
-                endpoint: ep(7001),
-                dc: "dc1".into(),
-                rack: "rack1".into(),
-            },
-            nid,
-        ).unwrap();
+        let e = tcm
+            .apply(
+                Transformation::Register {
+                    node_id: nid,
+                    endpoint: ep(7001),
+                    dc: "dc1".into(),
+                    rack: "rack1".into(),
+                },
+                nid,
+            )
+            .unwrap();
         assert_eq!(e, Epoch::FIRST);
         assert_eq!(tcm.directory.len(), 1);
 
         // Assign tokens
-        let e = tcm.apply(
-            Transformation::AssignTokens {
-                node_id: nid,
-                tokens: vec![Token::from_raw(0), Token::from_raw(100)],
-            },
-            nid,
-        ).unwrap();
+        let e = tcm
+            .apply(
+                Transformation::AssignTokens {
+                    node_id: nid,
+                    tokens: vec![Token::from_raw(0), Token::from_raw(100)],
+                },
+                nid,
+            )
+            .unwrap();
         assert_eq!(e, Epoch(2));
 
         let info = tcm.directory.get(&nid).unwrap();
@@ -923,7 +947,8 @@ mod tests {
                 rack: "rack1".into(),
             },
             nid,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Should fail on duplicate
         let result = tcm.apply(
@@ -949,7 +974,8 @@ mod tests {
                 description: "create keyspace".into(),
             },
             node_id(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(tcm.schema_version, Some(sv));
     }
@@ -965,14 +991,16 @@ mod tests {
                 ranges: vec![TokenRange::new(Token::from_raw(0), Token::from_raw(100))],
             },
             node_id(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(tcm.locked_ranges.has_locks());
 
         tcm.apply(
             Transformation::UnlockRanges { operation_id: op },
             node_id(1),
-        ).unwrap();
+        )
+        .unwrap();
 
         assert!(!tcm.locked_ranges.has_locks());
     }
@@ -992,7 +1020,8 @@ mod tests {
                 rack: "rack1".into(),
             },
             nid,
-        ).unwrap();
+        )
+        .unwrap();
 
         let snap = tcm.snapshot();
         assert_eq!(snap.epoch, Epoch::FIRST);
@@ -1013,7 +1042,8 @@ mod tests {
                 rack: "rack1".into(),
             },
             nid,
-        ).unwrap();
+        )
+        .unwrap();
 
         let snap = tcm.snapshot();
         let json = serde_json::to_string(&snap).unwrap();
@@ -1036,7 +1066,8 @@ mod tests {
                 rack: "rack1".into(),
             },
             nid,
-        ).unwrap();
+        )
+        .unwrap();
 
         let snap = tcm.snapshot();
 
@@ -1059,7 +1090,8 @@ mod tests {
                     description: format!("change {i}"),
                 },
                 nid,
-            ).unwrap();
+            )
+            .unwrap();
         }
         assert_eq!(tcm.log.len(), 5);
 

@@ -83,7 +83,7 @@ impl RoleManager for SystemAuthRoleManager {
         }
 
         // We skip member_of for now (implemented in separate table if needed)
-        
+
         let mutation = Mutation {
             keyspace: SYSTEM_AUTH.into(),
             table: ROLES_TABLE.into(),
@@ -158,7 +158,8 @@ impl RoleManager for SystemAuthRoleManager {
             cdc_enabled: false,
         };
 
-        self.engine.apply_mutation(&mutation)
+        self.engine
+            .apply_mutation(&mutation)
             .map_err(|e| SecurityError::AuthError(format!("storage error: {}", e)))
     }
 
@@ -180,14 +181,15 @@ impl RoleManager for SystemAuthRoleManager {
             cdc_enabled: false,
         };
 
-        self.engine.apply_mutation(&mutation)
+        self.engine
+            .apply_mutation(&mutation)
             .map_err(|e| SecurityError::AuthError(format!("storage error: {}", e)))
     }
 
     fn get_role(&self, name: &str) -> Option<Role> {
         let pk = name.as_bytes().to_vec();
         let partition = self.engine.read_partition(SYSTEM_AUTH, ROLES_TABLE, &pk)?;
-        
+
         let now_secs = (Self::now() / 1_000_000) as i32;
         let live = partition.live_rows(now_secs);
         if live.is_empty() {
@@ -258,7 +260,10 @@ pub struct SystemAuthAuthorizer {
 
 impl SystemAuthAuthorizer {
     pub fn new(engine: Arc<StorageEngine>, role_manager: Arc<dyn RoleManager>) -> Self {
-        Self { engine, role_manager }
+        Self {
+            engine,
+            role_manager,
+        }
     }
 }
 
@@ -275,7 +280,7 @@ impl Authorizer for SystemAuthAuthorizer {
                 return Ok(());
             }
         }
-        
+
         // TODO: check `role_permissions` table (stub)
         Err(SecurityError::AuthzError(format!(
             "User '{}' has no {} permission on {}",
@@ -303,11 +308,7 @@ impl Authorizer for SystemAuthAuthorizer {
         Ok(()) // stub
     }
 
-    fn list_permissions(
-        &self,
-        _role: &str,
-        _resource: &Resource,
-    ) -> Vec<(Permission, Resource)> {
+    fn list_permissions(&self, _role: &str, _resource: &Resource) -> Vec<(Permission, Resource)> {
         vec![]
     }
 

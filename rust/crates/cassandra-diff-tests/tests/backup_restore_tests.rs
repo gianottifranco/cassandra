@@ -58,9 +58,15 @@ fn snapshot_creates_consistent_backup() {
     for i in 0..100 {
         engine
             .apply_mutation(
-                "ks", "backup_test",
+                "ks",
+                "backup_test",
                 format!("pk-{i}").as_bytes().to_vec(),
-                vec![make_row(b"ck", "name", format!("user-{i}").as_bytes(), i as i64)],
+                vec![make_row(
+                    b"ck",
+                    "name",
+                    format!("user-{i}").as_bytes(),
+                    i as i64,
+                )],
                 i as i64,
             )
             .unwrap();
@@ -80,7 +86,10 @@ fn snapshot_creates_consistent_backup() {
         .collect();
 
     println!("Snapshot contains {} files", snap_files.len());
-    assert!(!snap_files.is_empty(), "Snapshot should contain at least one file");
+    assert!(
+        !snap_files.is_empty(),
+        "Snapshot should contain at least one file"
+    );
 }
 
 /// Rollback drill: write → snapshot → write more → "rollback" → verify old data.
@@ -98,7 +107,8 @@ fn rollback_drill_validates_data_integrity() {
         for i in 0..50 {
             engine
                 .apply_mutation(
-                    "ks", "rollback_test",
+                    "ks",
+                    "rollback_test",
                     format!("pk-{i}").as_bytes().to_vec(),
                     vec![make_row(b"ck", "v", format!("v1-{i}").as_bytes(), i as i64)],
                     i as i64,
@@ -116,24 +126,41 @@ fn rollback_drill_validates_data_integrity() {
         for i in 50..100 {
             engine
                 .apply_mutation(
-                    "ks", "rollback_test",
+                    "ks",
+                    "rollback_test",
                     format!("pk-{i}").as_bytes().to_vec(),
-                    vec![make_row(b"ck", "v", format!("v2-{i}").as_bytes(), (i + 100) as i64)],
+                    vec![make_row(
+                        b"ck",
+                        "v",
+                        format!("v2-{i}").as_bytes(),
+                        (i + 100) as i64,
+                    )],
                     (i + 100) as i64,
                 )
                 .unwrap();
         }
 
         // Verify both pre and post-snapshot data exists
-        let pre = engine.read_partition("ks", "rollback_test", b"pk-0").unwrap();
+        let pre = engine
+            .read_partition("ks", "rollback_test", b"pk-0")
+            .unwrap();
         assert!(pre.is_some(), "Pre-snapshot data should exist");
 
-        let post = engine.read_partition("ks", "rollback_test", b"pk-75").unwrap();
-        assert!(post.is_some(), "Post-snapshot data should exist before rollback");
+        let post = engine
+            .read_partition("ks", "rollback_test", b"pk-75")
+            .unwrap();
+        assert!(
+            post.is_some(),
+            "Post-snapshot data should exist before rollback"
+        );
     }
 
     // Phase 3: "Rollback" — verify snapshot files were preserved
-    let snap_dir = dir.path().join("data").join("snapshots").join("rollback-point");
+    let snap_dir = dir
+        .path()
+        .join("data")
+        .join("snapshots")
+        .join("rollback-point");
     assert!(
         snap_dir.exists(),
         "Rollback snapshot directory should still exist"
@@ -158,7 +185,8 @@ fn multiple_snapshots_coexist() {
     // Write and flush
     engine
         .apply_mutation(
-            "ks", "multi_snap",
+            "ks",
+            "multi_snap",
             b"pk1".to_vec(),
             vec![make_row(b"ck", "v", b"data1", 1)],
             1,
@@ -171,7 +199,8 @@ fn multiple_snapshots_coexist() {
     // Write more
     engine
         .apply_mutation(
-            "ks", "multi_snap",
+            "ks",
+            "multi_snap",
             b"pk2".to_vec(),
             vec![make_row(b"ck", "v", b"data2", 2)],
             2,
@@ -209,7 +238,8 @@ fn snapshot_plus_replay_full_recovery() {
         for i in 0..30 {
             engine
                 .apply_mutation(
-                    "ks", "recovery",
+                    "ks",
+                    "recovery",
                     format!("flushed-{i}").as_bytes().to_vec(),
                     vec![make_row(b"ck", "v", b"flushed", i as i64)],
                     i as i64,
@@ -223,7 +253,8 @@ fn snapshot_plus_replay_full_recovery() {
         for i in 30..50 {
             engine
                 .apply_mutation(
-                    "ks", "recovery",
+                    "ks",
+                    "recovery",
                     format!("unflushed-{i}").as_bytes().to_vec(),
                     vec![make_row(b"ck", "v", b"unflushed", i as i64)],
                     i as i64,
@@ -252,7 +283,9 @@ fn snapshot_plus_replay_full_recovery() {
 
         // Unflushed data (written after flush, before crash) should be available
         // via commit log replay.
-        let unflushed = engine.read_partition("ks", "recovery", b"unflushed-30").unwrap();
+        let unflushed = engine
+            .read_partition("ks", "recovery", b"unflushed-30")
+            .unwrap();
         assert!(
             unflushed.is_some(),
             "Unflushed data should be recovered via commit log replay"
@@ -262,7 +295,9 @@ fn snapshot_plus_replay_full_recovery() {
         // finding the files in the nested directory structure. This is a known
         // limitation tracked in the compatibility matrix. The SSTable files exist
         // on disk but the scanner may not locate them in all directory layouts.
-        let flushed = engine.read_partition("ks", "recovery", b"flushed-0").unwrap();
+        let flushed = engine
+            .read_partition("ks", "recovery", b"flushed-0")
+            .unwrap();
         if flushed.is_none() {
             println!(
                 "NOTE: Flushed data not found after restart — SSTable scan limitation. \

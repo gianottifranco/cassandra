@@ -60,7 +60,9 @@ impl SpeculativeRetryPolicy {
                     num.parse::<f64>().ok().map(Self::Percentile)
                 } else if s.ends_with("MS") {
                     let num = s.trim_end_matches("MS").trim();
-                    num.parse::<u64>().ok().map(|ms| Self::FixedDelay(Duration::from_millis(ms)))
+                    num.parse::<u64>()
+                        .ok()
+                        .map(|ms| Self::FixedDelay(Duration::from_millis(ms)))
                 } else {
                     std::option::Option::None
                 }
@@ -77,7 +79,10 @@ impl SpeculativeRetryPolicy {
     ///
     /// Returns `None` for `None` policy, `Some(Duration::ZERO)` for `Always`,
     /// and the computed delay for `Percentile` and `FixedDelay`.
-    pub fn speculative_delay(&self, percentile_latency_ms: impl Fn(f64) -> u64) -> Option<Duration> {
+    pub fn speculative_delay(
+        &self,
+        percentile_latency_ms: impl Fn(f64) -> u64,
+    ) -> Option<Duration> {
         match self {
             Self::None => std::option::Option::None,
             Self::Always => Some(Duration::ZERO),
@@ -145,7 +150,10 @@ mod tests {
     #[test]
     fn parse_fixed_delay() {
         let p = SpeculativeRetryPolicy::from_str_cql("50ms").unwrap();
-        assert_eq!(p, SpeculativeRetryPolicy::FixedDelay(Duration::from_millis(50)));
+        assert_eq!(
+            p,
+            SpeculativeRetryPolicy::FixedDelay(Duration::from_millis(50))
+        );
     }
 
     #[test]
@@ -181,14 +189,20 @@ mod tests {
     #[test]
     fn speculative_delay_fixed() {
         let policy = SpeculativeRetryPolicy::FixedDelay(Duration::from_millis(50));
-        assert_eq!(policy.speculative_delay(|_| 0), Some(Duration::from_millis(50)));
+        assert_eq!(
+            policy.speculative_delay(|_| 0),
+            Some(Duration::from_millis(50))
+        );
     }
 
     #[test]
     fn display() {
         assert_eq!(SpeculativeRetryPolicy::None.to_string(), "NONE");
         assert_eq!(SpeculativeRetryPolicy::Always.to_string(), "ALWAYS");
-        assert_eq!(SpeculativeRetryPolicy::Percentile(99.0).to_string(), "99PERCENTILE");
+        assert_eq!(
+            SpeculativeRetryPolicy::Percentile(99.0).to_string(),
+            "99PERCENTILE"
+        );
         assert_eq!(
             SpeculativeRetryPolicy::FixedDelay(Duration::from_millis(50)).to_string(),
             "50ms"

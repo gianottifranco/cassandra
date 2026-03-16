@@ -19,10 +19,10 @@ use uuid::Uuid;
 use cassandra_cluster_metadata::Endpoint;
 use cassandra_common::Token;
 
+use crate::history::{LoggingRepairHistoryTracker, RepairHistoryTracker};
 use crate::merkle::MerkleTree;
 use crate::metrics::RepairMetrics;
 use crate::session::{RepairSession, RepairSessionId, RepairSessionState};
-use crate::history::{RepairHistoryTracker, LoggingRepairHistoryTracker};
 
 /// Type of repair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,7 +182,7 @@ impl RepairCoordinator {
                 *range,
                 replicas.to_vec(),
             );
-            
+
             self.history_tracker.record_session_start(
                 session.id,
                 repair_id,
@@ -191,7 +191,7 @@ impl RepairCoordinator {
                 *range,
                 replicas,
             );
-            
+
             sessions.insert(session.id, session);
         }
 
@@ -252,14 +252,14 @@ impl RepairCoordinator {
 
         // Transition the session
         if session.state == RepairSessionState::Initialized {
-            session.start_building_trees().map_err(|e| {
-                RepairError::TreeExchangeFailed(e.to_string())
-            })?;
+            session
+                .start_building_trees()
+                .map_err(|e| RepairError::TreeExchangeFailed(e.to_string()))?;
         }
         if session.state == RepairSessionState::BuildingTrees {
-            session.start_exchanging_trees().map_err(|e| {
-                RepairError::TreeExchangeFailed(e.to_string())
-            })?;
+            session
+                .start_exchanging_trees()
+                .map_err(|e| RepairError::TreeExchangeFailed(e.to_string()))?;
         }
 
         self.metrics.record_tree_exchanged();
@@ -275,15 +275,19 @@ impl RepairCoordinator {
 
         if diffs.is_empty() {
             // No differences — complete the session
-            session.complete().map_err(|e| {
-                RepairError::TreeExchangeFailed(e.to_string())
-            })?;
+            session
+                .complete()
+                .map_err(|e| RepairError::TreeExchangeFailed(e.to_string()))?;
             self.metrics.session_completed();
-            self.history_tracker.record_session_finish(*session_id, RepairSessionState::Complete, None);
+            self.history_tracker.record_session_finish(
+                *session_id,
+                RepairSessionState::Complete,
+                None,
+            );
         } else {
-            session.start_streaming(diffs.len()).map_err(|e| {
-                RepairError::StreamingFailed(e.to_string())
-            })?;
+            session
+                .start_streaming(diffs.len())
+                .map_err(|e| RepairError::StreamingFailed(e.to_string()))?;
         }
 
         Ok(diffs)
@@ -296,9 +300,9 @@ impl RepairCoordinator {
             .get_mut(session_id)
             .ok_or_else(|| RepairError::SessionNotFound(session_id.to_string()))?;
 
-        session.complete().map_err(|e| {
-            RepairError::StreamingFailed(e.to_string())
-        })?;
+        session
+            .complete()
+            .map_err(|e| RepairError::StreamingFailed(e.to_string()))?;
 
         self.metrics.session_completed();
         self.metrics.record_range_repaired();
@@ -311,7 +315,8 @@ impl RepairCoordinator {
             )
         });
 
-        self.history_tracker.record_session_finish(*session_id, RepairSessionState::Complete, None);
+        self.history_tracker
+            .record_session_finish(*session_id, RepairSessionState::Complete, None);
 
         if all_done {
             drop(sessions);
@@ -343,8 +348,7 @@ impl RepairCoordinator {
 
     /// Check if the repair has been cancelled.
     pub fn is_cancelled(&self) -> bool {
-        self.cancelled
-            .load(std::sync::atomic::Ordering::SeqCst)
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Finish the repair and clean up.
@@ -352,7 +356,7 @@ impl RepairCoordinator {
         let mut active = self.active_repair.lock();
         if let Some(id) = *active {
             info!(repair_id = %id, "Repair finished");
-            
+
             let sessions = self.sessions.lock();
             let mut successful = Vec::new();
             let mut error = None;
@@ -360,13 +364,17 @@ impl RepairCoordinator {
                 if s.state == RepairSessionState::Complete {
                     successful.push(s.range);
                 } else if s.state == RepairSessionState::Failed {
-                    error = s.error.clone().or_else(|| Some("Session failed".to_string()));
+                    error = s
+                        .error
+                        .clone()
+                        .or_else(|| Some("Session failed".to_string()));
                 } else if self.is_cancelled() {
                     error = Some("Repair cancelled".to_string());
                 }
             }
-            
-            self.history_tracker.record_parent_repair_finish(id, &successful, error);
+
+            self.history_tracker
+                .record_parent_repair_finish(id, &successful, error);
             drop(sessions);
         }
         *active = None;
@@ -419,13 +427,9 @@ mod tests {
         let ranges = vec![(tok(0), tok(100)), (tok(100), tok(200))];
         let replicas = vec![ep(7001), ep(7002)];
 
-        let id = rc.start_repair(
-            RepairType::Full,
-            "ks",
-            &["t1".into()],
-            &ranges,
-            &replicas,
-        ).unwrap();
+        let id = rc
+            .start_repair(RepairType::Full, "ks", &["t1".into()], &ranges, &replicas)
+            .unwrap();
 
         let status = rc.status().unwrap();
         assert_eq!(status.repair_id, id);
@@ -439,7 +443,8 @@ mod tests {
         let ranges = vec![(tok(0), tok(100))];
         let replicas = vec![ep(7001)];
 
-        rc.start_repair(RepairType::Full, "ks", &[], &ranges, &replicas).unwrap();
+        rc.start_repair(RepairType::Full, "ks", &[], &ranges, &replicas)
+            .unwrap();
 
         let result = rc.start_repair(RepairType::Full, "ks2", &[], &ranges, &replicas);
         assert!(matches!(result, Err(RepairError::AlreadyRunning(_))));
@@ -448,13 +453,7 @@ mod tests {
     #[test]
     fn no_replicas_error() {
         let rc = RepairCoordinator::new();
-        let result = rc.start_repair(
-            RepairType::Full,
-            "ks",
-            &[],
-            &[(tok(0), tok(100))],
-            &[],
-        );
+        let result = rc.start_repair(RepairType::Full, "ks", &[], &[(tok(0), tok(100))], &[]);
         assert!(matches!(result, Err(RepairError::NoReplicas)));
     }
 
@@ -464,7 +463,8 @@ mod tests {
         let ranges = vec![(tok(0), tok(1000))];
         let replicas = vec![ep(7001)];
 
-        rc.start_repair(RepairType::Full, "ks", &["t1".into()], &ranges, &replicas).unwrap();
+        rc.start_repair(RepairType::Full, "ks", &["t1".into()], &ranges, &replicas)
+            .unwrap();
 
         // Get the session ID
         let sessions = rc.sessions.lock();
@@ -493,7 +493,8 @@ mod tests {
         let ranges = vec![(tok(0), tok(1000))];
         let replicas = vec![ep(7001)];
 
-        rc.start_repair(RepairType::Full, "ks", &["t1".into()], &ranges, &replicas).unwrap();
+        rc.start_repair(RepairType::Full, "ks", &["t1".into()], &ranges, &replicas)
+            .unwrap();
 
         let sessions = rc.sessions.lock();
         let session_id = *sessions.keys().next().unwrap();
@@ -517,7 +518,8 @@ mod tests {
         let ranges = vec![(tok(0), tok(100))];
         let replicas = vec![ep(7001)];
 
-        rc.start_repair(RepairType::Full, "ks", &[], &ranges, &replicas).unwrap();
+        rc.start_repair(RepairType::Full, "ks", &[], &ranges, &replicas)
+            .unwrap();
         assert!(!rc.is_cancelled());
 
         rc.cancel();

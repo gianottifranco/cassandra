@@ -109,22 +109,106 @@ impl fmt::Display for TokenKind {
 /// CQL keywords (case-insensitive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Keyword {
-    Select, From, Where, And, Or, Not, In, Insert, Into, Values,
-    Update, Set, Delete, Create, Alter, Drop, Keyspace, Table,
-    If, Exists, Primary, Key, With, Order, By, Asc, Desc,
-    Limit, Allow, Filtering, Use, Truncate, Batch, Apply,
-    Begin, Unlogged, Counter, Using, Timestamp, Ttl, Token,
-    Contains, Distinct, Json, Null, True, False,
-    Frozen, List, Map, Tuple, Clustering, Compact, Storage,
-    Index, On, Type, Add, Rename, Column, Static,
-    Materialized, View, As, Is, Like, Per, Partition,
-    Group, Replication, DurableWrites,
+    Select,
+    From,
+    Where,
+    And,
+    Or,
+    Not,
+    In,
+    Insert,
+    Into,
+    Values,
+    Update,
+    Set,
+    Delete,
+    Create,
+    Alter,
+    Drop,
+    Keyspace,
+    Table,
+    If,
+    Exists,
+    Primary,
+    Key,
+    With,
+    Order,
+    By,
+    Asc,
+    Desc,
+    Limit,
+    Allow,
+    Filtering,
+    Use,
+    Truncate,
+    Batch,
+    Apply,
+    Begin,
+    Unlogged,
+    Counter,
+    Using,
+    Timestamp,
+    Ttl,
+    Token,
+    Contains,
+    Distinct,
+    Json,
+    Null,
+    True,
+    False,
+    Frozen,
+    List,
+    Map,
+    Tuple,
+    Clustering,
+    Compact,
+    Storage,
+    Index,
+    On,
+    Type,
+    Add,
+    Rename,
+    Column,
+    Static,
+    Materialized,
+    View,
+    As,
+    Is,
+    Like,
+    Per,
+    Partition,
+    Group,
+    Replication,
+    DurableWrites,
     // Phase 12: DCL, UDF/UDA, triggers, long tail
-    Role, Roles, Grant, Revoke, Permission, Permissions,
-    Function, Aggregate, Trigger, Returns, Language,
-    Called, Input, Sfunc, Stype, Finalfunc, Initcond,
-    Custom, Replace, Login, Superuser, Password,
-    Norecursive, Of, All, Cast, Vector, Masked,
+    Role,
+    Roles,
+    Grant,
+    Revoke,
+    Permission,
+    Permissions,
+    Function,
+    Aggregate,
+    Trigger,
+    Returns,
+    Language,
+    Called,
+    Input,
+    Sfunc,
+    Stype,
+    Finalfunc,
+    Initcond,
+    Custom,
+    Replace,
+    Login,
+    Superuser,
+    Password,
+    Norecursive,
+    Of,
+    All,
+    Cast,
+    Vector,
+    Masked,
 }
 
 impl Keyword {
@@ -270,7 +354,10 @@ impl<'a> Lexer<'a> {
         if self.pos >= self.input.len() {
             return Ok(Token {
                 kind: TokenKind::Eof,
-                span: Span { start: self.pos, end: self.pos },
+                span: Span {
+                    start: self.pos,
+                    end: self.pos,
+                },
             });
         }
 
@@ -279,42 +366,105 @@ impl<'a> Lexer<'a> {
 
         // Single-char tokens.
         let kind = match ch {
-            b'(' => { self.pos += 1; TokenKind::LParen }
-            b')' => { self.pos += 1; TokenKind::RParen }
-            b'{' => { self.pos += 1; TokenKind::LBrace }
-            b'}' => { self.pos += 1; TokenKind::RBrace }
-            b'[' => { self.pos += 1; TokenKind::LBracket }
-            b']' => { self.pos += 1; TokenKind::RBracket }
-            b',' => { self.pos += 1; TokenKind::Comma }
-            b';' => { self.pos += 1; TokenKind::Semicolon }
-            b'.' => { self.pos += 1; TokenKind::Dot }
-            b'*' => { self.pos += 1; TokenKind::Star }
-            b'+' => { self.pos += 1; TokenKind::Plus }
-            b'/' => { self.pos += 1; TokenKind::Slash }
-            b'%' => { self.pos += 1; TokenKind::Percent }
-            b'?' => { self.pos += 1; TokenKind::QuestionMark }
-            b'=' => { self.pos += 1; TokenKind::Eq }
+            b'(' => {
+                self.pos += 1;
+                TokenKind::LParen
+            }
+            b')' => {
+                self.pos += 1;
+                TokenKind::RParen
+            }
+            b'{' => {
+                self.pos += 1;
+                TokenKind::LBrace
+            }
+            b'}' => {
+                self.pos += 1;
+                TokenKind::RBrace
+            }
+            b'[' => {
+                self.pos += 1;
+                TokenKind::LBracket
+            }
+            b']' => {
+                self.pos += 1;
+                TokenKind::RBracket
+            }
+            b',' => {
+                self.pos += 1;
+                TokenKind::Comma
+            }
+            b';' => {
+                self.pos += 1;
+                TokenKind::Semicolon
+            }
+            b'.' => {
+                self.pos += 1;
+                TokenKind::Dot
+            }
+            b'*' => {
+                self.pos += 1;
+                TokenKind::Star
+            }
+            b'+' => {
+                self.pos += 1;
+                TokenKind::Plus
+            }
+            b'/' => {
+                self.pos += 1;
+                TokenKind::Slash
+            }
+            b'%' => {
+                self.pos += 1;
+                TokenKind::Percent
+            }
+            b'?' => {
+                self.pos += 1;
+                TokenKind::QuestionMark
+            }
+            b'=' => {
+                self.pos += 1;
+                TokenKind::Eq
+            }
             b'!' if self.peek(1) == Some(b'=') => {
-                self.pos += 2; TokenKind::Neq
+                self.pos += 2;
+                TokenKind::Neq
             }
             b'<' if self.peek(1) == Some(b'=') => {
-                self.pos += 2; TokenKind::Lte
+                self.pos += 2;
+                TokenKind::Lte
             }
-            b'<' => { self.pos += 1; TokenKind::Lt }
+            b'<' => {
+                self.pos += 1;
+                TokenKind::Lt
+            }
             b'>' if self.peek(1) == Some(b'=') => {
-                self.pos += 2; TokenKind::Gte
+                self.pos += 2;
+                TokenKind::Gte
             }
-            b'>' => { self.pos += 1; TokenKind::Gt }
-            b':' if self.peek(1).map_or(false, |b| b.is_ascii_alphanumeric() || b == b'_') => {
+            b'>' => {
+                self.pos += 1;
+                TokenKind::Gt
+            }
+            b':' if self
+                .peek(1)
+                .map_or(false, |b| b.is_ascii_alphanumeric() || b == b'_') =>
+            {
                 self.pos += 1;
                 let name = self.read_ident_text();
                 TokenKind::NamedBind(name)
             }
-            b':' => { self.pos += 1; TokenKind::Colon }
+            b':' => {
+                self.pos += 1;
+                TokenKind::Colon
+            }
             b'-' if self.peek(1).map_or(false, |b| b.is_ascii_digit()) => {
                 return self.read_number(start);
             }
-            b'-' => { self.pos += 1; TokenKind::Minus }
+            b'-' => {
+                self.pos += 1;
+                TokenKind::Minus
+            }
             b'\'' => return self.read_string_literal(start),
             b'"' => return self.read_quoted_ident(start),
             b'0' if self.peek(1) == Some(b'x') || self.peek(1) == Some(b'X') => {
@@ -322,15 +472,20 @@ impl<'a> Lexer<'a> {
             }
             b'0'..=b'9' => return self.read_number(start),
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => return self.read_ident_or_keyword(start),
-            _ => return Err(LexError {
-                message: format!("unexpected character: '{}'", ch as char),
-                position: start,
-            }),
+            _ => {
+                return Err(LexError {
+                    message: format!("unexpected character: '{}'", ch as char),
+                    position: start,
+                });
+            }
         };
 
         Ok(Token {
             kind,
-            span: Span { start, end: self.pos },
+            span: Span {
+                start,
+                end: self.pos,
+            },
         })
     }
 
@@ -398,7 +553,10 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::StringLiteral(value),
-            span: Span { start, end: self.pos },
+            span: Span {
+                start,
+                end: self.pos,
+            },
         })
     }
 
@@ -427,7 +585,10 @@ impl<'a> Lexer<'a> {
         }
         Ok(Token {
             kind: TokenKind::QuotedIdent(value),
-            span: Span { start, end: self.pos },
+            span: Span {
+                start,
+                end: self.pos,
+            },
         })
     }
 
@@ -437,8 +598,8 @@ impl<'a> Lexer<'a> {
         while self.pos < self.input.len() && self.input[self.pos].is_ascii_hexdigit() {
             self.pos += 1;
         }
-        let hex_str = std::str::from_utf8(&self.input[hex_start..self.pos])
-            .map_err(|_| LexError {
+        let hex_str =
+            std::str::from_utf8(&self.input[hex_start..self.pos]).map_err(|_| LexError {
                 message: "invalid blob literal".to_string(),
                 position: start,
             })?;
@@ -448,7 +609,10 @@ impl<'a> Lexer<'a> {
         })?;
         Ok(Token {
             kind: TokenKind::BlobLiteral(bytes),
-            span: Span { start, end: self.pos },
+            span: Span {
+                start,
+                end: self.pos,
+            },
         })
     }
 
@@ -472,7 +636,10 @@ impl<'a> Lexer<'a> {
             })?;
             return Ok(Token {
                 kind: TokenKind::FloatLiteral(val),
-                span: Span { start, end: self.pos },
+                span: Span {
+                    start,
+                    end: self.pos,
+                },
             });
         }
         // Check for UUID-like: if followed by '-' and hexdigit pattern
@@ -483,15 +650,17 @@ impl<'a> Lexer<'a> {
         })?;
         Ok(Token {
             kind: TokenKind::IntegerLiteral(val),
-            span: Span { start, end: self.pos },
+            span: Span {
+                start,
+                end: self.pos,
+            },
         })
     }
 
     fn read_ident_text(&mut self) -> String {
         let start = self.pos;
         while self.pos < self.input.len()
-            && (self.input[self.pos].is_ascii_alphanumeric()
-                || self.input[self.pos] == b'_')
+            && (self.input[self.pos].is_ascii_alphanumeric() || self.input[self.pos] == b'_')
         {
             self.pos += 1;
         }
@@ -522,7 +691,10 @@ impl<'a> Lexer<'a> {
                     self.pos += 28;
                     return Ok(Token {
                         kind: TokenKind::UuidLiteral(candidate),
-                        span: Span { start: uuid_start, end: self.pos },
+                        span: Span {
+                            start: uuid_start,
+                            end: self.pos,
+                        },
                     });
                 }
             }
@@ -530,18 +702,33 @@ impl<'a> Lexer<'a> {
 
         // Check for boolean and null.
         match text.to_uppercase().as_str() {
-            "TRUE" => return Ok(Token {
-                kind: TokenKind::BooleanLiteral(true),
-                span: Span { start, end: self.pos },
-            }),
-            "FALSE" => return Ok(Token {
-                kind: TokenKind::BooleanLiteral(false),
-                span: Span { start, end: self.pos },
-            }),
-            "NULL" => return Ok(Token {
-                kind: TokenKind::NullLiteral,
-                span: Span { start, end: self.pos },
-            }),
+            "TRUE" => {
+                return Ok(Token {
+                    kind: TokenKind::BooleanLiteral(true),
+                    span: Span {
+                        start,
+                        end: self.pos,
+                    },
+                });
+            }
+            "FALSE" => {
+                return Ok(Token {
+                    kind: TokenKind::BooleanLiteral(false),
+                    span: Span {
+                        start,
+                        end: self.pos,
+                    },
+                });
+            }
+            "NULL" => {
+                return Ok(Token {
+                    kind: TokenKind::NullLiteral,
+                    span: Span {
+                        start,
+                        end: self.pos,
+                    },
+                });
+            }
             _ => {}
         }
 
@@ -549,14 +736,20 @@ impl<'a> Lexer<'a> {
         if let Some(kw) = Keyword::from_str_ci(&text) {
             return Ok(Token {
                 kind: TokenKind::Keyword(kw),
-                span: Span { start, end: self.pos },
+                span: Span {
+                    start,
+                    end: self.pos,
+                },
             });
         }
 
         // Plain identifier (lowercase for case-insensitivity).
         Ok(Token {
             kind: TokenKind::Ident(text.to_lowercase()),
-            span: Span { start, end: self.pos },
+            span: Span {
+                start,
+                end: self.pos,
+            },
         })
     }
 }
@@ -592,7 +785,11 @@ pub struct LexError {
 
 impl fmt::Display for LexError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Lexer error at position {}: {}", self.position, self.message)
+        write!(
+            f,
+            "Lexer error at position {}: {}",
+            self.position, self.message
+        )
     }
 }
 impl std::error::Error for LexError {}
@@ -603,7 +800,12 @@ mod tests {
 
     fn lex(input: &str) -> Vec<TokenKind> {
         let mut lexer = Lexer::new(input);
-        lexer.tokenize().unwrap().into_iter().map(|t| t.kind).collect()
+        lexer
+            .tokenize()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.kind)
+            .collect()
     }
 
     #[test]
@@ -663,7 +865,10 @@ mod tests {
     #[test]
     fn blob_literal() {
         let tokens = lex("0xDEADBEEF");
-        assert_eq!(tokens[0], TokenKind::BlobLiteral(vec![0xDE, 0xAD, 0xBE, 0xEF]));
+        assert_eq!(
+            tokens[0],
+            TokenKind::BlobLiteral(vec![0xDE, 0xAD, 0xBE, 0xEF])
+        );
     }
 
     #[test]
@@ -732,7 +937,7 @@ mod tests {
     #[test]
     fn create_keyspace() {
         let tokens = lex(
-            "CREATE KEYSPACE test WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}"
+            "CREATE KEYSPACE test WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}",
         );
         assert_eq!(tokens[0], TokenKind::Keyword(Keyword::Create));
         assert_eq!(tokens[1], TokenKind::Keyword(Keyword::Keyspace));

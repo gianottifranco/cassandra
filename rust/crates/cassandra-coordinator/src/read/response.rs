@@ -135,15 +135,10 @@ impl DataResponse {
     }
 
     /// Create a data response from a single partition.
-    pub fn from_partition(
-        partition_key: Vec<u8>,
-        data: PartitionData,
-        now_seconds: i32,
-    ) -> Self {
+    pub fn from_partition(partition_key: Vec<u8>, data: PartitionData, now_seconds: i32) -> Self {
         let mut tracker = TombstoneTracker::new(TombstoneThresholds::default());
-        let partition = PartitionResult::from_partition_data(
-            partition_key, data, now_seconds, &mut tracker,
-        );
+        let partition =
+            PartitionResult::from_partition_data(partition_key, data, now_seconds, &mut tracker);
         Self {
             partitions: vec![partition],
             tombstones_read: tracker.count,
@@ -202,7 +197,9 @@ impl PartitionResult {
         let mut live_count = 0usize;
 
         // Copy partition tombstone
-        if let (Some(ts), Some(ldt)) = (data.tombstone_timestamp, data.tombstone_local_deletion_time) {
+        if let (Some(ts), Some(ldt)) =
+            (data.tombstone_timestamp, data.tombstone_local_deletion_time)
+        {
             live_data.set_tombstone(ts, ldt);
             tracker.track_partition_tombstone();
         }
@@ -501,9 +498,7 @@ mod tests {
         });
 
         let mut tracker = TombstoneTracker::new(TombstoneThresholds::default());
-        let result = PartitionResult::from_partition_data(
-            b"pk".to_vec(), pd, 100, &mut tracker,
-        );
+        let result = PartitionResult::from_partition_data(b"pk".to_vec(), pd, 100, &mut tracker);
         assert_eq!(result.live_row_count, 1);
         assert_eq!(tracker.count, 1); // one row tombstone
     }

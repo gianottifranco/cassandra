@@ -137,12 +137,24 @@ fn murmur3_hash128(key: &[u8]) -> (i64, i64) {
     let mut k1: u64 = 0;
     let mut k2: u64 = 0;
 
-    if tail.len() >= 15 { k2 ^= (tail[14] as u64) << 48; }
-    if tail.len() >= 14 { k2 ^= (tail[13] as u64) << 40; }
-    if tail.len() >= 13 { k2 ^= (tail[12] as u64) << 32; }
-    if tail.len() >= 12 { k2 ^= (tail[11] as u64) << 24; }
-    if tail.len() >= 11 { k2 ^= (tail[10] as u64) << 16; }
-    if tail.len() >= 10 { k2 ^= (tail[9] as u64) << 8; }
+    if tail.len() >= 15 {
+        k2 ^= (tail[14] as u64) << 48;
+    }
+    if tail.len() >= 14 {
+        k2 ^= (tail[13] as u64) << 40;
+    }
+    if tail.len() >= 13 {
+        k2 ^= (tail[12] as u64) << 32;
+    }
+    if tail.len() >= 12 {
+        k2 ^= (tail[11] as u64) << 24;
+    }
+    if tail.len() >= 11 {
+        k2 ^= (tail[10] as u64) << 16;
+    }
+    if tail.len() >= 10 {
+        k2 ^= (tail[9] as u64) << 8;
+    }
     if tail.len() >= 9 {
         k2 ^= tail[8] as u64;
         k2 = k2.wrapping_mul(c2);
@@ -150,13 +162,27 @@ fn murmur3_hash128(key: &[u8]) -> (i64, i64) {
         k2 = k2.wrapping_mul(c1);
         h2 ^= k2;
     }
-    if tail.len() >= 8 { k1 ^= (tail[7] as u64) << 56; }
-    if tail.len() >= 7 { k1 ^= (tail[6] as u64) << 48; }
-    if tail.len() >= 6 { k1 ^= (tail[5] as u64) << 40; }
-    if tail.len() >= 5 { k1 ^= (tail[4] as u64) << 32; }
-    if tail.len() >= 4 { k1 ^= (tail[3] as u64) << 24; }
-    if tail.len() >= 3 { k1 ^= (tail[2] as u64) << 16; }
-    if tail.len() >= 2 { k1 ^= (tail[1] as u64) << 8; }
+    if tail.len() >= 8 {
+        k1 ^= (tail[7] as u64) << 56;
+    }
+    if tail.len() >= 7 {
+        k1 ^= (tail[6] as u64) << 48;
+    }
+    if tail.len() >= 6 {
+        k1 ^= (tail[5] as u64) << 40;
+    }
+    if tail.len() >= 5 {
+        k1 ^= (tail[4] as u64) << 32;
+    }
+    if tail.len() >= 4 {
+        k1 ^= (tail[3] as u64) << 24;
+    }
+    if tail.len() >= 3 {
+        k1 ^= (tail[2] as u64) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= (tail[1] as u64) << 8;
+    }
     if !tail.is_empty() {
         k1 ^= tail[0] as u64;
         k1 = k1.wrapping_mul(c1);

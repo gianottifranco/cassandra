@@ -52,9 +52,7 @@ pub fn create_snapshot(
     sstable_files: &[PathBuf],
     schema_cql: Option<&str>,
 ) -> io::Result<SnapshotManifest> {
-    let snap_dir = data_dir
-        .join("snapshots")
-        .join(name);
+    let snap_dir = data_dir.join("snapshots").join(name);
     fs::create_dir_all(&snap_dir)?;
 
     let mut file_names = Vec::new();
@@ -98,11 +96,7 @@ pub fn create_snapshot(
         .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&manifest_path, json)?;
 
-    info!(
-        name,
-        files = manifest.files.len(),
-        "Snapshot created"
-    );
+    info!(name, files = manifest.files.len(), "Snapshot created");
 
     Ok(manifest)
 }
@@ -143,10 +137,7 @@ pub fn delete_snapshot(data_dir: &Path, name: &str) -> io::Result<()> {
 }
 
 /// Restore files from a snapshot back to the data directory.
-pub fn restore_snapshot(
-    data_dir: &Path,
-    name: &str,
-) -> io::Result<SnapshotManifest> {
+pub fn restore_snapshot(data_dir: &Path, name: &str) -> io::Result<SnapshotManifest> {
     let snap_dir = data_dir.join("snapshots").join(name);
     let manifest_path = snap_dir.join("manifest.json");
 
@@ -192,10 +183,7 @@ impl Default for IncrementalBackupConfig {
 
 /// Hard-link newly flushed SSTable files to the backup directory.
 /// Called automatically after each flush if incremental backup is enabled.
-pub fn backup_sstable(
-    backup_dir: &Path,
-    sstable_files: &[PathBuf],
-) -> io::Result<usize> {
+pub fn backup_sstable(backup_dir: &Path, sstable_files: &[PathBuf]) -> io::Result<usize> {
     fs::create_dir_all(backup_dir)?;
     let mut linked = 0;
 

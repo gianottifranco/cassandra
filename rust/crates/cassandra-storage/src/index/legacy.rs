@@ -36,8 +36,8 @@
 //! - Single-term exact-match only (no range queries).
 //! - TODO: Persist index entries alongside SSTables for durability.
 
-use std::collections::{BTreeMap, BTreeSet};
 use parking_lot::RwLock;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{IndexDefinition, IndexEntry, IndexError, IndexType, SecondaryIndex};
 
@@ -64,12 +64,7 @@ impl LegacyIndex {
     }
 
     /// Create a legacy index with a simplified definition.
-    pub fn create(
-        name: &str,
-        keyspace: &str,
-        table: &str,
-        column: &str,
-    ) -> Self {
+    pub fn create(name: &str, keyspace: &str, table: &str, column: &str) -> Self {
         Self::new(IndexDefinition {
             name: name.to_string(),
             keyspace: keyspace.to_string(),
@@ -168,8 +163,10 @@ mod tests {
     #[test]
     fn insert_and_search() {
         let idx = test_index();
-        idx.insert(&entry(b"alice@example.com", b"user1", b"")).unwrap();
-        idx.insert(&entry(b"bob@example.com", b"user2", b"")).unwrap();
+        idx.insert(&entry(b"alice@example.com", b"user1", b""))
+            .unwrap();
+        idx.insert(&entry(b"bob@example.com", b"user2", b""))
+            .unwrap();
 
         let results = idx.search(b"alice@example.com").unwrap();
         assert_eq!(results.len(), 1);
@@ -197,9 +194,12 @@ mod tests {
     #[test]
     fn multiple_rows_same_term() {
         let idx = test_index();
-        idx.insert(&entry(b"common@email.com", b"pk1", b"")).unwrap();
-        idx.insert(&entry(b"common@email.com", b"pk2", b"")).unwrap();
-        idx.insert(&entry(b"common@email.com", b"pk3", b"")).unwrap();
+        idx.insert(&entry(b"common@email.com", b"pk1", b""))
+            .unwrap();
+        idx.insert(&entry(b"common@email.com", b"pk2", b""))
+            .unwrap();
+        idx.insert(&entry(b"common@email.com", b"pk3", b""))
+            .unwrap();
 
         let results = idx.search(b"common@email.com").unwrap();
         assert_eq!(results.len(), 3);

@@ -32,7 +32,7 @@ pub struct MetricsRegistry {
     pub key_cache_hit_rate: Gauge,
     pub storage_load_bytes: IntGauge,
     pub exceptions_count: IntCounterVec,
-    
+
     // Repair metrics
     pub repair_trees_built: IntGauge,
     pub repair_trees_exchanged: IntGauge,
@@ -54,8 +54,8 @@ impl MetricsRegistry {
                 "Client request latency in seconds",
             )
             .buckets(vec![
-                0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
-                5.0, 10.0,
+                0.0001, 0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
+                10.0,
             ]),
             &["operation"],
         )
@@ -137,10 +137,7 @@ impl MetricsRegistry {
             .expect("register storage load");
 
         let exceptions_count = IntCounterVec::new(
-            Opts::new(
-                "cassandra_exceptions_total",
-                "Total exceptions by type",
-            ),
+            Opts::new("cassandra_exceptions_total", "Total exceptions by type"),
             &["type"],
         )
         .expect("counter vec creation");
@@ -148,33 +145,60 @@ impl MetricsRegistry {
             .register(Box::new(exceptions_count.clone()))
             .expect("register exceptions");
 
-        let repair_trees_built = IntGauge::new("cassandra_repair_trees_built", "Total repair trees built")
-            .expect("gauge");
-        registry.register(Box::new(repair_trees_built.clone())).unwrap();
-        
-        let repair_trees_exchanged = IntGauge::new("cassandra_repair_trees_exchanged", "Total repair trees exchanged")
-            .expect("gauge");
-        registry.register(Box::new(repair_trees_exchanged.clone())).unwrap();
+        let repair_trees_built =
+            IntGauge::new("cassandra_repair_trees_built", "Total repair trees built")
+                .expect("gauge");
+        registry
+            .register(Box::new(repair_trees_built.clone()))
+            .unwrap();
 
-        let repair_ranges_repaired = IntGauge::new("cassandra_repair_ranges_repaired", "Total ranges repaired")
-            .expect("gauge");
-        registry.register(Box::new(repair_ranges_repaired.clone())).unwrap();
+        let repair_trees_exchanged = IntGauge::new(
+            "cassandra_repair_trees_exchanged",
+            "Total repair trees exchanged",
+        )
+        .expect("gauge");
+        registry
+            .register(Box::new(repair_trees_exchanged.clone()))
+            .unwrap();
 
-        let repair_bytes_streamed = IntGauge::new("cassandra_repair_bytes_streamed", "Total repair bytes streamed")
-            .expect("gauge");
-        registry.register(Box::new(repair_bytes_streamed.clone())).unwrap();
+        let repair_ranges_repaired =
+            IntGauge::new("cassandra_repair_ranges_repaired", "Total ranges repaired")
+                .expect("gauge");
+        registry
+            .register(Box::new(repair_ranges_repaired.clone()))
+            .unwrap();
 
-        let repair_sessions_active = IntGauge::new("cassandra_repair_sessions_active", "Active repair sessions")
-            .expect("gauge");
-        registry.register(Box::new(repair_sessions_active.clone())).unwrap();
+        let repair_bytes_streamed = IntGauge::new(
+            "cassandra_repair_bytes_streamed",
+            "Total repair bytes streamed",
+        )
+        .expect("gauge");
+        registry
+            .register(Box::new(repair_bytes_streamed.clone()))
+            .unwrap();
 
-        let repair_sessions_completed = IntGauge::new("cassandra_repair_sessions_completed", "Completed repair sessions")
-            .expect("gauge");
-        registry.register(Box::new(repair_sessions_completed.clone())).unwrap();
+        let repair_sessions_active =
+            IntGauge::new("cassandra_repair_sessions_active", "Active repair sessions")
+                .expect("gauge");
+        registry
+            .register(Box::new(repair_sessions_active.clone()))
+            .unwrap();
 
-        let repair_sessions_failed = IntGauge::new("cassandra_repair_sessions_failed", "Failed repair sessions")
-            .expect("gauge");
-        registry.register(Box::new(repair_sessions_failed.clone())).unwrap();
+        let repair_sessions_completed = IntGauge::new(
+            "cassandra_repair_sessions_completed",
+            "Completed repair sessions",
+        )
+        .expect("gauge");
+        registry
+            .register(Box::new(repair_sessions_completed.clone()))
+            .unwrap();
+
+        let repair_sessions_failed =
+            IntGauge::new("cassandra_repair_sessions_failed", "Failed repair sessions")
+                .expect("gauge");
+        registry
+            .register(Box::new(repair_sessions_failed.clone()))
+            .unwrap();
 
         Self {
             registry,
@@ -232,16 +256,25 @@ impl MetricsRegistry {
             .with_label_values(&[exception_type])
             .inc();
     }
-    
+
     /// Sync from repair metrics snapshot.
-    pub fn sync_from_repair_metrics(&self, snapshot: &cassandra_repair::metrics::RepairMetricsSnapshot) {
+    pub fn sync_from_repair_metrics(
+        &self,
+        snapshot: &cassandra_repair::metrics::RepairMetricsSnapshot,
+    ) {
         self.repair_trees_built.set(snapshot.trees_built as i64);
-        self.repair_trees_exchanged.set(snapshot.trees_exchanged as i64);
-        self.repair_ranges_repaired.set(snapshot.ranges_repaired as i64);
-        self.repair_bytes_streamed.set(snapshot.bytes_streamed as i64);
-        self.repair_sessions_active.set(snapshot.sessions_active as i64);
-        self.repair_sessions_completed.set(snapshot.sessions_completed as i64);
-        self.repair_sessions_failed.set(snapshot.sessions_failed as i64);
+        self.repair_trees_exchanged
+            .set(snapshot.trees_exchanged as i64);
+        self.repair_ranges_repaired
+            .set(snapshot.ranges_repaired as i64);
+        self.repair_bytes_streamed
+            .set(snapshot.bytes_streamed as i64);
+        self.repair_sessions_active
+            .set(snapshot.sessions_active as i64);
+        self.repair_sessions_completed
+            .set(snapshot.sessions_completed as i64);
+        self.repair_sessions_failed
+            .set(snapshot.sessions_failed as i64);
     }
 }
 

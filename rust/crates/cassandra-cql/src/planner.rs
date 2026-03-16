@@ -6,10 +6,10 @@
 //! - `org.apache.cassandra.cql3.statements.SelectStatement`
 //! - `org.apache.cassandra.cql3.statements.ModificationStatement`
 
-use std::collections::HashMap;
-use cassandra_schema::SchemaSnapshot;
 use crate::ast::*;
 use crate::parser::ParseError;
+use cassandra_schema::SchemaSnapshot;
+use std::collections::HashMap;
 
 /// A planned, validated query ready for (stub) execution.
 #[derive(Debug, Clone)]
@@ -286,17 +286,24 @@ pub fn plan(
                 let cql_type = col.cql_type.resolve().ok_or_else(|| {
                     PlanError::InvalidQuery(format!("Unknown type for column '{}'", col.name))
                 })?;
-                
+
                 let masked_with = col.masked_with.as_ref().map(|(func, args)| {
-                    let arg_strs = args.iter().map(|t| {
-                        match t {
+                    let arg_strs = args
+                        .iter()
+                        .map(|t| match t {
                             crate::ast::Term::Literal(crate::ast::Literal::String(s)) => s.clone(),
-                            crate::ast::Term::Literal(crate::ast::Literal::Integer(i)) => i.to_string(),
-                            crate::ast::Term::Literal(crate::ast::Literal::Float(f)) => f.to_string(),
-                            crate::ast::Term::Literal(crate::ast::Literal::Boolean(b)) => b.to_string(),
+                            crate::ast::Term::Literal(crate::ast::Literal::Integer(i)) => {
+                                i.to_string()
+                            }
+                            crate::ast::Term::Literal(crate::ast::Literal::Float(f)) => {
+                                f.to_string()
+                            }
+                            crate::ast::Term::Literal(crate::ast::Literal::Boolean(b)) => {
+                                b.to_string()
+                            }
                             _ => format!("{:?}", t),
-                        }
-                    }).collect();
+                        })
+                        .collect();
                     (func.clone(), arg_strs)
                 });
 
@@ -460,10 +467,7 @@ pub fn plan(
     }
 }
 
-fn resolve_keyspace(
-    explicit: Option<&str>,
-    active: Option<&str>,
-) -> Result<String, PlanError> {
+fn resolve_keyspace(explicit: Option<&str>, active: Option<&str>) -> Result<String, PlanError> {
     match explicit.or(active) {
         Some(ks) => Ok(ks.to_string()),
         None => Err(PlanError::InvalidQuery(
@@ -506,8 +510,8 @@ impl From<ParseError> for PlanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cassandra_schema::{SchemaSnapshot, KeyspaceMetadata, KeyspaceParams};
     use crate::parser;
+    use cassandra_schema::{KeyspaceMetadata, KeyspaceParams, SchemaSnapshot};
 
     fn test_schema() -> SchemaSnapshot {
         let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default());

@@ -90,13 +90,17 @@ impl fmt::Display for TopologyOperation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TopologyState {
     Idle,
-    Calculating { operation: TopologyOperation },
+    Calculating {
+        operation: TopologyOperation,
+    },
     Streaming {
         operation: TopologyOperation,
         sessions: usize,
         progress: u32,
     },
-    Completing { operation: TopologyOperation },
+    Completing {
+        operation: TopologyOperation,
+    },
     Done {
         operation: TopologyOperation,
         success: bool,
@@ -109,11 +113,17 @@ impl fmt::Display for TopologyState {
         match self {
             Self::Idle => write!(f, "IDLE"),
             Self::Calculating { operation } => write!(f, "CALCULATING({operation})"),
-            Self::Streaming { operation, progress, .. } => {
+            Self::Streaming {
+                operation,
+                progress,
+                ..
+            } => {
                 write!(f, "STREAMING({operation}, {progress}%)")
             }
             Self::Completing { operation } => write!(f, "COMPLETING({operation})"),
-            Self::Done { operation, success, .. } => {
+            Self::Done {
+                operation, success, ..
+            } => {
                 if *success {
                     write!(f, "DONE({operation}, OK)")
                 } else {
@@ -243,7 +253,10 @@ impl PendingRanges {
 
     /// Add a pending range for a keyspace.
     pub fn add(&mut self, keyspace: impl Into<String>, pending: PendingRange) {
-        self.ranges.entry(keyspace.into()).or_default().push(pending);
+        self.ranges
+            .entry(keyspace.into())
+            .or_default()
+            .push(pending);
     }
 
     /// Remove all pending ranges for a keyspace.
@@ -258,7 +271,10 @@ impl PendingRanges {
 
     /// Get pending ranges for a keyspace.
     pub fn for_keyspace(&self, keyspace: &str) -> &[PendingRange] {
-        self.ranges.get(keyspace).map(|v| v.as_slice()).unwrap_or(&[])
+        self.ranges
+            .get(keyspace)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
     }
 
     /// Whether there are any pending ranges in any keyspace.
@@ -351,7 +367,10 @@ impl TopologyCoordinator {
     }
 
     pub fn is_operation_in_progress(&self) -> bool {
-        !matches!(*self.state.lock(), TopologyState::Idle | TopologyState::Done { .. })
+        !matches!(
+            *self.state.lock(),
+            TopologyState::Idle | TopologyState::Done { .. }
+        )
     }
 
     /// Get the current topology epoch.
@@ -406,19 +425,24 @@ impl TopologyCoordinator {
         for token in &new_tokens {
             if let Some(current_owner) = snap.ring.primary_endpoint(*token) {
                 if current_owner != local_node.endpoint {
-                    let prev = snap.ring.previous_token(*token)
+                    let prev = snap
+                        .ring
+                        .previous_token(*token)
                         .unwrap_or(Token::from_raw(i64::MIN));
                     plan.add_request(StreamRangeRequest {
                         source: current_owner,
                         destination: local_node.endpoint,
                         ranges: vec![(prev, *token)],
                     });
-                    pending.add("*", PendingRange {
-                        range: (prev, *token),
-                        new_owner: local_node.endpoint,
-                        current_owner,
-                        operation: TopologyOperation::Bootstrap,
-                    });
+                    pending.add(
+                        "*",
+                        PendingRange {
+                            range: (prev, *token),
+                            new_owner: local_node.endpoint,
+                            current_owner,
+                            operation: TopologyOperation::Bootstrap,
+                        },
+                    );
                 }
             }
         }
@@ -443,16 +467,23 @@ impl TopologyCoordinator {
         {
             let state = self.state.lock();
             match &*state {
-                TopologyState::Streaming { operation: TopologyOperation::Bootstrap, .. } => {}
-                other => return Err(TopologyError::InvalidState(
-                    format!("Expected Streaming(Bootstrap), got {other}")
-                )),
+                TopologyState::Streaming {
+                    operation: TopologyOperation::Bootstrap,
+                    ..
+                } => {}
+                other => {
+                    return Err(TopologyError::InvalidState(format!(
+                        "Expected Streaming(Bootstrap), got {other}"
+                    )));
+                }
             }
         }
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Completing { operation: TopologyOperation::Bootstrap };
+            *state = TopologyState::Completing {
+                operation: TopologyOperation::Bootstrap,
+            };
         }
 
         local_node.tokens = new_tokens;
@@ -488,7 +519,9 @@ impl TopologyCoordinator {
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::Decommission };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::Decommission,
+            };
         }
 
         let epoch = self.advance_epoch();
@@ -503,25 +536,32 @@ impl TopologyCoordinator {
         let mut pending = self.pending_ranges.lock();
 
         for token in &our_tokens {
-            let next_owners: Vec<Endpoint> = snap.ring.natural_endpoints(*token, 2)
+            let next_owners: Vec<Endpoint> = snap
+                .ring
+                .natural_endpoints(*token, 2)
                 .into_iter()
                 .filter(|ep| *ep != local_node.endpoint)
                 .collect();
 
             if let Some(recipient) = next_owners.first() {
-                let prev = snap.ring.previous_token(*token)
+                let prev = snap
+                    .ring
+                    .previous_token(*token)
                     .unwrap_or(Token::from_raw(i64::MIN));
                 plan.add_request(StreamRangeRequest {
                     source: local_node.endpoint,
                     destination: *recipient,
                     ranges: vec![(prev, *token)],
                 });
-                pending.add("*", PendingRange {
-                    range: (prev, *token),
-                    new_owner: *recipient,
-                    current_owner: local_node.endpoint,
-                    operation: TopologyOperation::Decommission,
-                });
+                pending.add(
+                    "*",
+                    PendingRange {
+                        range: (prev, *token),
+                        new_owner: *recipient,
+                        current_owner: local_node.endpoint,
+                        operation: TopologyOperation::Decommission,
+                    },
+                );
             }
         }
 
@@ -539,16 +579,23 @@ impl TopologyCoordinator {
         {
             let state = self.state.lock();
             match &*state {
-                TopologyState::Streaming { operation: TopologyOperation::Decommission, .. } => {}
-                other => return Err(TopologyError::InvalidState(
-                    format!("Expected Streaming(Decommission), got {other}")
-                )),
+                TopologyState::Streaming {
+                    operation: TopologyOperation::Decommission,
+                    ..
+                } => {}
+                other => {
+                    return Err(TopologyError::InvalidState(format!(
+                        "Expected Streaming(Decommission), got {other}"
+                    )));
+                }
             }
         }
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Completing { operation: TopologyOperation::Decommission };
+            *state = TopologyState::Completing {
+                operation: TopologyOperation::Decommission,
+            };
         }
 
         self.cluster.remove_node(local_endpoint);
@@ -576,9 +623,10 @@ impl TopologyCoordinator {
         let snap = self.cluster.snapshot();
         if let Some(info) = snap.nodes.get(dead_endpoint) {
             if info.state != NodeState::Dead {
-                return Err(TopologyError::TargetNotDead(
-                    format!("{dead_endpoint} is {}", info.state)
-                ));
+                return Err(TopologyError::TargetNotDead(format!(
+                    "{dead_endpoint} is {}",
+                    info.state
+                )));
             }
         } else {
             return Err(TopologyError::NodeNotFound(dead_endpoint.to_string()));
@@ -586,7 +634,9 @@ impl TopologyCoordinator {
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::Replace };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::Replace,
+            };
         }
 
         let epoch = self.advance_epoch();
@@ -596,13 +646,17 @@ impl TopologyCoordinator {
         let mut plan = StreamPlanDescriptor::new(TopologyOperation::Replace);
 
         for token in &dead_tokens {
-            let replicas: Vec<Endpoint> = snap.ring.natural_endpoints(*token, 3)
+            let replicas: Vec<Endpoint> = snap
+                .ring
+                .natural_endpoints(*token, 3)
                 .into_iter()
                 .filter(|ep| *ep != *dead_endpoint && *ep != local_node.endpoint)
                 .collect();
 
             if let Some(source) = replicas.first() {
-                let prev = snap.ring.previous_token(*token)
+                let prev = snap
+                    .ring
+                    .previous_token(*token)
                     .unwrap_or(Token::from_raw(i64::MIN));
                 plan.add_request(StreamRangeRequest {
                     source: *source,
@@ -630,10 +684,15 @@ impl TopologyCoordinator {
         {
             let state = self.state.lock();
             match &*state {
-                TopologyState::Streaming { operation: TopologyOperation::Replace, .. } => {}
-                other => return Err(TopologyError::InvalidState(
-                    format!("Expected Streaming(Replace), got {other}")
-                )),
+                TopologyState::Streaming {
+                    operation: TopologyOperation::Replace,
+                    ..
+                } => {}
+                other => {
+                    return Err(TopologyError::InvalidState(format!(
+                        "Expected Streaming(Replace), got {other}"
+                    )));
+                }
             }
         }
 
@@ -669,9 +728,9 @@ impl TopologyCoordinator {
         match snap.nodes.get(target_endpoint) {
             Some(info) => {
                 if info.host_id != *target_host_id {
-                    return Err(TopologyError::InvalidState(
-                        format!("Host ID mismatch for {target_endpoint}")
-                    ));
+                    return Err(TopologyError::InvalidState(format!(
+                        "Host ID mismatch for {target_endpoint}"
+                    )));
                 }
             }
             None => return Err(TopologyError::NodeNotFound(target_endpoint.to_string())),
@@ -679,7 +738,9 @@ impl TopologyCoordinator {
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::RemoveNode };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::RemoveNode,
+            };
         }
 
         let epoch = self.advance_epoch();
@@ -707,7 +768,9 @@ impl TopologyCoordinator {
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::Rebuild };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::Rebuild,
+            };
         }
 
         info!(node = %local_node.endpoint, source_dc = source_dc.unwrap_or("all"), "Starting rebuild");
@@ -717,10 +780,14 @@ impl TopologyCoordinator {
         let mut plan = StreamPlanDescriptor::new(TopologyOperation::Rebuild);
 
         for token in &our_tokens {
-            let candidates: Vec<Endpoint> = snap.ring.natural_endpoints(*token, 3)
+            let candidates: Vec<Endpoint> = snap
+                .ring
+                .natural_endpoints(*token, 3)
                 .into_iter()
                 .filter(|ep| {
-                    if *ep == local_node.endpoint { return false; }
+                    if *ep == local_node.endpoint {
+                        return false;
+                    }
                     if let Some(dc) = source_dc {
                         if let Some(info) = snap.nodes.get(ep) {
                             return info.datacenter == dc;
@@ -731,7 +798,9 @@ impl TopologyCoordinator {
                 .collect();
 
             if let Some(source) = candidates.first() {
-                let prev = snap.ring.previous_token(*token)
+                let prev = snap
+                    .ring
+                    .previous_token(*token)
                     .unwrap_or(Token::from_raw(i64::MIN));
                 plan.add_request(StreamRangeRequest {
                     source: *source,
@@ -755,10 +824,15 @@ impl TopologyCoordinator {
         {
             let state = self.state.lock();
             match &*state {
-                TopologyState::Streaming { operation: TopologyOperation::Rebuild, .. } => {}
-                other => return Err(TopologyError::InvalidState(
-                    format!("Expected Streaming(Rebuild), got {other}")
-                )),
+                TopologyState::Streaming {
+                    operation: TopologyOperation::Rebuild,
+                    ..
+                } => {}
+                other => {
+                    return Err(TopologyError::InvalidState(format!(
+                        "Expected Streaming(Rebuild), got {other}"
+                    )));
+                }
             }
         }
 
@@ -792,20 +866,22 @@ impl TopologyCoordinator {
         // Java: single-token-per-node only for move
         if local_node.tokens.len() != 1 {
             return Err(TopologyError::InvalidMoveToken(
-                "Move requires exactly one token per node (num_tokens=1)".into()
+                "Move requires exactly one token per node (num_tokens=1)".into(),
             ));
         }
 
         let old_token = local_node.tokens[0];
         if old_token == new_token {
             return Err(TopologyError::InvalidMoveToken(
-                "New token is same as current token".into()
+                "New token is same as current token".into(),
             ));
         }
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::Move };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::Move,
+            };
         }
 
         let epoch = self.advance_epoch();
@@ -822,9 +898,13 @@ impl TopologyCoordinator {
         let mut pending = self.pending_ranges.lock();
 
         // Determine ranges to gain (new ranges not covered by old token).
-        let new_prev = snap.ring.previous_token(new_token)
+        let new_prev = snap
+            .ring
+            .previous_token(new_token)
             .unwrap_or(Token::from_raw(i64::MIN));
-        let old_prev = snap.ring.previous_token(old_token)
+        let old_prev = snap
+            .ring
+            .previous_token(old_token)
             .unwrap_or(Token::from_raw(i64::MIN));
 
         // Simplified: if new token is after old token, we need data from
@@ -836,12 +916,15 @@ impl TopologyCoordinator {
                     destination: local_node.endpoint,
                     ranges: vec![(new_prev, new_token)],
                 });
-                pending.add("*", PendingRange {
-                    range: (new_prev, new_token),
-                    new_owner: local_node.endpoint,
-                    current_owner: source,
-                    operation: TopologyOperation::Move,
-                });
+                pending.add(
+                    "*",
+                    PendingRange {
+                        range: (new_prev, new_token),
+                        new_owner: local_node.endpoint,
+                        current_owner: source,
+                        operation: TopologyOperation::Move,
+                    },
+                );
             }
         }
 
@@ -875,16 +958,23 @@ impl TopologyCoordinator {
         {
             let state = self.state.lock();
             match &*state {
-                TopologyState::Streaming { operation: TopologyOperation::Move, .. } => {}
-                other => return Err(TopologyError::InvalidState(
-                    format!("Expected Streaming(Move), got {other}")
-                )),
+                TopologyState::Streaming {
+                    operation: TopologyOperation::Move,
+                    ..
+                } => {}
+                other => {
+                    return Err(TopologyError::InvalidState(format!(
+                        "Expected Streaming(Move), got {other}"
+                    )));
+                }
             }
         }
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Completing { operation: TopologyOperation::Move };
+            *state = TopologyState::Completing {
+                operation: TopologyOperation::Move,
+            };
         }
 
         local_node.tokens = vec![new_token];
@@ -926,17 +1016,25 @@ impl TopologyCoordinator {
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::Cleanup };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::Cleanup,
+            };
         }
 
         info!(node = %local_node.endpoint, "Starting cleanup");
 
         let snap = self.cluster.snapshot();
-        let our_ranges: Vec<(Token, Token)> = local_node.tokens.iter().map(|t| {
-            let prev = snap.ring.previous_token(*t)
-                .unwrap_or(Token::from_raw(i64::MIN));
-            (prev, *t)
-        }).collect();
+        let our_ranges: Vec<(Token, Token)> = local_node
+            .tokens
+            .iter()
+            .map(|t| {
+                let prev = snap
+                    .ring
+                    .previous_token(*t)
+                    .unwrap_or(Token::from_raw(i64::MIN));
+                (prev, *t)
+            })
+            .collect();
 
         let plan = CleanupPlan {
             keyspaces: keyspaces.unwrap_or_default(),
@@ -958,11 +1056,18 @@ impl TopologyCoordinator {
         {
             let state = self.state.lock();
             match &*state {
-                TopologyState::Streaming { operation: TopologyOperation::Cleanup, .. }
-                | TopologyState::Calculating { operation: TopologyOperation::Cleanup } => {}
-                other => return Err(TopologyError::InvalidState(
-                    format!("Expected Cleanup state, got {other}")
-                )),
+                TopologyState::Streaming {
+                    operation: TopologyOperation::Cleanup,
+                    ..
+                }
+                | TopologyState::Calculating {
+                    operation: TopologyOperation::Cleanup,
+                } => {}
+                other => {
+                    return Err(TopologyError::InvalidState(format!(
+                        "Expected Cleanup state, got {other}"
+                    )));
+                }
             }
         }
 
@@ -986,16 +1091,14 @@ impl TopologyCoordinator {
     ///
     /// This is a local-only operation that scans the data directory for
     /// SSTables not yet loaded into the memtable/compaction pipeline.
-    pub fn refresh(
-        &self,
-        keyspace: &str,
-        table: &str,
-    ) -> Result<(), TopologyError> {
+    pub fn refresh(&self, keyspace: &str, table: &str) -> Result<(), TopologyError> {
         self.check_idle()?;
 
         {
             let mut state = self.state.lock();
-            *state = TopologyState::Calculating { operation: TopologyOperation::Refresh };
+            *state = TopologyState::Calculating {
+                operation: TopologyOperation::Refresh,
+            };
         }
 
         info!(keyspace, table, "Refreshing (loading new SSTables)");
@@ -1051,7 +1154,9 @@ impl TopologyCoordinator {
                 self.pending_ranges.lock().clear_all();
                 Ok(())
             }
-            other => Err(TopologyError::InvalidState(format!("Cannot reset from {other}"))),
+            other => Err(TopologyError::InvalidState(format!(
+                "Cannot reset from {other}"
+            ))),
         }
     }
 
@@ -1123,7 +1228,9 @@ mod tests {
         let (cm, tc) = setup_cluster();
         let mut new_node = node(7004, vec![]);
 
-        let plan = tc.begin_bootstrap(&new_node, vec![Token::from_raw(50)]).unwrap();
+        let plan = tc
+            .begin_bootstrap(&new_node, vec![Token::from_raw(50)])
+            .unwrap();
         assert!(tc.is_operation_in_progress());
         assert!(!plan.is_empty() || plan.requests.is_empty());
         assert_eq!(tc.epoch().0, 1);
@@ -1132,8 +1239,16 @@ mod tests {
         let pending = tc.pending_ranges();
         // May or may not have pending ranges depending on ring state.
 
-        tc.finish_bootstrap(&mut new_node, vec![Token::from_raw(50)]).unwrap();
-        assert!(matches!(tc.state(), TopologyState::Done { operation: TopologyOperation::Bootstrap, success: true, .. }));
+        tc.finish_bootstrap(&mut new_node, vec![Token::from_raw(50)])
+            .unwrap();
+        assert!(matches!(
+            tc.state(),
+            TopologyState::Done {
+                operation: TopologyOperation::Bootstrap,
+                success: true,
+                ..
+            }
+        ));
         assert_eq!(cm.snapshot().node_count(), 4);
         assert_eq!(new_node.state, NodeState::Normal);
 
@@ -1211,7 +1326,14 @@ mod tests {
         let plan = tc.begin_rebuild(&n1, Some("dc1")).unwrap();
         assert_eq!(plan.operation, TopologyOperation::Rebuild);
         tc.finish_rebuild().unwrap();
-        assert!(matches!(tc.state(), TopologyState::Done { operation: TopologyOperation::Rebuild, success: true, .. }));
+        assert!(matches!(
+            tc.state(),
+            TopologyState::Done {
+                operation: TopologyOperation::Rebuild,
+                success: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1226,7 +1348,14 @@ mod tests {
 
         tc.finish_move(&mut n, Token::from_raw(550)).unwrap();
         assert_eq!(n.tokens, vec![Token::from_raw(550)]);
-        assert!(matches!(tc.state(), TopologyState::Done { operation: TopologyOperation::Move, success: true, .. }));
+        assert!(matches!(
+            tc.state(),
+            TopologyState::Done {
+                operation: TopologyOperation::Move,
+                success: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1256,14 +1385,28 @@ mod tests {
         assert!(!plan.owned_ranges.is_empty());
 
         tc.finish_cleanup().unwrap();
-        assert!(matches!(tc.state(), TopologyState::Done { operation: TopologyOperation::Cleanup, success: true, .. }));
+        assert!(matches!(
+            tc.state(),
+            TopologyState::Done {
+                operation: TopologyOperation::Cleanup,
+                success: true,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn refresh_happy_path() {
         let (_cm, tc) = setup_cluster();
         tc.refresh("my_ks", "my_table").unwrap();
-        assert!(matches!(tc.state(), TopologyState::Done { operation: TopologyOperation::Refresh, success: true, .. }));
+        assert!(matches!(
+            tc.state(),
+            TopologyState::Done {
+                operation: TopologyOperation::Refresh,
+                success: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1358,18 +1501,24 @@ mod tests {
         assert!(pr.is_empty());
         assert_eq!(pr.total_count(), 0);
 
-        pr.add("ks1", PendingRange {
-            range: (Token::from_raw(0), Token::from_raw(100)),
-            new_owner: ep(7002),
-            current_owner: ep(7001),
-            operation: TopologyOperation::Bootstrap,
-        });
-        pr.add("ks1", PendingRange {
-            range: (Token::from_raw(100), Token::from_raw(200)),
-            new_owner: ep(7002),
-            current_owner: ep(7003),
-            operation: TopologyOperation::Bootstrap,
-        });
+        pr.add(
+            "ks1",
+            PendingRange {
+                range: (Token::from_raw(0), Token::from_raw(100)),
+                new_owner: ep(7002),
+                current_owner: ep(7001),
+                operation: TopologyOperation::Bootstrap,
+            },
+        );
+        pr.add(
+            "ks1",
+            PendingRange {
+                range: (Token::from_raw(100), Token::from_raw(200)),
+                new_owner: ep(7002),
+                current_owner: ep(7003),
+                operation: TopologyOperation::Bootstrap,
+            },
+        );
 
         assert!(!pr.is_empty());
         assert_eq!(pr.total_count(), 2);
@@ -1404,6 +1553,9 @@ mod tests {
 
         let n = node(7001, vec![-100, 0]);
         tc.begin_bootstrap(&n, vec![Token::from_raw(500)]).unwrap();
-        assert_eq!(tc.interrupted_operation(), Some(TopologyOperation::Bootstrap));
+        assert_eq!(
+            tc.interrupted_operation(),
+            Some(TopologyOperation::Bootstrap)
+        );
     }
 }

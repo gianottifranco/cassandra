@@ -113,7 +113,10 @@ impl VersionNegotiation {
         }
         let version = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         let min_version = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        Some(Self { version, min_version })
+        Some(Self {
+            version,
+            min_version,
+        })
     }
 }
 
@@ -435,16 +438,14 @@ mod tests {
 
     #[test]
     fn message_flags_cross_dc() {
-        let msg = Message::request(Verb::Mutation, 1, Vec::new())
-            .with_cross_dc();
+        let msg = Message::request(Verb::Mutation, 1, Vec::new()).with_cross_dc();
         assert!(msg.is_cross_dc());
         assert!(!msg.is_compressed());
     }
 
     #[test]
     fn message_flags_compressed() {
-        let msg = Message::request(Verb::Mutation, 1, Vec::new())
-            .with_compressed();
+        let msg = Message::request(Verb::Mutation, 1, Vec::new()).with_compressed();
         assert!(msg.is_compressed());
         assert!(!msg.is_cross_dc());
     }
@@ -464,15 +465,24 @@ mod tests {
     #[test]
     fn version_negotiation_compatible() {
         let local = VersionNegotiation::current();
-        let remote = VersionNegotiation { version: 13, min_version: 12 };
+        let remote = VersionNegotiation {
+            version: 13,
+            min_version: 12,
+        };
         let agreed = local.negotiate(&remote);
         assert_eq!(agreed, Some(13)); // min of 14 and 13
     }
 
     #[test]
     fn version_negotiation_incompatible() {
-        let local = VersionNegotiation { version: 14, min_version: 13 };
-        let remote = VersionNegotiation { version: 11, min_version: 10 };
+        let local = VersionNegotiation {
+            version: 14,
+            min_version: 13,
+        };
+        let remote = VersionNegotiation {
+            version: 11,
+            min_version: 10,
+        };
         // agreed = min(14, 11) = 11, but local min = 13 → incompatible
         assert!(local.negotiate(&remote).is_none());
     }

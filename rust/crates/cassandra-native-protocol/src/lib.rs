@@ -35,15 +35,15 @@
 //! 7. **auth** – authenticator trait and implementations
 //! 8. **error_codes** – CassandraError → protocol error mapping
 
-pub mod types;
+pub mod auth;
+pub mod connection;
+pub mod error_codes;
+pub mod event_dispatcher;
 pub mod frame;
 pub mod message;
 pub mod request;
 pub mod response;
-pub mod error_codes;
-pub mod auth;
-pub mod connection;
-pub mod event_dispatcher;
+pub mod types;
 
 #[cfg(any(feature = "compression-lz4", feature = "compression-snappy"))]
 pub mod compress;

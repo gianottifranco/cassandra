@@ -42,7 +42,9 @@ pub const MAX_TTL: i32 = 20 * 365 * 24 * 60 * 60; // ~630,720,000
 ///
 /// A cell with a TTL will expire after `ttl` seconds from its write timestamp.
 /// `Ttl(0)` means "no TTL" (the cell lives forever unless explicitly deleted).
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct Ttl(pub i32);
 
 impl Ttl {
@@ -103,7 +105,9 @@ impl fmt::Display for Ttl {
 /// ## Java Oracle
 ///
 /// - `org.apache.cassandra.db.DeletionTime.localDeletionTime`
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct LocalDeletionTime(pub i32);
 
 impl LocalDeletionTime {

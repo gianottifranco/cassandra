@@ -128,7 +128,10 @@ impl NodeState {
 
     /// Returns `true` if the node is in a transitional state.
     pub fn is_transitioning(&self) -> bool {
-        matches!(self, Self::Joining | Self::Leaving | Self::Moving | Self::Replacing)
+        matches!(
+            self,
+            Self::Joining | Self::Leaving | Self::Moving | Self::Replacing
+        )
     }
 }
 

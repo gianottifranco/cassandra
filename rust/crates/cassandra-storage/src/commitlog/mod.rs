@@ -45,7 +45,9 @@ use segment::{CorruptionPolicy, Segment, SegmentFlags};
 pub enum CommitLogError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    #[error("CRC mismatch at segment {segment_id} offset {offset}: expected {expected:#010x}, got {actual:#010x}")]
+    #[error(
+        "CRC mismatch at segment {segment_id} offset {offset}: expected {expected:#010x}, got {actual:#010x}"
+    )]
     CrcMismatch {
         segment_id: u64,
         offset: u64,
@@ -75,7 +77,9 @@ pub enum SyncPolicy {
 
 impl Default for SyncPolicy {
     fn default() -> Self {
-        SyncPolicy::Periodic { interval_ms: 10_000 }
+        SyncPolicy::Periodic {
+            interval_ms: 10_000,
+        }
     }
 }
 
@@ -366,7 +370,9 @@ impl CommitLog {
                 let new_seg = self.create_or_recycle_segment(new_id)?;
                 *seg = new_seg;
 
-                self.metrics.segments_rotated.fetch_add(1, Ordering::Relaxed);
+                self.metrics
+                    .segments_rotated
+                    .fetch_add(1, Ordering::Relaxed);
                 debug!(old_id, new_id, "Segment rotated");
             }
 
@@ -438,19 +444,17 @@ impl CommitLog {
                     let entries = seg.read_entries_with_policy(policy);
                     for entry_result in entries {
                         match entry_result {
-                            Ok(payload) => {
-                                match serde_json::from_slice::<Mutation>(&payload) {
-                                    Ok(mutation) => result.mutations.push(mutation),
-                                    Err(e) => {
-                                        warn!(
-                                            segment_id = seg_id,
-                                            error = %e,
-                                            "Failed to deserialize mutation, skipping"
-                                        );
-                                        result.corrupt_entries += 1;
-                                    }
+                            Ok(payload) => match serde_json::from_slice::<Mutation>(&payload) {
+                                Ok(mutation) => result.mutations.push(mutation),
+                                Err(e) => {
+                                    warn!(
+                                        segment_id = seg_id,
+                                        error = %e,
+                                        "Failed to deserialize mutation, skipping"
+                                    );
+                                    result.corrupt_entries += 1;
                                 }
-                            }
+                            },
                             Err(e) => {
                                 warn!(
                                     segment_id = seg_id,
@@ -576,10 +580,7 @@ impl CommitLog {
                 .replace("%name", &name);
             debug!(cmd = %cmd, "Running archive command");
             // Fire and forget — in production this would be async
-            if let Err(e) = std::process::Command::new("sh")
-                .args(["-c", &cmd])
-                .status()
-            {
+            if let Err(e) = std::process::Command::new("sh").args(["-c", &cmd]).status() {
                 warn!(error = %e, "Archive command failed");
             }
         }
@@ -882,10 +883,7 @@ mod tests {
 
         // Archived segments should exist
         if archive_dir.exists() {
-            let archived: Vec<_> = fs::read_dir(&archive_dir)
-                .unwrap()
-                .flatten()
-                .collect();
+            let archived: Vec<_> = fs::read_dir(&archive_dir).unwrap().flatten().collect();
             assert!(!archived.is_empty(), "Expected archived segments");
         }
     }

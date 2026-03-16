@@ -32,19 +32,19 @@
 //! - [`metrics`] — atomic counters for streaming progress
 //! - [`snapshot`] — snapshot reference management for outgoing transfers
 
-pub mod session;
-pub mod plan;
-pub mod transfer;
 pub mod manager;
 pub mod metrics;
+pub mod plan;
+pub mod session;
 pub mod snapshot;
+pub mod transfer;
 
-pub use session::{StreamSession, StreamSessionState, StreamSessionId};
-pub use plan::{StreamPlan, StreamRequest, StreamOperation};
-pub use transfer::{
-    StreamTransfer, TransferState, ChunkChecksum, ChecksumAlgorithm,
-    StreamRateLimiter, StreamRetryPolicy, DataChunk,
-};
 pub use manager::StreamManager;
 pub use metrics::StreamingMetrics;
-pub use snapshot::{SnapshotTransferRef, SnapshotManager};
+pub use plan::{StreamOperation, StreamPlan, StreamRequest};
+pub use session::{StreamSession, StreamSessionId, StreamSessionState};
+pub use snapshot::{SnapshotManager, SnapshotTransferRef};
+pub use transfer::{
+    ChecksumAlgorithm, ChunkChecksum, DataChunk, StreamRateLimiter, StreamRetryPolicy,
+    StreamTransfer, TransferState,
+};

@@ -37,9 +37,9 @@ pub mod sai;
 #[cfg(feature = "sasi")]
 pub mod sasi;
 
-use std::fmt;
-use serde::{Deserialize, Serialize};
 use parking_lot::RwLock;
+use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// Index type classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -101,7 +101,11 @@ pub trait SecondaryIndex: Send + Sync + fmt::Debug {
     ) -> Result<Vec<IndexEntry>, IndexError>;
 
     /// Perform a vector kNN search.
-    fn search_vector(&self, _vector: &[u8], _top_k: usize) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
+    fn search_vector(
+        &self,
+        _vector: &[u8],
+        _top_k: usize,
+    ) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
         Err(IndexError::ReadFailed("Vector search not supported".into()))
     }
 
@@ -112,7 +116,10 @@ pub trait SecondaryIndex: Send + Sync + fmt::Debug {
 
     /// Add a pre-built SAI segment to the index.
     /// Default implementation is no-op, overridden by `SaiIndex`.
-    fn add_sai_segment(&self, _segment: crate::index::sai::builder::SaiSegment) -> Result<(), IndexError> {
+    fn add_sai_segment(
+        &self,
+        _segment: crate::index::sai::builder::SaiSegment,
+    ) -> Result<(), IndexError> {
         Ok(())
     }
 }
@@ -194,7 +201,12 @@ impl IndexManager {
     }
 
     /// Search an index by name using a vector kNN query.
-    pub fn search_vector(&self, index_name: &str, vector: &[u8], top_k: usize) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
+    pub fn search_vector(
+        &self,
+        index_name: &str,
+        vector: &[u8],
+        top_k: usize,
+    ) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
         let indexes = self.indexes.read();
         for idx in indexes.iter() {
             if idx.definition().name == index_name {
@@ -205,10 +217,15 @@ impl IndexManager {
     }
 
     /// Forward a newly built SAI segment to the corresponding index.
-    pub fn add_sai_segment(&self, segment: crate::index::sai::builder::SaiSegment) -> Result<(), IndexError> {
+    pub fn add_sai_segment(
+        &self,
+        segment: crate::index::sai::builder::SaiSegment,
+    ) -> Result<(), IndexError> {
         let indexes = self.indexes.read();
         for idx in indexes.iter() {
-            if idx.definition().column == segment.column && idx.definition().name == segment.index_name {
+            if idx.definition().column == segment.column
+                && idx.definition().name == segment.index_name
+            {
                 idx.add_sai_segment(segment.clone())?;
             }
         }
@@ -240,7 +257,9 @@ impl IndexManager {
 
         let mut builders: Vec<_> = targets
             .iter()
-            .map(|(name, col)| crate::index::sai::builder::SaiSegmentBuilder::new(generation, name, col))
+            .map(|(name, col)| {
+                crate::index::sai::builder::SaiSegmentBuilder::new(generation, name, col)
+            })
             .collect();
 
         // Feed rows
@@ -336,10 +355,10 @@ mod tests {
             keyspace: "ks".into(),
             table: "tbl".into(),
         };
-        
+
         let sai_index = crate::index::sai::SaiIndex::new(def);
         mgr.register(Box::new(sai_index));
-        
+
         let row = crate::memtable::partition::Row {
             clustering_key: b"ck".to_vec(),
             cells: vec![crate::memtable::partition::Cell {
@@ -353,12 +372,12 @@ mod tests {
             is_tombstone: false,
             local_deletion_time: None,
         };
-        
+
         let mut pd = crate::memtable::partition::PartitionData::new();
         pd.apply_row(row);
-        
+
         mgr.build_sai_segments(1, &[(b"pk".to_vec(), pd)]).unwrap();
-        
+
         let results = mgr.search("test_idx", b"val1").unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].partition_key, b"pk");

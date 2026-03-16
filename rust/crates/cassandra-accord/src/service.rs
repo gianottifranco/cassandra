@@ -1,6 +1,6 @@
 // Licensed under Apache License, Version 2.0.
 
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 /// A globally unique transaction identifier used by Accord.
@@ -65,10 +65,10 @@ impl AccordService {
         }
 
         warn!("Accord execute_transaction is a stub and not fully implemented.");
-        
+
         // Simulating some async delay for Accord coordination
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        
+
         Ok(())
     }
 }

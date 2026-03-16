@@ -234,7 +234,10 @@ impl CqlType {
 
     /// Returns `true` if this is a collection type (list, set, map).
     pub fn is_collection(&self) -> bool {
-        matches!(self, CqlType::List(..) | CqlType::Set(..) | CqlType::Map(..))
+        matches!(
+            self,
+            CqlType::List(..) | CqlType::Set(..) | CqlType::Map(..)
+        )
     }
 
     /// Returns `true` for multi-cell (non-frozen) complex types.
@@ -272,14 +275,15 @@ impl CqlType {
             CqlType::Tinyint => Some(1),
             CqlType::Smallint => Some(2),
             CqlType::Int | CqlType::Float | CqlType::Date => Some(4),
-            CqlType::Bigint | CqlType::Double | CqlType::Timestamp
-            | CqlType::Counter | CqlType::Time => Some(8),
+            CqlType::Bigint
+            | CqlType::Double
+            | CqlType::Timestamp
+            | CqlType::Counter
+            | CqlType::Time => Some(8),
             CqlType::Uuid | CqlType::Timeuuid => Some(16),
             CqlType::Boolean => Some(1),
             CqlType::Empty => Some(0),
-            CqlType::Vector(inner, dims) => {
-                inner.fixed_size().map(|s| s * (*dims as usize))
-            }
+            CqlType::Vector(inner, dims) => inner.fixed_size().map(|s| s * (*dims as usize)),
             _ => None,
         }
     }
@@ -346,21 +350,33 @@ mod tests {
         let list = CqlType::List(Box::new(CqlType::Int), false);
         assert_eq!(list.cql_name(), "list<int>");
 
-        let frozen_map = CqlType::Map(
-            Box::new(CqlType::Varchar),
-            Box::new(CqlType::Int),
-            true,
-        );
+        let frozen_map = CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), true);
         assert_eq!(frozen_map.cql_name(), "frozen<map<text, int>>");
     }
 
     #[test]
     fn from_cql_name_round_trip() {
         let names = &[
-            "ascii", "bigint", "blob", "boolean", "counter", "decimal",
-            "double", "float", "int", "timestamp", "uuid", "text",
-            "varint", "timeuuid", "inet", "date", "time", "smallint",
-            "tinyint", "duration",
+            "ascii",
+            "bigint",
+            "blob",
+            "boolean",
+            "counter",
+            "decimal",
+            "double",
+            "float",
+            "int",
+            "timestamp",
+            "uuid",
+            "text",
+            "varint",
+            "timeuuid",
+            "inet",
+            "date",
+            "time",
+            "smallint",
+            "tinyint",
+            "duration",
         ];
         for name in names {
             let ty = CqlType::from_cql_name(name).unwrap_or_else(|| panic!("missing: {}", name));
@@ -382,7 +398,9 @@ mod tests {
     fn is_collection() {
         assert!(CqlType::List(Box::new(CqlType::Int), false).is_collection());
         assert!(CqlType::Set(Box::new(CqlType::Int), false).is_collection());
-        assert!(CqlType::Map(Box::new(CqlType::Int), Box::new(CqlType::Varchar), false).is_collection());
+        assert!(
+            CqlType::Map(Box::new(CqlType::Int), Box::new(CqlType::Varchar), false).is_collection()
+        );
         assert!(!CqlType::Int.is_collection());
     }
 

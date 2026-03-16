@@ -43,8 +43,8 @@
 
 mod sstable_tools;
 
-use clap::{Parser, Subcommand};
 use cassandra_common::version::version_string;
+use clap::{Parser, Subcommand};
 
 /// Cassandra administration and operations CLI — Rust implementation.
 ///
@@ -186,7 +186,6 @@ enum Commands {
     },
 
     // ── Topology operations ─────────────────────────────────────────
-
     /// Decommission this node from the cluster.
     Decommission,
     /// Remove a dead node from the cluster.
@@ -234,9 +233,13 @@ fn main() {
             println!("=======================");
             println!("Status=Up/Down");
             println!("|/ State=Normal/Leaving/Joining/Moving");
-            println!("--  Address    Load       Tokens  Owns  Host ID                               Rack");
+            println!(
+                "--  Address    Load       Tokens  Owns  Host ID                               Rack"
+            );
             // TODO: Fetch from admin API at {base_url}/api/v1/virtual/system_views/local
-            println!("UN  127.0.0.1  ?          ?       ?     ?                                     rack1");
+            println!(
+                "UN  127.0.0.1  ?          ?       ?     ?                                     rack1"
+            );
             println!();
             println!("(connect to admin API at {} for live data)", base_url);
         }
@@ -253,7 +256,9 @@ fn main() {
             println!("Data Center            : datacenter1");
             println!("Rack                   : rack1");
             println!("Exceptions             : 0");
-            println!("Key Cache              : entries 0, size 0 bytes, capacity 0 bytes, hits 0, requests 0");
+            println!(
+                "Key Cache              : entries 0, size 0 bytes, capacity 0 bytes, hits 0, requests 0"
+            );
         }
         Commands::Ring => {
             println!("Address     Rack        Status  State   Load    Owns    Token");
@@ -272,10 +277,11 @@ fn main() {
             println!("\t\t(connect to {} for live data)", base_url);
         }
         Commands::Snapshot { name, keyspaces } => {
-            let snap_name = name.unwrap_or_else(|| {
-                format!("snapshot-{}", chrono_like_timestamp())
-            });
-            println!("Requested snapshot '{}' for keyspaces: {:?}", snap_name, keyspaces);
+            let snap_name = name.unwrap_or_else(|| format!("snapshot-{}", chrono_like_timestamp()));
+            println!(
+                "Requested snapshot '{}' for keyspaces: {:?}",
+                snap_name, keyspaces
+            );
             // TODO: POST to /api/v1/operations/snapshot
             println!("Snapshot directory: data/snapshots/{}", snap_name);
             println!("(stub — implement via admin API)");
@@ -283,7 +289,10 @@ fn main() {
         Commands::Listsnapshots => {
             println!("Snapshot name    Keyspace   Column family   True size   Size on disk");
             // TODO: GET from /api/v1/operations/snapshots
-            println!("(no snapshots found — connect to {} for live data)", base_url);
+            println!(
+                "(no snapshots found — connect to {} for live data)",
+                base_url
+            );
         }
         Commands::Clearsnapshot { name } => {
             match name {
@@ -301,27 +310,46 @@ fn main() {
             // TODO: POST to /api/v1/operations/compact
             println!("(stub — implement via admin API)");
         }
-        Commands::Repair { keyspace, tables, full, incremental, preview } => {
+        Commands::Repair {
+            keyspace,
+            tables,
+            full,
+            incremental,
+            preview,
+        } => {
             let ks = keyspace.unwrap_or_else(|| "system_distributed".to_string());
             let is_full = full || (!incremental && !preview);
-            
-            println!("Starting {}repair on keyspace {}...", if preview { "preview " } else if is_full { "full " } else { "incremental " }, ks);
-            
+
+            println!(
+                "Starting {}repair on keyspace {}...",
+                if preview {
+                    "preview "
+                } else if is_full {
+                    "full "
+                } else {
+                    "incremental "
+                },
+                ks
+            );
+
             let payload = serde_json::json!({
                 "keyspace": ks,
                 "tables": tables,
                 "full": is_full,
                 "preview": preview,
             });
-            
+
             let client = reqwest::blocking::Client::new();
             let url = format!("{}/api/v1/operations/repair", base_url);
-            
+
             match client.post(&url).json(&payload).send() {
                 Ok(resp) => {
                     if resp.status().is_success() {
                         if let Ok(json) = resp.json::<serde_json::Value>() {
-                            println!("Repair started successfully. Session ID: {}", json["repair_id"]);
+                            println!(
+                                "Repair started successfully. Session ID: {}",
+                                json["repair_id"]
+                            );
                         } else {
                             println!("Repair started successfully.");
                         }
@@ -420,8 +448,15 @@ fn main() {
             // TODO: load generation and stress testing
             println!("(stub — implemented in cassandra-tools)");
         }
-        Commands::RebuildIndex { keyspace, table, index_names } => {
-            println!("Rebuilding indexes: {} on {}.{}...", index_names, keyspace, table);
+        Commands::RebuildIndex {
+            keyspace,
+            table,
+            index_names,
+        } => {
+            println!(
+                "Rebuilding indexes: {} on {}.{}...",
+                index_names, keyspace, table
+            );
             for idx_name in index_names.split(',') {
                 let idx_name = idx_name.trim();
                 let payload = serde_json::json!({
@@ -448,7 +483,6 @@ fn main() {
         }
 
         // ── Topology operation commands ──────────────────────────────
-
         Commands::Decommission => {
             println!("Decommissioning node...");
             println!("POST {}/api/v1/topology/decommission", base_url);
@@ -495,7 +529,10 @@ fn main() {
             println!("Small messages  0       0        0          0");
             println!("Gossip messages 0       0        0          0");
             println!();
-            println!("(connect to admin API at {}/api/v1/streaming/sessions for live data)", base_url);
+            println!(
+                "(connect to admin API at {}/api/v1/streaming/sessions for live data)",
+                base_url
+            );
         }
         Commands::Topologystatus => {
             println!("Current topology operation status:");
@@ -503,7 +540,10 @@ fn main() {
             println!("Epoch: 0");
             println!("Pending ranges: 0");
             println!();
-            println!("(connect to admin API at {}/api/v1/topology/status for live data)", base_url);
+            println!(
+                "(connect to admin API at {}/api/v1/topology/status for live data)",
+                base_url
+            );
         }
     }
 }

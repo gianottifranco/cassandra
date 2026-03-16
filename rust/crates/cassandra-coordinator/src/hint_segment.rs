@@ -101,10 +101,7 @@ impl HintSegmentWriter {
     ) -> io::Result<Self> {
         fs::create_dir_all(dir)?;
         let path = dir.join(descriptor.filename());
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
 
         info!(path = %path.display(), target = %descriptor.target_id, "Created hint segment");
 
@@ -123,7 +120,10 @@ impl HintSegmentWriter {
     /// needs rotation (size limit exceeded).
     pub fn append(&mut self, hint: &Hint) -> io::Result<bool> {
         let data = serde_json::to_vec(hint).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, format!("Serialization error: {e}"))
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Serialization error: {e}"),
+            )
         })?;
 
         let entry_size = 4 + 4 + data.len() as u64; // CRC + length + data
@@ -348,7 +348,11 @@ impl HintSegmentManager {
             fs::remove_file(&seg)?;
         }
         if count > 0 {
-            info!(target = target_id, count = count, "Deleted all hint segments for target");
+            info!(
+                target = target_id,
+                count = count,
+                "Deleted all hint segments for target"
+            );
         }
         Ok(count)
     }
@@ -436,8 +440,7 @@ mod tests {
     fn crc_validation_detects_corruption() {
         let dir = tempfile::tempdir().unwrap();
         let desc = HintSegmentDescriptor::new("corrupt-host".to_string());
-        let mut writer =
-            HintSegmentWriter::create(dir.path(), desc.clone(), 1024 * 1024).unwrap();
+        let mut writer = HintSegmentWriter::create(dir.path(), desc.clone(), 1024 * 1024).unwrap();
 
         let h1 = test_hint(10);
         let h2 = test_hint(20);

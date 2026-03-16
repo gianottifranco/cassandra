@@ -37,11 +37,11 @@
 //!
 //! - [ ] Integrate with compaction: rebuild vector index on merge
 
-use std::collections::{BTreeMap, HashSet};
 use parking_lot::RwLock;
+use std::collections::{BTreeMap, HashSet};
 
-use cassandra_types::vector::{VectorValue, SimilarityMetric, compute_similarity};
 use super::posting::RowLocation;
+use cassandra_types::vector::{SimilarityMetric, VectorValue, compute_similarity};
 
 /// A vector stored alongside its row location.
 #[derive(Debug, Clone)]
@@ -110,7 +110,10 @@ impl VectorIndex {
             ));
         }
 
-        let location = RowLocation { partition_key, clustering_key };
+        let location = RowLocation {
+            partition_key,
+            clustering_key,
+        };
         let mut vectors = self.vectors.write();
         let new_id = vectors.len();
 
@@ -128,7 +131,7 @@ impl VectorIndex {
 
         // Search for nearest neighbors to connect to
         let neighbors = self.search_layer(&vectors, &vector, self.ef_construction);
-        
+
         // Take top M neighbors
         let mut top_m = neighbors;
         top_m.truncate(self.m);
@@ -156,11 +159,13 @@ impl VectorIndex {
     /// Remove all vectors for a given row location.
     pub fn delete(&self, partition_key: &[u8], clustering_key: &[u8]) {
         // Deleting from an NSW graph requires rebuilding or tombstoning.
-        // For this MVP, we tombstone by clearing edges and locations, 
+        // For this MVP, we tombstone by clearing edges and locations,
         // but removing nodes shifts indices which breaks edges.
         let mut vectors = self.vectors.write();
         for node in vectors.iter_mut() {
-            if node.location.partition_key == partition_key && node.location.clustering_key == clustering_key {
+            if node.location.partition_key == partition_key
+                && node.location.clustering_key == clustering_key
+            {
                 node.edges.clear();
                 node.location.partition_key.clear();
                 node.location.clustering_key.clear();
@@ -228,14 +233,16 @@ impl VectorIndex {
 
             for &neighbor_id in &vectors[c_id].edges {
                 if visited.insert(neighbor_id) {
-                    let n_score = compute_similarity(&vectors[neighbor_id].vector, query, self.metric);
-                    
-                    let is_better_than_worst = self.is_better(n_score, best_results.last().unwrap().0);
+                    let n_score =
+                        compute_similarity(&vectors[neighbor_id].vector, query, self.metric);
+
+                    let is_better_than_worst =
+                        self.is_better(n_score, best_results.last().unwrap().0);
                     if best_results.len() < ef || is_better_than_worst {
                         // Insert into candidates and best_results, maintaining sort order
                         self.insert_sorted(&mut candidates, (n_score, neighbor_id));
                         self.insert_sorted(&mut best_results, (n_score, neighbor_id));
-                        
+
                         if best_results.len() > ef {
                             best_results.pop(); // Remove worst
                         }
@@ -261,14 +268,17 @@ impl VectorIndex {
 
     /// Number of live indexed vectors.
     pub fn count(&self) -> usize {
-        self.vectors.read().iter().filter(|v| !v.location.partition_key.is_empty()).count()
+        self.vectors
+            .read()
+            .iter()
+            .filter(|v| !v.location.partition_key.is_empty())
+            .count()
     }
 
     /// Clear all indexed vectors.
     pub fn truncate(&self) {
         self.vectors.write().clear();
     }
-
 }
 
 #[cfg(test)]
@@ -286,7 +296,8 @@ mod tests {
             VectorValue::new(vec![1.0, 0.0, 0.0]),
             b"pk1".to_vec(),
             b"".to_vec(),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(idx.count(), 1);
     }
 
@@ -306,10 +317,30 @@ mod tests {
         let idx = make_index();
 
         // Insert 4 vectors
-        idx.insert(VectorValue::new(vec![0.0, 0.0, 0.0]), b"origin".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"x_axis".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![10.0, 10.0, 10.0]), b"far".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![0.5, 0.5, 0.0]), b"near".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![0.0, 0.0, 0.0]),
+            b"origin".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"x_axis".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![10.0, 10.0, 10.0]),
+            b"far".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![0.5, 0.5, 0.0]),
+            b"near".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         // Query near origin — should return origin, then near, then x_axis
         let query = VectorValue::new(vec![0.0, 0.0, 0.0]);
@@ -329,9 +360,24 @@ mod tests {
     fn knn_cosine() {
         let idx = VectorIndex::new(2, SimilarityMetric::Cosine);
 
-        idx.insert(VectorValue::new(vec![1.0, 0.0]), b"east".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![0.0, 1.0]), b"north".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![-1.0, 0.0]), b"west".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0]),
+            b"east".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![0.0, 1.0]),
+            b"north".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![-1.0, 0.0]),
+            b"west".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         // Query: [1, 0] — most similar should be "east" (cos=1.0)
         let results = idx.knn_search(&VectorValue::new(vec![1.0, 0.0]), 2);
@@ -343,8 +389,18 @@ mod tests {
     fn knn_dot_product() {
         let idx = VectorIndex::new(2, SimilarityMetric::DotProduct);
 
-        idx.insert(VectorValue::new(vec![10.0, 0.0]), b"big".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![1.0, 0.0]), b"small".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![10.0, 0.0]),
+            b"big".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0]),
+            b"small".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         let results = idx.knn_search(&VectorValue::new(vec![1.0, 0.0]), 2);
         // Higher dot product first
@@ -361,7 +417,12 @@ mod tests {
     #[test]
     fn knn_k_zero() {
         let idx = make_index();
-        idx.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
         let results = idx.knn_search(&VectorValue::new(vec![1.0, 0.0, 0.0]), 0);
         assert!(results.is_empty());
     }
@@ -369,8 +430,18 @@ mod tests {
     #[test]
     fn delete_removes_vector() {
         let idx = make_index();
-        idx.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk1".to_vec(), b"".to_vec()).unwrap();
-        idx.insert(VectorValue::new(vec![0.0, 1.0, 0.0]), b"pk2".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk1".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![0.0, 1.0, 0.0]),
+            b"pk2".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         idx.delete(b"pk1", b"");
         assert_eq!(idx.count(), 1);
@@ -379,7 +450,12 @@ mod tests {
     #[test]
     fn truncate_clears_all() {
         let idx = make_index();
-        idx.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk1".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk1".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
         idx.truncate();
         assert_eq!(idx.count(), 0);
     }
@@ -387,7 +463,12 @@ mod tests {
     #[test]
     fn knn_k_larger_than_index() {
         let idx = make_index();
-        idx.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk1".to_vec(), b"".to_vec()).unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk1".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         let results = idx.knn_search(&VectorValue::new(vec![0.0, 0.0, 0.0]), 100);
         assert_eq!(results.len(), 1); // Only 1 vector in index

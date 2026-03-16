@@ -43,15 +43,10 @@ impl CidrAuthorizer {
     }
 
     /// Set allowed CIDR ranges for a role.
-    pub fn set_role_cidrs(
-        &self,
-        role: &str,
-        cidrs: Vec<String>,
-    ) -> Result<(), SecurityError> {
+    pub fn set_role_cidrs(&self, role: &str, cidrs: Vec<String>) -> Result<(), SecurityError> {
         let parsed: Result<Vec<IpNet>, _> = cidrs.iter().map(|s| s.parse::<IpNet>()).collect();
-        let parsed = parsed.map_err(|e| {
-            SecurityError::AuthError(format!("invalid CIDR: {}", e))
-        })?;
+        let parsed =
+            parsed.map_err(|e| SecurityError::AuthError(format!("invalid CIDR: {}", e)))?;
         self.role_cidrs.write().insert(role.to_string(), parsed);
         Ok(())
     }
@@ -95,12 +90,7 @@ impl CidrAuthorizer {
         self.role_cidrs
             .read()
             .iter()
-            .map(|(role, nets)| {
-                (
-                    role.clone(),
-                    nets.iter().map(|n| n.to_string()).collect(),
-                )
-            })
+            .map(|(role, nets)| (role.clone(), nets.iter().map(|n| n.to_string()).collect()))
             .collect()
     }
 }
@@ -117,9 +107,11 @@ mod tests {
             .set_role_cidrs("admin", vec!["192.168.1.0/24".into()])
             .unwrap();
 
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), "admin")
-            .is_ok());
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), "admin")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -129,9 +121,11 @@ mod tests {
             .set_role_cidrs("admin", vec!["10.0.0.0/8".into()])
             .unwrap();
 
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), "admin")
-            .is_err());
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), "admin")
+                .is_err()
+        );
     }
 
     #[test]
@@ -141,9 +135,11 @@ mod tests {
             .set_role_cidrs("user", vec!["::1/128".into()])
             .unwrap();
 
-        assert!(authz
-            .check_access(IpAddr::V6(Ipv6Addr::LOCALHOST), "user")
-            .is_ok());
+        assert!(
+            authz
+                .check_access(IpAddr::V6(Ipv6Addr::LOCALHOST), "user")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -153,46 +149,55 @@ mod tests {
             .set_role_cidrs("user", vec!["fe80::/10".into()])
             .unwrap();
 
-        assert!(authz
-            .check_access(IpAddr::V6(Ipv6Addr::LOCALHOST), "user")
-            .is_err());
+        assert!(
+            authz
+                .check_access(IpAddr::V6(Ipv6Addr::LOCALHOST), "user")
+                .is_err()
+        );
     }
 
     #[test]
     fn no_restriction_allows_by_default() {
         let authz = CidrAuthorizer::new(false);
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), "anyone")
-            .is_ok());
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), "anyone")
+                .is_ok()
+        );
     }
 
     #[test]
     fn deny_by_default_when_no_rules() {
         let authz = CidrAuthorizer::new(true);
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), "anyone")
-            .is_err());
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), "anyone")
+                .is_err()
+        );
     }
 
     #[test]
     fn multiple_cidr_ranges() {
         let authz = CidrAuthorizer::new(false);
         authz
-            .set_role_cidrs(
-                "multi",
-                vec!["10.0.0.0/8".into(), "172.16.0.0/12".into()],
-            )
+            .set_role_cidrs("multi", vec!["10.0.0.0/8".into(), "172.16.0.0/12".into()])
             .unwrap();
 
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)), "multi")
-            .is_ok());
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(172, 20, 0, 1)), "multi")
-            .is_ok());
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), "multi")
-            .is_err());
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3)), "multi")
+                .is_ok()
+        );
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(172, 20, 0, 1)), "multi")
+                .is_ok()
+        );
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(192, 168, 0, 1)), "multi")
+                .is_err()
+        );
     }
 
     #[test]
@@ -202,17 +207,21 @@ mod tests {
             .set_role_cidrs("temp", vec!["127.0.0.0/8".into()])
             .unwrap();
         authz.clear_role_cidrs("temp");
-        assert!(authz
-            .check_access(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), "temp")
-            .is_ok());
+        assert!(
+            authz
+                .check_access(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1)), "temp")
+                .is_ok()
+        );
     }
 
     #[test]
     fn invalid_cidr_rejected() {
         let authz = CidrAuthorizer::new(false);
-        assert!(authz
-            .set_role_cidrs("x", vec!["not-a-cidr".into()])
-            .is_err());
+        assert!(
+            authz
+                .set_role_cidrs("x", vec!["not-a-cidr".into()])
+                .is_err()
+        );
     }
 
     #[test]

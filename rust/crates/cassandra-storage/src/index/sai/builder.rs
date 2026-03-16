@@ -60,12 +60,7 @@ impl SaiSegmentBuilder {
     }
 
     /// Add an entry to the builder.
-    pub fn add(
-        &mut self,
-        term: Vec<u8>,
-        partition_key: Vec<u8>,
-        clustering_key: Vec<u8>,
-    ) {
+    pub fn add(&mut self, term: Vec<u8>, partition_key: Vec<u8>, clustering_key: Vec<u8>) {
         let pl = self.terms.entry(term).or_insert_with(PostingList::new);
         pl.add(partition_key, clustering_key);
         self.row_count += 1;

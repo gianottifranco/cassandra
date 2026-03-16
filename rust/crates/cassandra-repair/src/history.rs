@@ -2,15 +2,15 @@
 
 //! Repair history tracking interface.
 //!
-//! Provides an abstraction for recording repair session states and history 
+//! Provides an abstraction for recording repair session states and history
 //! to `system_distributed.repair_history` and `system_distributed.parent_repair_history`.
 
 use uuid::Uuid;
 
 use crate::coordinator::RepairType;
 use crate::session::RepairSessionState;
-use cassandra_common::Token;
 use cassandra_cluster_metadata::Endpoint;
+use cassandra_common::Token;
 
 /// Tracker for repair history events.
 pub trait RepairHistoryTracker: Send + Sync {
@@ -66,7 +66,9 @@ impl RepairHistoryTracker for LoggingRepairHistoryTracker {
     ) {
         tracing::debug!(
             "Parent repair {} started (keyspace: {}, type: {})",
-            repair_id, keyspace, repair_type
+            repair_id,
+            keyspace,
+            repair_type
         );
     }
 
@@ -79,7 +81,11 @@ impl RepairHistoryTracker for LoggingRepairHistoryTracker {
         if let Some(e) = error {
             tracing::warn!("Parent repair {} finished with error: {}", repair_id, e);
         } else {
-            tracing::debug!("Parent repair {} finished successfully on {} ranges", repair_id, successful_ranges.len());
+            tracing::debug!(
+                "Parent repair {} finished successfully on {} ranges",
+                repair_id,
+                successful_ranges.len()
+            );
         }
     }
 
@@ -94,7 +100,11 @@ impl RepairHistoryTracker for LoggingRepairHistoryTracker {
     ) {
         tracing::debug!(
             "Repair session {} (parent: {}) started for {}.{} range {:?}",
-            session_id, parent_id, keyspace, table, range
+            session_id,
+            parent_id,
+            keyspace,
+            table,
+            range
         );
     }
 
@@ -104,6 +114,11 @@ impl RepairHistoryTracker for LoggingRepairHistoryTracker {
         state: RepairSessionState,
         error: Option<String>,
     ) {
-        tracing::debug!("Repair session {} finished with state: {} error: {:?}", session_id, state, error);
+        tracing::debug!(
+            "Repair session {} finished with state: {} error: {:?}",
+            session_id,
+            state,
+            error
+        );
     }
 }

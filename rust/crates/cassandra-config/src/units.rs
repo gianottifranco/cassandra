@@ -6,9 +6,9 @@
 //! - `org.apache.cassandra.config.DataStorageSpec`
 //! - `org.apache.cassandra.config.DurationSpec`
 
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fmt;
 use std::str::FromStr;
-use serde::{Deserialize, Deserializer, Serialize};
 
 /// A data size in bytes, parsed from strings like "128MiB", "1024KiB".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -16,39 +16,67 @@ pub struct DataSize(pub u64);
 
 impl DataSize {
     pub const ZERO: Self = Self(0);
-    pub fn bytes(self) -> u64 { self.0 }
-    pub fn kibibytes(self) -> u64 { self.0 / 1024 }
-    pub fn mebibytes(self) -> u64 { self.0 / (1024 * 1024) }
-    pub fn from_kibibytes(kib: u64) -> Self { Self(kib * 1024) }
-    pub fn from_mebibytes(mib: u64) -> Self { Self(mib * 1024 * 1024) }
-    pub fn from_gibibytes(gib: u64) -> Self { Self(gib * 1024 * 1024 * 1024) }
+    pub fn bytes(self) -> u64 {
+        self.0
+    }
+    pub fn kibibytes(self) -> u64 {
+        self.0 / 1024
+    }
+    pub fn mebibytes(self) -> u64 {
+        self.0 / (1024 * 1024)
+    }
+    pub fn from_kibibytes(kib: u64) -> Self {
+        Self(kib * 1024)
+    }
+    pub fn from_mebibytes(mib: u64) -> Self {
+        Self(mib * 1024 * 1024)
+    }
+    pub fn from_gibibytes(gib: u64) -> Self {
+        Self(gib * 1024 * 1024 * 1024)
+    }
 }
 
 impl FromStr for DataSize {
     type Err = ParseUnitError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        if s.is_empty() { return Err(ParseUnitError(format!("empty data size"))); }
+        if s.is_empty() {
+            return Err(ParseUnitError(format!("empty data size")));
+        }
         // Try suffixed formats
         let lower = s.to_lowercase();
         if let Some(num) = lower.strip_suffix("tib") {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
             return Ok(Self(v * 1024 * 1024 * 1024 * 1024));
         }
         if let Some(num) = lower.strip_suffix("gib") {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
             return Ok(Self::from_gibibytes(v));
         }
         if let Some(num) = lower.strip_suffix("mib") {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
             return Ok(Self::from_mebibytes(v));
         }
         if let Some(num) = lower.strip_suffix("kib") {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
             return Ok(Self::from_kibibytes(v));
         }
         // Plain number = bytes
-        let v: u64 = s.parse().map_err(|_| ParseUnitError(format!("invalid data size: {}", s)))?;
+        let v: u64 = s
+            .parse()
+            .map_err(|_| ParseUnitError(format!("invalid data size: {}", s)))?;
         Ok(Self(v))
     }
 }
@@ -65,11 +93,18 @@ impl<'de> Deserialize<'de> for DataSize {
 
 impl fmt::Display for DataSize {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 == 0 { return write!(f, "0"); }
-        if self.0 % (1024 * 1024 * 1024) == 0 { write!(f, "{}GiB", self.0 / (1024*1024*1024)) }
-        else if self.0 % (1024 * 1024) == 0 { write!(f, "{}MiB", self.0 / (1024*1024)) }
-        else if self.0 % 1024 == 0 { write!(f, "{}KiB", self.0 / 1024) }
-        else { write!(f, "{}B", self.0) }
+        if self.0 == 0 {
+            return write!(f, "0");
+        }
+        if self.0 % (1024 * 1024 * 1024) == 0 {
+            write!(f, "{}GiB", self.0 / (1024 * 1024 * 1024))
+        } else if self.0 % (1024 * 1024) == 0 {
+            write!(f, "{}MiB", self.0 / (1024 * 1024))
+        } else if self.0 % 1024 == 0 {
+            write!(f, "{}KiB", self.0 / 1024)
+        } else {
+            write!(f, "{}B", self.0)
+        }
     }
 }
 
@@ -79,38 +114,66 @@ pub struct Duration(pub u64);
 
 impl Duration {
     pub const ZERO: Self = Self(0);
-    pub fn millis(self) -> u64 { self.0 }
-    pub fn seconds(self) -> u64 { self.0 / 1000 }
-    pub fn from_millis(ms: u64) -> Self { Self(ms) }
-    pub fn from_seconds(s: u64) -> Self { Self(s * 1000) }
-    pub fn from_minutes(m: u64) -> Self { Self(m * 60 * 1000) }
-    pub fn from_hours(h: u64) -> Self { Self(h * 3600 * 1000) }
+    pub fn millis(self) -> u64 {
+        self.0
+    }
+    pub fn seconds(self) -> u64 {
+        self.0 / 1000
+    }
+    pub fn from_millis(ms: u64) -> Self {
+        Self(ms)
+    }
+    pub fn from_seconds(s: u64) -> Self {
+        Self(s * 1000)
+    }
+    pub fn from_minutes(m: u64) -> Self {
+        Self(m * 60 * 1000)
+    }
+    pub fn from_hours(h: u64) -> Self {
+        Self(h * 3600 * 1000)
+    }
 }
 
 impl FromStr for Duration {
     type Err = ParseUnitError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
-        if s.is_empty() { return Err(ParseUnitError("empty duration".into())); }
+        if s.is_empty() {
+            return Err(ParseUnitError("empty duration".into()));
+        }
         let lower = s.to_lowercase();
         if let Some(num) = lower.strip_suffix("ms") {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
             return Ok(Self::from_millis(v));
         }
         if let Some(num) = lower.strip_suffix('h') {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
             return Ok(Self::from_hours(v));
         }
         if let Some(num) = lower.strip_suffix('m') {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
             return Ok(Self::from_minutes(v));
         }
         if let Some(num) = lower.strip_suffix('s') {
-            let v: u64 = num.trim().parse().map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
             return Ok(Self::from_seconds(v));
         }
         // Plain number = milliseconds
-        let v: u64 = s.parse().map_err(|_| ParseUnitError(format!("invalid duration: {}", s)))?;
+        let v: u64 = s
+            .parse()
+            .map_err(|_| ParseUnitError(format!("invalid duration: {}", s)))?;
         Ok(Self(v))
     }
 }
@@ -127,11 +190,17 @@ impl<'de> Deserialize<'de> for Duration {
 
 impl fmt::Display for Duration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0 == 0 { write!(f, "0ms") }
-        else if self.0 % 3_600_000 == 0 { write!(f, "{}h", self.0 / 3_600_000) }
-        else if self.0 % 60_000 == 0 { write!(f, "{}m", self.0 / 60_000) }
-        else if self.0 % 1_000 == 0 { write!(f, "{}s", self.0 / 1_000) }
-        else { write!(f, "{}ms", self.0) }
+        if self.0 == 0 {
+            write!(f, "0ms")
+        } else if self.0 % 3_600_000 == 0 {
+            write!(f, "{}h", self.0 / 3_600_000)
+        } else if self.0 % 60_000 == 0 {
+            write!(f, "{}m", self.0 / 60_000)
+        } else if self.0 % 1_000 == 0 {
+            write!(f, "{}s", self.0 / 1_000)
+        } else {
+            write!(f, "{}ms", self.0)
+        }
     }
 }
 

@@ -64,16 +64,10 @@ pub struct PaxosState {
 #[derive(Debug, thiserror::Error)]
 pub enum PaxosError {
     #[error("Ballot {proposed} rejected: already promised {promised}")]
-    BallotTooOld {
-        proposed: Ballot,
-        promised: Ballot,
-    },
+    BallotTooOld { proposed: Ballot, promised: Ballot },
 
     #[error("Cannot accept ballot {proposed}: promised {promised}")]
-    PromiseViolation {
-        proposed: Ballot,
-        promised: Ballot,
-    },
+    PromiseViolation { proposed: Ballot, promised: Ballot },
 }
 
 /// The response to a Prepare request.
@@ -166,7 +160,11 @@ impl PaxosState {
     /// The proposal is now durable.  Clear in-progress state.
     pub fn commit(&mut self, proposal: Proposal) {
         // Only advance — never go backwards
-        if self.committed.as_ref().is_none_or(|c| proposal.ballot > c.ballot) {
+        if self
+            .committed
+            .as_ref()
+            .is_none_or(|c| proposal.ballot > c.ballot)
+        {
             self.committed = Some(proposal);
         }
         // Clear in-progress accepted state for this round

@@ -21,8 +21,8 @@
 //! Counter batches are routed differently (counter leader logic).
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use parking_lot::RwLock;
@@ -32,9 +32,7 @@ use uuid::Uuid;
 use cassandra_cluster_metadata::{ReplicationStrategy, Snitch};
 
 use crate::consistency::ConsistencyLevel;
-use crate::write::{
-    CoordinatedMutation, WriteCoordinator, WriteError, WriteResult,
-};
+use crate::write::{CoordinatedMutation, WriteCoordinator, WriteError, WriteResult};
 
 // ─── Batch Types ─────────────────────────────────────────────────
 
@@ -308,10 +306,7 @@ impl Default for BatchCoordinatorMetrics {
 }
 
 impl BatchCoordinator {
-    pub fn new(
-        write_coordinator: Arc<WriteCoordinator>,
-        batchlog: Arc<BatchLogManager>,
-    ) -> Self {
+    pub fn new(write_coordinator: Arc<WriteCoordinator>, batchlog: Arc<BatchLogManager>) -> Self {
         Self {
             write_coordinator,
             batchlog,
@@ -363,7 +358,10 @@ impl BatchCoordinator {
         // 4. Execute all mutations
         let mut results = Vec::with_capacity(mutations.len());
         for mutation in &mutations {
-            match self.write_coordinator.coordinate_write(mutation, cl, strategy, snitch) {
+            match self
+                .write_coordinator
+                .coordinate_write(mutation, cl, strategy, snitch)
+            {
                 Ok(result) => results.push(result),
                 Err(e) => {
                     self.metrics.batches_failed.fetch_add(1, Ordering::Relaxed);
@@ -386,7 +384,9 @@ impl BatchCoordinator {
             self.batchlog.remove(&id);
         }
 
-        self.metrics.batches_executed.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .batches_executed
+            .fetch_add(1, Ordering::Relaxed);
 
         Ok(results)
     }
@@ -477,10 +477,7 @@ impl BatchCoordinator {
     ) -> HashMap<Vec<u8>, Vec<&'a CoordinatedMutation>> {
         let mut groups: HashMap<Vec<u8>, Vec<&CoordinatedMutation>> = HashMap::new();
         for m in mutations {
-            groups
-                .entry(m.partition_key.clone())
-                .or_default()
-                .push(m);
+            groups.entry(m.partition_key.clone()).or_default().push(m);
         }
         groups
     }
@@ -524,14 +521,20 @@ impl BatchCoordinator {
                         "Failed to replay batch mutation"
                     );
                     all_ok = false;
-                    self.batchlog.metrics.replay_failures.fetch_add(1, Ordering::Relaxed);
+                    self.batchlog
+                        .metrics
+                        .replay_failures
+                        .fetch_add(1, Ordering::Relaxed);
                 }
             }
 
             if all_ok {
                 self.batchlog.remove(&entry.id);
                 replayed += 1;
-                self.batchlog.metrics.batches_replayed.fetch_add(1, Ordering::Relaxed);
+                self.batchlog
+                    .metrics
+                    .batches_replayed
+                    .fetch_add(1, Ordering::Relaxed);
             }
         }
 

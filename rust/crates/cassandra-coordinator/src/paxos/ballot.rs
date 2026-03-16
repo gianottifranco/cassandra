@@ -112,7 +112,11 @@ impl PartialOrd for Ballot {
 
 impl fmt::Display for Ballot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Ballot(ts={}, node={})", self.timestamp_micros, self.node_id)
+        write!(
+            f,
+            "Ballot(ts={}, node={})",
+            self.timestamp_micros, self.node_id
+        )
     }
 }
 

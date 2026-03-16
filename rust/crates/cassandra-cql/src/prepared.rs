@@ -6,11 +6,11 @@
 //! - `org.apache.cassandra.cql3.QueryProcessor`
 //! - `org.apache.cassandra.cql3.statements.BatchStatement`
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use dashmap::DashMap;
-use md5::{Md5, Digest};
 use crate::ast::Statement;
 use crate::parser;
+use dashmap::DashMap;
+use md5::{Digest, Md5};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A prepared statement ready for execution.
 #[derive(Debug, Clone)]
@@ -67,11 +67,7 @@ impl PreparedCache {
     }
 
     /// Prepare a statement: parse, cache, and return the PreparedStatement.
-    pub fn prepare(
-        &self,
-        query: &str,
-        schema_version: u64,
-    ) -> Result<PreparedStatement, String> {
+    pub fn prepare(&self, query: &str, schema_version: u64) -> Result<PreparedStatement, String> {
         let id = Self::compute_id(query);
 
         // Check if already cached with current schema version.
@@ -286,7 +282,9 @@ mod tests {
     fn bind_marker_count() {
         let cache = PreparedCache::new();
 
-        let p = cache.prepare("INSERT INTO t (a, b, c) VALUES (?, ?, ?)", 1).unwrap();
+        let p = cache
+            .prepare("INSERT INTO t (a, b, c) VALUES (?, ?, ?)", 1)
+            .unwrap();
         assert_eq!(p.bind_count, 3);
 
         let p = cache.prepare("SELECT * FROM t", 1).unwrap();

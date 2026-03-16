@@ -132,13 +132,19 @@ impl FailureDetector {
 
     /// Report a heartbeat from an endpoint.
     pub fn report(&mut self, endpoint: Endpoint) {
-        let window = self.windows.entry(endpoint).or_insert_with(ArrivalWindow::new);
+        let window = self
+            .windows
+            .entry(endpoint)
+            .or_insert_with(ArrivalWindow::new);
         window.add(Instant::now());
     }
 
     /// Report a heartbeat at a specific time (for testing).
     pub fn report_at(&mut self, endpoint: Endpoint, at: Instant) {
-        let window = self.windows.entry(endpoint).or_insert_with(ArrivalWindow::new);
+        let window = self
+            .windows
+            .entry(endpoint)
+            .or_insert_with(ArrivalWindow::new);
         window.add(at);
     }
 
@@ -154,10 +160,7 @@ impl FailureDetector {
 
     /// Get phi at a specific time (for testing).
     pub fn phi_at(&self, endpoint: &Endpoint, at: Instant) -> f64 {
-        self.windows
-            .get(endpoint)
-            .map(|w| w.phi(at))
-            .unwrap_or(0.0)
+        self.windows.get(endpoint).map(|w| w.phi(at)).unwrap_or(0.0)
     }
 
     /// Returns `true` if the endpoint is considered alive.

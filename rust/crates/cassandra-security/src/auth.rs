@@ -11,8 +11,8 @@ use std::net::IpAddr;
 
 use serde::{Deserialize, Serialize};
 
-use crate::roles::RoleManager;
 use crate::SecurityError;
+use crate::roles::RoleManager;
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -108,10 +108,12 @@ impl<R: RoleManager + Send + Sync> Authenticator for PasswordAuthenticator<R> {
         let role = self
             .role_manager
             .get_role(&credentials.username)
-            .ok_or_else(|| SecurityError::AuthError(format!(
-                "provided username '{}' and/or password are incorrect",
-                credentials.username
-            )))?;
+            .ok_or_else(|| {
+                SecurityError::AuthError(format!(
+                    "provided username '{}' and/or password are incorrect",
+                    credentials.username
+                ))
+            })?;
 
         if !role.can_login {
             return Err(SecurityError::AuthError(format!(
@@ -120,9 +122,10 @@ impl<R: RoleManager + Send + Sync> Authenticator for PasswordAuthenticator<R> {
             )));
         }
 
-        let stored_hash = role.hashed_password.as_ref().ok_or_else(|| {
-            SecurityError::AuthError("no password set for role".to_string())
-        })?;
+        let stored_hash = role
+            .hashed_password
+            .as_ref()
+            .ok_or_else(|| SecurityError::AuthError("no password set for role".to_string()))?;
 
         let valid = bcrypt::verify(&credentials.password, stored_hash)
             .map_err(|e| SecurityError::AuthError(format!("password verification error: {}", e)))?;

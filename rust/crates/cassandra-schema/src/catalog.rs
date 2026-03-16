@@ -10,11 +10,11 @@
 //! The catalog holds an `Arc<SchemaSnapshot>`. Reads clone the Arc (lock-free).
 //! Mutations produce a new `SchemaCatalog` with a new `Arc<SchemaSnapshot>`.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 use crate::keyspace::KeyspaceMetadata;
 use crate::table::TableMetadata;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// An immutable point-in-time snapshot of the schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -28,7 +28,10 @@ pub struct SchemaSnapshot {
 impl SchemaSnapshot {
     /// Create an empty snapshot.
     pub fn empty() -> Self {
-        Self { keyspaces: BTreeMap::new(), version: 0 }
+        Self {
+            keyspaces: BTreeMap::new(),
+            version: 0,
+        }
     }
 
     /// Look up a keyspace.
@@ -42,7 +45,9 @@ impl SchemaSnapshot {
     }
 
     /// Total number of keyspaces.
-    pub fn keyspace_count(&self) -> usize { self.keyspaces.len() }
+    pub fn keyspace_count(&self) -> usize {
+        self.keyspaces.len()
+    }
 
     /// Total number of tables across all keyspaces.
     pub fn table_count(&self) -> usize {
@@ -62,12 +67,16 @@ pub struct SchemaCatalog {
 impl SchemaCatalog {
     /// Create an empty catalog.
     pub fn new() -> Self {
-        Self { inner: Arc::new(SchemaSnapshot::empty()) }
+        Self {
+            inner: Arc::new(SchemaSnapshot::empty()),
+        }
     }
 
     /// Create a catalog from an existing snapshot.
     pub fn from_snapshot(snapshot: SchemaSnapshot) -> Self {
-        Self { inner: Arc::new(snapshot) }
+        Self {
+            inner: Arc::new(snapshot),
+        }
     }
 
     /// Get an immutable snapshot of the current schema.
@@ -81,7 +90,9 @@ impl SchemaCatalog {
         let mut snapshot = (*self.inner).clone();
         snapshot.keyspaces.insert(ks.name.clone(), ks);
         snapshot.version += 1;
-        Self { inner: Arc::new(snapshot) }
+        Self {
+            inner: Arc::new(snapshot),
+        }
     }
 
     /// Remove a keyspace and return a new catalog.
@@ -89,23 +100,29 @@ impl SchemaCatalog {
         let mut snapshot = (*self.inner).clone();
         snapshot.keyspaces.remove(name);
         snapshot.version += 1;
-        Self { inner: Arc::new(snapshot) }
+        Self {
+            inner: Arc::new(snapshot),
+        }
     }
 
     /// Current schema version.
-    pub fn version(&self) -> u64 { self.inner.version }
+    pub fn version(&self) -> u64 {
+        self.inner.version
+    }
 }
 
 impl Default for SchemaCatalog {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::column::ColumnMetadata;
     use crate::keyspace::{KeyspaceMetadata, KeyspaceParams};
     use crate::table::TableMetadataBuilder;
-    use crate::column::ColumnMetadata;
     use cassandra_types::CqlType;
 
     #[test]
@@ -154,8 +171,7 @@ mod tests {
         let table = TableMetadataBuilder::new("ks", "users")
             .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Uuid))
             .build();
-        let ks = KeyspaceMetadata::new("ks", KeyspaceParams::default())
-            .with_table(table);
+        let ks = KeyspaceMetadata::new("ks", KeyspaceParams::default()).with_table(table);
         let cat = SchemaCatalog::new().with_keyspace(ks);
         assert!(cat.snapshot().table("ks", "users").is_some());
         assert!(cat.snapshot().table("ks", "nonexistent").is_none());

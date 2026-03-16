@@ -5,9 +5,9 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.db.marshal.AbstractType.compare(ByteBuffer, ByteBuffer)`
 
-use std::cmp::Ordering;
-use byteorder::{BigEndian, ByteOrder};
 use crate::native::CqlType;
+use byteorder::{BigEndian, ByteOrder};
+use std::cmp::Ordering;
 
 /// Compare two serialized CQL values of the given type.
 ///
@@ -114,9 +114,15 @@ fn timeuuid_timestamp(uuid: &[u8]) -> u64 {
 
 /// Variable-length signed integer comparison.
 fn cmp_varint(left: &[u8], right: &[u8]) -> Ordering {
-    if left.is_empty() && right.is_empty() { return Ordering::Equal; }
-    if left.is_empty() { return Ordering::Less; }
-    if right.is_empty() { return Ordering::Greater; }
+    if left.is_empty() && right.is_empty() {
+        return Ordering::Equal;
+    }
+    if left.is_empty() {
+        return Ordering::Less;
+    }
+    if right.is_empty() {
+        return Ordering::Greater;
+    }
 
     let sign_a = (left[0] & 0x80) != 0; // negative
     let sign_b = (right[0] & 0x80) != 0;
@@ -160,8 +166,14 @@ mod tests {
 
     #[test]
     fn text_comparison() {
-        assert_eq!(compare_bytes(&CqlType::Varchar, b"abc", b"abd"), Ordering::Less);
-        assert_eq!(compare_bytes(&CqlType::Varchar, b"abc", b"abc"), Ordering::Equal);
+        assert_eq!(
+            compare_bytes(&CqlType::Varchar, b"abc", b"abd"),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_bytes(&CqlType::Varchar, b"abc", b"abc"),
+            Ordering::Equal
+        );
     }
 
     #[test]
@@ -169,7 +181,10 @@ mod tests {
         let nan = f32::NAN.to_be_bytes();
         let one = 1.0f32.to_be_bytes();
         // NaN should be greater than all values (matching Java)
-        assert_eq!(compare_bytes(&CqlType::Float, &nan, &one), Ordering::Greater);
+        assert_eq!(
+            compare_bytes(&CqlType::Float, &nan, &one),
+            Ordering::Greater
+        );
     }
 
     #[test]
