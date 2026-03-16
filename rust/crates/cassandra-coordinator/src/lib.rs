@@ -40,11 +40,14 @@ pub mod batch;
 pub mod consensus;
 pub mod consistency;
 pub mod counter;
+pub mod hint_delivery;
 pub mod hint_segment;
 pub mod hints;
 pub mod paxos;
 pub mod read;
+pub mod storage_proxy;
 pub mod tracing;
+pub mod verb_handlers;
 pub mod write;
 pub mod write_response_handler;
 
@@ -73,3 +76,10 @@ pub use write::{
     WriteResult, WriteType,
 };
 pub use write_response_handler::{RequestFailureReason, WriteResponseHandler};
+
+pub use hint_delivery::{DeliveryResult, HintDeliveryMetrics, HintDeliveryService};
+pub use storage_proxy::{StorageProxy, StorageProxyConfig};
+pub use verb_handlers::{
+    register_all_verb_handlers, BatchRemoveVerbHandler, BatchStoreVerbHandler, HintVerbHandler,
+    MutationVerbHandler, ReadDataVerbHandler, ReadDigestVerbHandler, ReadRepairVerbHandler,
+};

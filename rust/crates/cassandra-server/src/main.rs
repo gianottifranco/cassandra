@@ -21,6 +21,8 @@ mod query_processor;
 mod resource_limits;
 mod server;
 mod shutdown;
+mod startup_checks;
+mod storage_service;
 mod term_binding;
 mod transport_metrics;
 mod transport_service;

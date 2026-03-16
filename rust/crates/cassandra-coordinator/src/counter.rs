@@ -198,7 +198,7 @@ impl CounterCoordinator {
 mod tests {
     use super::*;
     use crate::hints::HintStore;
-    use cassandra_cluster_metadata::{NodeId, NodeInfo, SimpleStrategy};
+    use cassandra_cluster_metadata::{ClusterMetadata, NodeId, NodeInfo, SimpleStrategy};
     use cassandra_common::Token;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
