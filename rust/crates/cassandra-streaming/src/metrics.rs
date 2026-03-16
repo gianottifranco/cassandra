@@ -20,6 +20,12 @@ pub struct StreamingMetrics {
     pub sessions_completed: AtomicU64,
     pub sessions_failed: AtomicU64,
     pub retries: AtomicU64,
+    /// Nanoseconds spent waiting on rate limiter throttle.
+    pub throttle_wait_nanos: AtomicU64,
+    /// Number of reconnection attempts across all sessions.
+    pub reconnect_attempts: AtomicU64,
+    /// Number of checksum verification failures.
+    pub checksum_failures: AtomicU64,
 }
 
 impl StreamingMetrics {
@@ -33,6 +39,9 @@ impl StreamingMetrics {
             sessions_completed: AtomicU64::new(0),
             sessions_failed: AtomicU64::new(0),
             retries: AtomicU64::new(0),
+            throttle_wait_nanos: AtomicU64::new(0),
+            reconnect_attempts: AtomicU64::new(0),
+            checksum_failures: AtomicU64::new(0),
         }
     }
 
@@ -70,6 +79,18 @@ impl StreamingMetrics {
         self.retries.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn record_throttle_wait(&self, nanos: u64) {
+        self.throttle_wait_nanos.fetch_add(nanos, Ordering::Relaxed);
+    }
+
+    pub fn record_reconnect_attempt(&self) {
+        self.reconnect_attempts.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_checksum_failure(&self) {
+        self.checksum_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Snapshot all counters for reporting.
     pub fn snapshot(&self) -> StreamingMetricsSnapshot {
         StreamingMetricsSnapshot {
@@ -81,6 +102,9 @@ impl StreamingMetrics {
             sessions_completed: self.sessions_completed.load(Ordering::Relaxed),
             sessions_failed: self.sessions_failed.load(Ordering::Relaxed),
             retries: self.retries.load(Ordering::Relaxed),
+            throttle_wait_nanos: self.throttle_wait_nanos.load(Ordering::Relaxed),
+            reconnect_attempts: self.reconnect_attempts.load(Ordering::Relaxed),
+            checksum_failures: self.checksum_failures.load(Ordering::Relaxed),
         }
     }
 }
@@ -102,6 +126,9 @@ pub struct StreamingMetricsSnapshot {
     pub sessions_completed: u64,
     pub sessions_failed: u64,
     pub retries: u64,
+    pub throttle_wait_nanos: u64,
+    pub reconnect_attempts: u64,
+    pub checksum_failures: u64,
 }
 
 #[cfg(test)]
@@ -141,5 +168,19 @@ mod tests {
         let snap = m.snapshot();
         assert_eq!(snap.sessions_active, 0);
         assert_eq!(snap.sessions_failed, 1);
+    }
+
+    #[test]
+    fn new_metrics_counters() {
+        let m = StreamingMetrics::new();
+        m.record_throttle_wait(1_000_000);
+        m.record_reconnect_attempt();
+        m.record_reconnect_attempt();
+        m.record_checksum_failure();
+
+        let snap = m.snapshot();
+        assert_eq!(snap.throttle_wait_nanos, 1_000_000);
+        assert_eq!(snap.reconnect_attempts, 2);
+        assert_eq!(snap.checksum_failures, 1);
     }
 }

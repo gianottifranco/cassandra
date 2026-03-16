@@ -129,6 +129,18 @@ pub enum Verb {
     /// Bootstrap data response.
     BootstrapResponse = 123,
 
+    // ── TCM (Transactional Cluster Metadata) ────────────────────
+    /// Commit a metadata transformation to the TCM log.
+    TcmCommit = 200,
+    /// Response to TCM commit.
+    TcmCommitResponse = 201,
+    /// Fetch metadata log entries since an epoch.
+    TcmFetch = 202,
+    /// Response with metadata log entries.
+    TcmFetchResponse = 203,
+    /// Notify peers of a new TCM epoch.
+    TcmNotify = 204,
+
     // ── Internal ────────────────────────────────────────────────
     /// Request failure response (generic error).
     RequestFailure = 99,
@@ -181,6 +193,11 @@ impl Verb {
             121 => Some(Self::TopologyChangeResponse),
             122 => Some(Self::BootstrapRequest),
             123 => Some(Self::BootstrapResponse),
+            200 => Some(Self::TcmCommit),
+            201 => Some(Self::TcmCommitResponse),
+            202 => Some(Self::TcmFetch),
+            203 => Some(Self::TcmFetchResponse),
+            204 => Some(Self::TcmNotify),
             _ => None,
         }
     }
@@ -209,6 +226,9 @@ impl Verb {
                 | Self::AntiCompactionRequest
                 | Self::TopologyChange
                 | Self::BootstrapRequest
+                | Self::TcmCommit
+                | Self::TcmFetch
+                | Self::TcmNotify
         )
     }
 
@@ -233,6 +253,8 @@ impl Verb {
             Self::AntiCompactionRequest => Some(Self::AntiCompactionResponse),
             Self::TopologyChange => Some(Self::TopologyChangeResponse),
             Self::BootstrapRequest => Some(Self::BootstrapResponse),
+            Self::TcmCommit => Some(Self::TcmCommitResponse),
+            Self::TcmFetch => Some(Self::TcmFetchResponse),
             _ => None,
         }
     }
@@ -277,6 +299,11 @@ impl Verb {
             Self::TopologyChangeResponse => "TOPOLOGY_CHANGE_RSP",
             Self::BootstrapRequest => "BOOTSTRAP_REQ",
             Self::BootstrapResponse => "BOOTSTRAP_RSP",
+            Self::TcmCommit => "TCM_COMMIT",
+            Self::TcmCommitResponse => "TCM_COMMIT_RSP",
+            Self::TcmFetch => "TCM_FETCH",
+            Self::TcmFetchResponse => "TCM_FETCH_RSP",
+            Self::TcmNotify => "TCM_NOTIFY",
             Self::RequestFailure => "REQUEST_FAILURE",
         }
     }
@@ -311,6 +338,9 @@ mod tests {
             Verb::AntiCompactionRequest, Verb::AntiCompactionResponse,
             Verb::TopologyChange, Verb::TopologyChangeResponse,
             Verb::BootstrapRequest, Verb::BootstrapResponse,
+            Verb::TcmCommit, Verb::TcmCommitResponse,
+            Verb::TcmFetch, Verb::TcmFetchResponse,
+            Verb::TcmNotify,
             Verb::RequestFailure,
         ]
     }

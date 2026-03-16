@@ -12,8 +12,12 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use tracing::{info, warn};
 
+use cassandra_cluster_metadata::Endpoint;
+
 use crate::metrics::StreamingMetrics;
 use crate::session::{SessionSummary, StreamSession, StreamSessionId, StreamSessionState};
+use crate::snapshot::SnapshotManager;
+use crate::transfer::StreamRateLimiter;
 
 /// Central manager for all active streaming sessions.
 ///
@@ -24,6 +28,10 @@ pub struct StreamManager {
     sessions: RwLock<HashMap<StreamSessionId, StreamSession>>,
     /// Global streaming metrics.
     pub metrics: Arc<StreamingMetrics>,
+    /// Global rate limiter for outbound streaming.
+    pub rate_limiter: StreamRateLimiter,
+    /// Snapshot manager for outgoing transfers.
+    pub snapshots: SnapshotManager,
 }
 
 impl StreamManager {
@@ -32,7 +40,15 @@ impl StreamManager {
         Self {
             sessions: RwLock::new(HashMap::new()),
             metrics: Arc::new(StreamingMetrics::new()),
+            rate_limiter: StreamRateLimiter::unlimited(),
+            snapshots: SnapshotManager::new(),
         }
+    }
+
+    /// Create a stream manager with a specific rate limit.
+    pub fn with_rate_limit(mut self, bytes_per_sec: u64) -> Self {
+        self.rate_limiter = StreamRateLimiter::new(bytes_per_sec);
+        self
     }
 
     /// Register a new streaming session.
@@ -60,6 +76,8 @@ impl StreamManager {
             self.metrics.session_completed();
         }
         sessions.remove(id);
+        // Release associated snapshots.
+        self.snapshots.release_for_session(id);
     }
 
     /// Mark a session as failed.
@@ -72,6 +90,7 @@ impl StreamManager {
             self.metrics.session_failed();
         }
         sessions.remove(id);
+        self.snapshots.release_for_session(id);
     }
 
     /// Cancel a session.
@@ -81,6 +100,7 @@ impl StreamManager {
             session.fail("cancelled by operator");
             self.metrics.session_failed();
             sessions.remove(id);
+            self.snapshots.release_for_session(id);
             info!(session_id = %id, "Stream session cancelled");
             true
         } else {
@@ -88,11 +108,37 @@ impl StreamManager {
         }
     }
 
+    /// Cancel all active sessions.
+    pub fn cancel_all_sessions(&self) -> usize {
+        let mut sessions = self.sessions.write();
+        let count = sessions.len();
+        for (id, session) in sessions.iter_mut() {
+            session.fail("bulk cancellation");
+            self.metrics.session_failed();
+            self.snapshots.release_for_session(id);
+        }
+        sessions.clear();
+        if count > 0 {
+            info!(count, "Cancelled all streaming sessions");
+        }
+        count
+    }
+
     /// Get a summary of all active sessions.
     pub fn active_sessions(&self) -> Vec<SessionSummary> {
         self.sessions
             .read()
             .values()
+            .map(|s| s.summary())
+            .collect()
+    }
+
+    /// Get summaries of sessions involving a specific peer.
+    pub fn sessions_for_peer(&self, peer: &Endpoint) -> Vec<SessionSummary> {
+        self.sessions
+            .read()
+            .values()
+            .filter(|s| s.peer == *peer)
             .map(|s| s.summary())
             .collect()
     }
@@ -113,6 +159,17 @@ impl StreamManager {
         F: FnOnce(&mut StreamSession) -> R,
     {
         self.sessions.write().get_mut(id).map(f)
+    }
+
+    /// Update the global throughput limit at runtime.
+    pub fn update_throughput_limit(&self, bytes_per_sec: u64) {
+        self.rate_limiter.set_rate(bytes_per_sec);
+        info!(bytes_per_sec, "Updated streaming throughput limit");
+    }
+
+    /// Get the current throughput limit.
+    pub fn throughput_limit(&self) -> u64 {
+        self.rate_limiter.rate()
     }
 }
 
@@ -177,6 +234,19 @@ mod tests {
     }
 
     #[test]
+    fn cancel_all_sessions() {
+        let mgr = StreamManager::new();
+        mgr.register_session(StreamSession::new(ep(7002), "s1"));
+        mgr.register_session(StreamSession::new(ep(7003), "s2"));
+        mgr.register_session(StreamSession::new(ep(7004), "s3"));
+
+        assert_eq!(mgr.active_session_count(), 3);
+        let cancelled = mgr.cancel_all_sessions();
+        assert_eq!(cancelled, 3);
+        assert_eq!(mgr.active_session_count(), 0);
+    }
+
+    #[test]
     fn multiple_sessions() {
         let mgr = StreamManager::new();
         let s1 = StreamSession::new(ep(7002), "bootstrap");
@@ -208,5 +278,28 @@ mod tests {
             s.state
         });
         assert_eq!(result, Some(StreamSessionState::Preparing));
+    }
+
+    #[test]
+    fn sessions_for_peer() {
+        let mgr = StreamManager::new();
+        mgr.register_session(StreamSession::new(ep(7002), "s1"));
+        mgr.register_session(StreamSession::new(ep(7002), "s2"));
+        mgr.register_session(StreamSession::new(ep(7003), "s3"));
+
+        let peer_sessions = mgr.sessions_for_peer(&ep(7002));
+        assert_eq!(peer_sessions.len(), 2);
+
+        let other_sessions = mgr.sessions_for_peer(&ep(7003));
+        assert_eq!(other_sessions.len(), 1);
+    }
+
+    #[test]
+    fn throughput_limit() {
+        let mgr = StreamManager::new().with_rate_limit(10_000_000);
+        assert_eq!(mgr.throughput_limit(), 10_000_000);
+
+        mgr.update_throughput_limit(5_000_000);
+        assert_eq!(mgr.throughput_limit(), 5_000_000);
     }
 }

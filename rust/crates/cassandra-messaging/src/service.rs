@@ -76,6 +76,8 @@ pub struct MessagingService {
     next_message_id: AtomicU64,
     /// Max in-flight per endpoint.
     max_inflight: usize,
+    /// Per-endpoint in-flight counters (for backpressure).
+    inflight_per_endpoint: DashMap<SocketAddr, usize>,
     /// Metrics.
     pub metrics: Arc<MessagingMetrics>,
 }
@@ -89,7 +91,38 @@ impl MessagingService {
             pending_responses: DashMap::new(),
             next_message_id: AtomicU64::new(1),
             max_inflight: DEFAULT_MAX_INFLIGHT,
+            inflight_per_endpoint: DashMap::new(),
             metrics: Arc::new(MessagingMetrics::new()),
+        }
+    }
+
+    /// Create with a custom max-inflight limit.
+    pub fn with_max_inflight(listen_addr: SocketAddr, max_inflight: usize) -> Self {
+        let mut svc = Self::new(listen_addr);
+        svc.max_inflight = max_inflight;
+        svc
+    }
+
+    /// Get the current in-flight count for an endpoint.
+    fn inflight_count(&self, endpoint: &SocketAddr) -> usize {
+        self.inflight_per_endpoint
+            .get(endpoint)
+            .map(|v| *v)
+            .unwrap_or(0)
+    }
+
+    /// Increment the in-flight count for an endpoint.
+    fn increment_inflight(&self, endpoint: &SocketAddr) {
+        self.inflight_per_endpoint
+            .entry(*endpoint)
+            .and_modify(|c| *c += 1)
+            .or_insert(1);
+    }
+
+    /// Decrement the in-flight count for an endpoint.
+    fn decrement_inflight(&self, endpoint: &SocketAddr) {
+        if let Some(mut entry) = self.inflight_per_endpoint.get_mut(endpoint) {
+            *entry = entry.saturating_sub(1);
         }
     }
 
@@ -107,21 +140,37 @@ impl MessagingService {
     ///
     /// Returns immediately after queuing. Use `send_and_wait` for
     /// request/response patterns.
+    ///
+    /// Returns `Err(MessagingError::Backpressure)` if the endpoint has
+    /// more than `max_inflight` outstanding requests.
     pub async fn send(
         &self,
         endpoint: SocketAddr,
         msg: Message,
-    ) -> Result<(), std::io::Error> {
+    ) -> Result<(), MessagingError> {
+        // Check backpressure
+        let inflight = self.inflight_count(&endpoint);
+        if inflight >= self.max_inflight {
+            self.metrics.verb(msg.header.verb).record_dropped();
+            return Err(MessagingError::Backpressure);
+        }
+        self.increment_inflight(&endpoint);
+
         self.metrics.verb(msg.header.verb).record_sent();
 
-        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connect timeout"))??;
+        let result = async {
+            let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+                .await
+                .map_err(|_| MessagingError::Timeout)?
+                .map_err(MessagingError::Io)?;
 
-        let mut framed = FramedWrite::new(stream, MessageCodec);
-        framed.send(msg).await?;
+            let mut framed = FramedWrite::new(stream, MessageCodec);
+            framed.send(msg).await.map_err(MessagingError::Io)?;
+            Ok(())
+        }.await;
 
-        Ok(())
+        self.decrement_inflight(&endpoint);
+        result
     }
 
     /// Send a message and wait for the response.
@@ -294,6 +343,148 @@ pub enum MessagingError {
 
     #[error("Backpressure: too many in-flight requests")]
     Backpressure,
+
+    #[error("Version negotiation failed")]
+    VersionMismatch,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Connection Pool
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-endpoint connection pool with version tracking.
+///
+/// Caches TCP connections to remote endpoints, avoiding the overhead
+/// of establishing a new connection for every message.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.net.OutboundConnections`
+pub struct ConnectionPool {
+    /// Cached connections: endpoint → (stream, negotiated_version).
+    connections: DashMap<SocketAddr, ConnectionInfo>,
+    /// Maximum connections per endpoint.
+    max_connections_per_endpoint: usize,
+}
+
+/// Info about a cached connection.
+struct ConnectionInfo {
+    /// Negotiated protocol version.
+    negotiated_version: i32,
+    /// When the connection was established.
+    established_at: std::time::Instant,
+}
+
+impl ConnectionPool {
+    /// Create a new connection pool.
+    pub fn new(max_connections_per_endpoint: usize) -> Self {
+        Self {
+            connections: DashMap::new(),
+            max_connections_per_endpoint,
+        }
+    }
+
+    /// Record a connection to an endpoint with a negotiated version.
+    pub fn record_connection(&self, endpoint: SocketAddr, version: i32) {
+        self.connections.insert(
+            endpoint,
+            ConnectionInfo {
+                negotiated_version: version,
+                established_at: std::time::Instant::now(),
+            },
+        );
+    }
+
+    /// Get the negotiated version for an endpoint (if connected).
+    pub fn negotiated_version(&self, endpoint: &SocketAddr) -> Option<i32> {
+        self.connections.get(endpoint).map(|c| c.negotiated_version)
+    }
+
+    /// Remove a connection (on disconnect or error).
+    pub fn remove(&self, endpoint: &SocketAddr) {
+        self.connections.remove(endpoint);
+    }
+
+    /// Number of tracked connections.
+    pub fn connection_count(&self) -> usize {
+        self.connections.len()
+    }
+
+    /// Whether we have a connection to the endpoint.
+    pub fn is_connected(&self, endpoint: &SocketAddr) -> bool {
+        self.connections.contains_key(endpoint)
+    }
+
+    /// Maximum connections per endpoint.
+    pub fn max_per_endpoint(&self) -> usize {
+        self.max_connections_per_endpoint
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-Verb Timeout Configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Per-verb timeout configuration.
+///
+/// Different message types have different latency expectations:
+/// - Reads/writes: 5s default
+/// - Gossip: 1s
+/// - Streaming: 2h (long transfers)
+/// - TCM: 30s (consensus)
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.config.DatabaseDescriptor.getRpcTimeout()` and friends
+pub struct VerbTimeoutConfig {
+    defaults: HashMap<Verb, Duration>,
+}
+
+impl VerbTimeoutConfig {
+    /// Create with Cassandra-standard defaults.
+    pub fn with_defaults() -> Self {
+        let mut defaults = HashMap::new();
+        // Data path
+        defaults.insert(Verb::Mutation, Duration::from_secs(5));
+        defaults.insert(Verb::ReadData, Duration::from_secs(5));
+        defaults.insert(Verb::ReadDigest, Duration::from_secs(5));
+        defaults.insert(Verb::ReadRepair, Duration::from_secs(5));
+        defaults.insert(Verb::Hint, Duration::from_secs(10));
+        defaults.insert(Verb::BatchStore, Duration::from_secs(5));
+        // Gossip
+        defaults.insert(Verb::GossipDigestSyn, Duration::from_secs(1));
+        defaults.insert(Verb::GossipDigestAck, Duration::from_secs(1));
+        // Schema
+        defaults.insert(Verb::SchemaPush, Duration::from_secs(30));
+        defaults.insert(Verb::SchemaPull, Duration::from_secs(30));
+        // Streaming
+        defaults.insert(Verb::StreamInit, Duration::from_secs(7200));
+        defaults.insert(Verb::StreamData, Duration::from_secs(7200));
+        defaults.insert(Verb::StreamComplete, Duration::from_secs(60));
+        // TCM
+        defaults.insert(Verb::TcmCommit, Duration::from_secs(30));
+        defaults.insert(Verb::TcmFetch, Duration::from_secs(30));
+        defaults.insert(Verb::TcmNotify, Duration::from_secs(10));
+        // Ping
+        defaults.insert(Verb::Ping, Duration::from_secs(1));
+        // Repair
+        defaults.insert(Verb::RepairRequest, Duration::from_secs(3600));
+        defaults.insert(Verb::MerkleTreeRequest, Duration::from_secs(3600));
+        Self { defaults }
+    }
+
+    /// Get the timeout for a verb.
+    pub fn timeout_for(&self, verb: &Verb) -> Duration {
+        self.defaults
+            .get(verb)
+            .copied()
+            .unwrap_or(Duration::from_secs(10))
+    }
+
+    /// Override the timeout for a specific verb.
+    pub fn set_timeout(&mut self, verb: Verb, timeout: Duration) {
+        self.defaults.insert(verb, timeout);
+    }
 }
 
 #[cfg(test)]
@@ -400,5 +591,57 @@ mod tests {
         let resp = response.unwrap();
         assert_eq!(resp.header.verb, Verb::Pong);
         assert_eq!(resp.payload, b"pong");
+    }
+
+    // ── Connection Pool Tests ───────────────────────────────────────────
+
+    #[test]
+    fn connection_pool_create_and_query() {
+        let pool = ConnectionPool::new(4);
+        let addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+
+        assert!(!pool.is_connected(&addr));
+        assert_eq!(pool.connection_count(), 0);
+
+        pool.record_connection(addr, 14);
+        assert!(pool.is_connected(&addr));
+        assert_eq!(pool.connection_count(), 1);
+        assert_eq!(pool.negotiated_version(&addr), Some(14));
+    }
+
+    #[test]
+    fn connection_pool_remove() {
+        let pool = ConnectionPool::new(4);
+        let addr: SocketAddr = "127.0.0.1:7001".parse().unwrap();
+
+        pool.record_connection(addr, 14);
+        pool.remove(&addr);
+        assert!(!pool.is_connected(&addr));
+        assert_eq!(pool.connection_count(), 0);
+    }
+
+    // ── Per-Verb Timeout Tests ──────────────────────────────────────────
+
+    #[test]
+    fn verb_timeout_defaults() {
+        let config = VerbTimeoutConfig::with_defaults();
+        assert_eq!(config.timeout_for(&Verb::Mutation), Duration::from_secs(5));
+        assert_eq!(config.timeout_for(&Verb::Ping), Duration::from_secs(1));
+        assert_eq!(config.timeout_for(&Verb::StreamInit), Duration::from_secs(7200));
+        assert_eq!(config.timeout_for(&Verb::TcmCommit), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn verb_timeout_override() {
+        let mut config = VerbTimeoutConfig::with_defaults();
+        config.set_timeout(Verb::Mutation, Duration::from_secs(10));
+        assert_eq!(config.timeout_for(&Verb::Mutation), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn verb_timeout_unknown_fallback() {
+        let config = VerbTimeoutConfig::with_defaults();
+        // Verb not explicitly configured should get 10s default
+        assert_eq!(config.timeout_for(&Verb::BatchRemove), Duration::from_secs(10));
     }
 }

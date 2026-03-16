@@ -1,0 +1,113 @@
+{
+  "_comment": "Golden test fixtures for topology state transitions — Phase 18",
+  "_java_oracle": "org.apache.cassandra.service.StorageService state machine",
+  "operations": {
+    "bootstrap": {
+      "states": ["Idle", "Calculating(BOOTSTRAP)", "Streaming(BOOTSTRAP,0%)", "Completing(BOOTSTRAP)", "Done(BOOTSTRAP,OK)"],
+      "gossip_states": ["STATUS_BOOTSTRAPPING", "STATUS_NORMAL"],
+      "node_state_before": "Joining",
+      "node_state_after": "Normal",
+      "requires_streaming": true,
+      "epoch_advances": true
+    },
+    "decommission": {
+      "states": ["Idle", "Calculating(DECOMMISSION)", "Streaming(DECOMMISSION,0%)", "Completing(DECOMMISSION)", "Done(DECOMMISSION,OK)"],
+      "gossip_states": ["STATUS_LEAVING", "STATUS_LEFT"],
+      "node_state_before": "Normal",
+      "node_state_after": "Left",
+      "requires_streaming": true,
+      "epoch_advances": true,
+      "preconditions": ["not_last_node"]
+    },
+    "replace": {
+      "states": ["Idle", "Calculating(REPLACE)", "Streaming(REPLACE,0%)", "Done(REPLACE,OK)"],
+      "gossip_states": ["REPLACING", "STATUS_NORMAL"],
+      "node_state_before": "Dead (target)",
+      "node_state_after": "Normal (replacement)",
+      "requires_streaming": true,
+      "epoch_advances": true,
+      "preconditions": ["target_must_be_dead"]
+    },
+    "removenode": {
+      "states": ["Idle", "Calculating(REMOVENODE)", "Done(REMOVENODE,OK)"],
+      "gossip_states": ["REMOVING", "REMOVED"],
+      "node_state_before": "Dead or Unknown",
+      "node_state_after": "Excised",
+      "requires_streaming": false,
+      "epoch_advances": true,
+      "preconditions": ["host_id_must_match"]
+    },
+    "rebuild": {
+      "states": ["Idle", "Calculating(REBUILD)", "Streaming(REBUILD,0%)", "Done(REBUILD,OK)"],
+      "gossip_states": [],
+      "node_state_before": "Normal",
+      "node_state_after": "Normal",
+      "requires_streaming": true,
+      "epoch_advances": false,
+      "notes": "No gossip state change; purely data streaming"
+    },
+    "move": {
+      "states": ["Idle", "Calculating(MOVE)", "Streaming(MOVE,0%)", "Completing(MOVE)", "Done(MOVE,OK)"],
+      "gossip_states": ["STATUS_MOVING", "STATUS_NORMAL"],
+      "node_state_before": "Normal",
+      "node_state_after": "Normal",
+      "requires_streaming": true,
+      "epoch_advances": true,
+      "preconditions": ["num_tokens_must_be_1", "new_token_must_differ"]
+    },
+    "cleanup": {
+      "states": ["Idle", "Calculating(CLEANUP)", "Streaming(CLEANUP,0%)", "Done(CLEANUP,OK)"],
+      "gossip_states": [],
+      "node_state_before": "Normal",
+      "node_state_after": "Normal",
+      "requires_streaming": false,
+      "epoch_advances": false,
+      "notes": "Local compaction-like operation; no streaming or gossip changes"
+    },
+    "refresh": {
+      "states": ["Idle", "Calculating(REFRESH)", "Done(REFRESH,OK)"],
+      "gossip_states": [],
+      "node_state_before": "Normal",
+      "node_state_after": "Normal",
+      "requires_streaming": false,
+      "epoch_advances": false,
+      "notes": "Local-only: loads new SSTables from disk"
+    }
+  },
+  "error_scenarios": {
+    "concurrent_operation": {
+      "error": "OperationInProgress",
+      "description": "Only one topology operation at a time"
+    },
+    "decommission_last_node": {
+      "error": "LastNode",
+      "description": "Cannot decommission when only one node in cluster"
+    },
+    "replace_live_node": {
+      "error": "TargetNotDead",
+      "description": "Can only replace a dead node"
+    },
+    "move_multi_token": {
+      "error": "InvalidMoveToken",
+      "description": "Move requires num_tokens=1"
+    },
+    "move_same_token": {
+      "error": "InvalidMoveToken",
+      "description": "New token must differ from current"
+    },
+    "abort_during_operation": {
+      "result": "Done(OP,FAILED)",
+      "description": "Operation aborted; pending ranges cleared"
+    }
+  },
+  "pending_ranges": {
+    "tracked_during": ["bootstrap", "decommission", "move"],
+    "cleared_on": ["finish", "abort", "reset"],
+    "per_keyspace": true
+  },
+  "epoch": {
+    "initial": 0,
+    "advances_on": ["bootstrap", "decommission", "replace", "removenode", "move"],
+    "does_not_advance_on": ["rebuild", "cleanup", "refresh"]
+  }
+}

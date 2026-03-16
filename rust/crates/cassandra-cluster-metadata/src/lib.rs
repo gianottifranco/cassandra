@@ -30,9 +30,10 @@
 //! - [`node`] — endpoint identity and lifecycle state
 //! - [`ring`] — token ring (token→endpoint mapping)
 //! - [`snitch`] — datacenter/rack topology
-//! - [`replication`] — SimpleStrategy, NetworkTopologyStrategy
+//! - [`replication`] — SimpleStrategy, NetworkTopologyStrategy, LocalStrategy, EverywhereStrategy
 //! - [`gossip`] — state propagation, heartbeats, failure detection
 //! - [`cluster`] — immutable cluster snapshot (Arc-swapped)
+//! - [`tcm`] — Transactional Cluster Metadata (epoch-based metadata log)
 
 pub mod node;
 pub mod ring;
@@ -41,12 +42,20 @@ pub mod replication;
 pub mod gossip;
 pub mod cluster;
 pub mod topology;
+pub mod tcm;
 
 // Re-exports for ergonomic usage.
 pub use node::{Endpoint, NodeId, NodeInfo, NodeState};
 pub use ring::TokenRing;
-pub use snitch::{Snitch, SimpleSnitch, PropertyFileSnitch};
-pub use replication::{ReplicationStrategy, SimpleStrategy, NetworkTopologyStrategy, create_strategy};
+pub use snitch::{
+    Snitch, SimpleSnitch, PropertyFileSnitch, GossipingPropertyFileSnitch,
+    DynamicEndpointSnitch, RackInferringSnitch, Ec2Snitch, create_snitch,
+};
+pub use replication::{
+    ReplicationStrategy, SimpleStrategy, NetworkTopologyStrategy,
+    LocalStrategy, EverywhereStrategy, TransientReplicationStrategy,
+    create_strategy,
+};
 pub use gossip::{
     ApplicationState, EndpointState, Gossiper, HeartbeatState, SeedProvider, VersionedValue,
 };
@@ -54,3 +63,6 @@ pub use gossip::failure_detector::FailureDetector;
 pub use gossip::messages::{GossipDigest, GossipDigestSyn, GossipDigestAck, GossipDigestAck2};
 pub use cluster::{ClusterMetadata, ClusterSnapshot};
 pub use topology::{TopologyCoordinator, TopologyOperation, TopologyState, TopologyError, StreamPlanDescriptor, StreamRangeRequest};
+pub use tcm::{Epoch, MetadataLog, NodeDirectory, Placement, LockedRanges, TcmMetadata, TcmError, Transformation};
+pub use tcm::bridge::{ControlPlaneMode, ControlPlaneBridge};
+

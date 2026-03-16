@@ -253,6 +253,7 @@ dependencies = [
  "byteorder",
  "bytes",
  "crossbeam",
+ "md-5",
  "parking_lot",
  "proptest",
  "serde",

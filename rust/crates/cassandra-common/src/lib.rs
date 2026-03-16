@@ -33,6 +33,7 @@ pub mod ttl;
 pub mod tombstone;
 pub mod murmur3;
 pub mod token;
+pub mod partitioner;
 
 /// Re-export commonly used types.
 pub use error::{CassandraError, CassandraResult};
@@ -40,6 +41,7 @@ pub use timestamp::Timestamp;
 pub use ttl::{Ttl, LocalDeletionTime};
 pub use tombstone::{DeletionTime, RangeTombstone};
 pub use token::Token;
+pub use partitioner::{Partitioner, Murmur3Partitioner, create_partitioner};
 
 /// Crate version, matching the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -41,6 +41,12 @@ pub mod metrics;
 pub mod service;
 
 pub use verb::Verb;
-pub use frame::{Message, MessageHeader, MessageCodec};
+pub use frame::{
+    Message, MessageHeader, MessageCodec, VersionNegotiation,
+    CURRENT_MESSAGING_VERSION, MIN_MESSAGING_VERSION,
+};
 pub use metrics::{MessagingMetrics, VerbMetrics, VerbMetricsSnapshot};
-pub use service::{MessagingService, MessagingError, MessageHandler};
+pub use service::{
+    MessagingService, MessagingError, MessageHandler,
+    ConnectionPool, VerbTimeoutConfig,
+};

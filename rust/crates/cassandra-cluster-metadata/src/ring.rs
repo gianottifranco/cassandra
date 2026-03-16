@@ -35,12 +35,27 @@ use crate::node::Endpoint;
 ///
 /// Invariant: `entries` is always sorted by token.
 /// Each node may own multiple tokens (vnodes).
+///
+/// ## Pending Ranges
+///
+/// During topology changes (bootstrap, decommission, move), some token
+/// ranges may have *pending* endpoints that will own them after the
+/// operation completes. The coordinator must send writes to both
+/// current and pending owners to maintain consistency.
+///
+/// ## Java Oracle
+///
+/// - `org.apache.cassandra.locator.TokenMetadata`
+/// - `org.apache.cassandra.locator.TokenMetadata.pendingEndpointsFor()`
 #[derive(Debug, Clone)]
 pub struct TokenRing {
     /// Sorted map of token → owning endpoint.
     entries: BTreeMap<Token, Endpoint>,
     /// Reverse map: endpoint → set of owned tokens.
     endpoint_tokens: HashMap<Endpoint, HashSet<Token>>,
+    /// Pending range assignments: token → endpoints that will own
+    /// this token after the in-progress topology operation completes.
+    pending_ranges: BTreeMap<Token, Vec<Endpoint>>,
 }
 
 impl TokenRing {
@@ -49,6 +64,7 @@ impl TokenRing {
         Self {
             entries: BTreeMap::new(),
             endpoint_tokens: HashMap::new(),
+            pending_ranges: BTreeMap::new(),
         }
     }
 
@@ -195,6 +211,82 @@ impl TokenRing {
             self.entries.keys().next_back().copied()
         }
     }
+
+    // ── Pending Ranges ──────────────────────────────────────────────────
+
+    /// Add a pending range: during a topology operation, `endpoint` will
+    /// take ownership of `token` after the operation completes.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `TokenMetadata.addPendingRange()`
+    pub fn add_pending_range(&mut self, token: Token, endpoint: Endpoint) {
+        let entry = self.pending_ranges.entry(token).or_default();
+        if !entry.contains(&endpoint) {
+            entry.push(endpoint);
+        }
+    }
+
+    /// Remove all pending ranges for a specific endpoint (operation completed or aborted).
+    pub fn remove_pending_ranges_for(&mut self, endpoint: &Endpoint) {
+        self.pending_ranges.retain(|_, eps| {
+            eps.retain(|e| e != endpoint);
+            !eps.is_empty()
+        });
+    }
+
+    /// Clear all pending ranges (e.g. after topology operation completes).
+    pub fn clear_pending_ranges(&mut self) {
+        self.pending_ranges.clear();
+    }
+
+    /// Get pending endpoints for a specific token.
+    ///
+    /// Returns endpoints that will own this token after the in-progress
+    /// topology operation completes.
+    pub fn pending_endpoints_for(&self, token: Token) -> Vec<Endpoint> {
+        // Walk pending ranges the same way we walk natural endpoints:
+        // find first pending token >= query token, else wrap.
+        if self.pending_ranges.is_empty() {
+            return Vec::new();
+        }
+
+        if let Some((_, eps)) = self.pending_ranges.range(token..).next() {
+            return eps.clone();
+        }
+        // Wrap around
+        self.pending_ranges.values().next().cloned().unwrap_or_default()
+    }
+
+    /// Whether there are any pending ranges.
+    pub fn has_pending_ranges(&self) -> bool {
+        !self.pending_ranges.is_empty()
+    }
+
+    /// Get all pending ranges as a snapshot.
+    pub fn all_pending_ranges(&self) -> &BTreeMap<Token, Vec<Endpoint>> {
+        &self.pending_ranges
+    }
+
+    /// Write replicas: natural endpoints PLUS pending endpoints for a token.
+    ///
+    /// During topology changes, writes must go to both the current owners
+    /// and the pending owners to ensure data availability after the change.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.getLiveSortedEndpoints()` combined with
+    /// `TokenMetadata.pendingEndpointsFor()`
+    pub fn write_replicas(&self, token: Token, natural_count: usize) -> Vec<Endpoint> {
+        let mut replicas = self.natural_endpoints(token, natural_count);
+        let pending = self.pending_endpoints_for(token);
+        for ep in pending {
+            if !replicas.contains(&ep) {
+                replicas.push(ep);
+            }
+        }
+        replicas
+    }
 }
 
 impl Default for TokenRing {
@@ -334,5 +426,83 @@ mod tests {
         let replicas = ring.natural_endpoints(Token::from_raw(-50), 3);
         // Should deduplicate: ep(7001) appears multiple times on ring but once in result
         assert_eq!(replicas.len(), 2); // only 2 distinct endpoints
+    }
+
+    // ── Pending Ranges Tests ────────────────────────────────────────────
+
+    #[test]
+    fn pending_ranges_empty_by_default() {
+        let ring = TokenRing::new();
+        assert!(!ring.has_pending_ranges());
+        assert!(ring.pending_endpoints_for(Token::from_raw(0)).is_empty());
+    }
+
+    #[test]
+    fn add_and_query_pending_ranges() {
+        let mut ring = TokenRing::new();
+        ring.add_token(Token::from_raw(-100), ep(7001));
+        ring.add_token(Token::from_raw(0), ep(7002));
+        ring.add_token(Token::from_raw(100), ep(7003));
+
+        // Simulate bootstrap: ep(7004) is pending for token 50
+        ring.add_pending_range(Token::from_raw(50), ep(7004));
+        assert!(ring.has_pending_ranges());
+
+        // Pending endpoints for token 50
+        let pending = ring.pending_endpoints_for(Token::from_raw(50));
+        assert!(pending.contains(&ep(7004)));
+    }
+
+    #[test]
+    fn write_replicas_includes_pending() {
+        let mut ring = TokenRing::new();
+        ring.add_token(Token::from_raw(-100), ep(7001));
+        ring.add_token(Token::from_raw(0), ep(7002));
+        ring.add_token(Token::from_raw(100), ep(7003));
+
+        // No pending: write replicas = natural only
+        let wr = ring.write_replicas(Token::from_raw(-50), 2);
+        assert_eq!(wr.len(), 2);
+
+        // Add pending
+        ring.add_pending_range(Token::from_raw(0), ep(7004));
+        let wr = ring.write_replicas(Token::from_raw(-50), 2);
+        assert!(wr.len() >= 2);
+        assert!(wr.contains(&ep(7004)));
+    }
+
+    #[test]
+    fn remove_pending_ranges_for_endpoint() {
+        let mut ring = TokenRing::new();
+        ring.add_pending_range(Token::from_raw(0), ep(7004));
+        ring.add_pending_range(Token::from_raw(100), ep(7004));
+        ring.add_pending_range(Token::from_raw(100), ep(7005));
+        assert!(ring.has_pending_ranges());
+
+        ring.remove_pending_ranges_for(&ep(7004));
+        // Only ep(7005) pending at token 100 should remain
+        let pending = ring.all_pending_ranges();
+        assert_eq!(pending.len(), 1);
+        assert!(pending.get(&Token::from_raw(100)).unwrap().contains(&ep(7005)));
+    }
+
+    #[test]
+    fn clear_pending_ranges() {
+        let mut ring = TokenRing::new();
+        ring.add_pending_range(Token::from_raw(0), ep(7004));
+        ring.add_pending_range(Token::from_raw(100), ep(7005));
+        assert!(ring.has_pending_ranges());
+
+        ring.clear_pending_ranges();
+        assert!(!ring.has_pending_ranges());
+    }
+
+    #[test]
+    fn pending_range_no_duplicate() {
+        let mut ring = TokenRing::new();
+        ring.add_pending_range(Token::from_raw(0), ep(7004));
+        ring.add_pending_range(Token::from_raw(0), ep(7004)); // duplicate
+        let pending = ring.all_pending_ranges();
+        assert_eq!(pending.get(&Token::from_raw(0)).unwrap().len(), 1);
     }
 }

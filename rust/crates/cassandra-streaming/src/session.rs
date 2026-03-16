@@ -9,14 +9,14 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use cassandra_cluster_metadata::Endpoint;
 
-use crate::transfer::{StreamTransfer, TransferState};
+use crate::transfer::{StreamRetryPolicy, StreamTransfer, TransferState};
 
 /// Unique session identifier.
 pub type StreamSessionId = Uuid;
@@ -76,21 +76,40 @@ pub struct StreamSession {
     pub description: String,
     /// Error message if the session failed.
     pub error: Option<String>,
+    /// Retry policy for reconnection.
+    pub retry_policy: StreamRetryPolicy,
+    /// Number of reconnection attempts made.
+    pub reconnect_attempts: u32,
+    /// Keep-alive interval for long-running sessions.
+    pub keep_alive_interval: Duration,
+    /// Last time a keep-alive was sent/received.
+    pub last_keep_alive: Instant,
 }
 
 impl StreamSession {
     /// Create a new session to stream with the given peer.
     pub fn new(peer: Endpoint, description: impl Into<String>) -> Self {
+        let now = Instant::now();
         Self {
             id: Uuid::new_v4(),
             peer,
             state: StreamSessionState::Initialized,
             outgoing: HashMap::new(),
             incoming: HashMap::new(),
-            created_at: Instant::now(),
+            created_at: now,
             description: description.into(),
             error: None,
+            retry_policy: StreamRetryPolicy::default(),
+            reconnect_attempts: 0,
+            keep_alive_interval: Duration::from_secs(10),
+            last_keep_alive: now,
         }
+    }
+
+    /// Create a session with a custom retry policy.
+    pub fn with_retry_policy(mut self, policy: StreamRetryPolicy) -> Self {
+        self.retry_policy = policy;
+        self
     }
 
     /// Add an outgoing transfer to this session.
@@ -159,6 +178,32 @@ impl StreamSession {
         self.error = Some(error.into());
     }
 
+    /// Attempt to reconnect the session after a failure.
+    ///
+    /// Returns the delay to wait before reconnecting, or `None` if
+    /// max retries are exhausted.
+    pub fn try_reconnect(&mut self) -> Option<Duration> {
+        if !self.retry_policy.should_retry(self.reconnect_attempts) {
+            return None;
+        }
+        let delay = self.retry_policy.delay_for_attempt(self.reconnect_attempts);
+        self.reconnect_attempts += 1;
+        // Reset state to allow re-preparation
+        self.state = StreamSessionState::Initialized;
+        self.error = None;
+        Some(delay)
+    }
+
+    /// Record a keep-alive acknowledgment.
+    pub fn record_keep_alive(&mut self) {
+        self.last_keep_alive = Instant::now();
+    }
+
+    /// Whether the session has timed out (no keep-alive within 3x interval).
+    pub fn is_timed_out(&self) -> bool {
+        self.last_keep_alive.elapsed() > self.keep_alive_interval * 3
+    }
+
     /// Total bytes to send across all outgoing transfers.
     pub fn total_outgoing_bytes(&self) -> u64 {
         self.outgoing.values().map(|t| t.total_bytes).sum()
@@ -210,6 +255,7 @@ impl StreamSession {
             progress: self.progress(),
             description: self.description.clone(),
             error: self.error.clone(),
+            reconnect_attempts: self.reconnect_attempts,
         }
     }
 }
@@ -227,6 +273,7 @@ pub struct SessionSummary {
     pub progress: f64,
     pub description: String,
     pub error: Option<String>,
+    pub reconnect_attempts: u32,
 }
 
 /// Errors from the streaming session state machine.
@@ -328,6 +375,7 @@ mod tests {
         assert_eq!(summary.peer, ep(7002));
         assert_eq!(summary.description, "bootstrap dc1");
         assert_eq!(summary.state, StreamSessionState::Initialized);
+        assert_eq!(summary.reconnect_attempts, 0);
     }
 
     #[test]
@@ -337,5 +385,46 @@ mod tests {
         assert_eq!(StreamSessionState::Streaming.to_string(), "STREAMING");
         assert_eq!(StreamSessionState::Complete.to_string(), "COMPLETE");
         assert_eq!(StreamSessionState::Failed.to_string(), "FAILED");
+    }
+
+    #[test]
+    fn session_reconnect() {
+        let mut session = StreamSession::new(ep(7002), "test");
+        session.fail("timeout");
+        assert_eq!(session.state, StreamSessionState::Failed);
+
+        // First reconnect should succeed
+        let delay = session.try_reconnect();
+        assert!(delay.is_some());
+        assert_eq!(session.state, StreamSessionState::Initialized);
+        assert_eq!(session.reconnect_attempts, 1);
+        assert!(session.error.is_none());
+    }
+
+    #[test]
+    fn session_reconnect_exhausted() {
+        let policy = StreamRetryPolicy {
+            max_attempts: 2,
+            ..StreamRetryPolicy::default()
+        };
+        let mut session = StreamSession::new(ep(7002), "test")
+            .with_retry_policy(policy);
+
+        // Use up all reconnect attempts
+        session.fail("timeout");
+        assert!(session.try_reconnect().is_some());
+        session.fail("timeout again");
+        assert!(session.try_reconnect().is_some());
+        session.fail("final timeout");
+        assert!(session.try_reconnect().is_none()); // exhausted
+    }
+
+    #[test]
+    fn session_keep_alive() {
+        let mut session = StreamSession::new(ep(7002), "test");
+        session.keep_alive_interval = Duration::from_millis(1);
+        session.record_keep_alive();
+        // Just recorded, should not be timed out
+        assert!(!session.is_timed_out());
     }
 }

@@ -27,18 +27,24 @@
 //!
 //! - [`session`] — bidirectional streaming session with state machine
 //! - [`plan`] — describes what ranges to stream between which nodes
-//! - [`transfer`] — chunk-based file transfer with checksums
+//! - [`transfer`] — chunk-based file transfer with checksums and rate limiting
 //! - [`manager`] — singleton managing all active stream sessions
 //! - [`metrics`] — atomic counters for streaming progress
+//! - [`snapshot`] — snapshot reference management for outgoing transfers
 
 pub mod session;
 pub mod plan;
 pub mod transfer;
 pub mod manager;
 pub mod metrics;
+pub mod snapshot;
 
 pub use session::{StreamSession, StreamSessionState, StreamSessionId};
-pub use plan::{StreamPlan, StreamRequest};
-pub use transfer::{StreamTransfer, TransferState, ChunkChecksum};
+pub use plan::{StreamPlan, StreamRequest, StreamOperation};
+pub use transfer::{
+    StreamTransfer, TransferState, ChunkChecksum, ChecksumAlgorithm,
+    StreamRateLimiter, StreamRetryPolicy, DataChunk,
+};
 pub use manager::StreamManager;
 pub use metrics::StreamingMetrics;
+pub use snapshot::{SnapshotTransferRef, SnapshotManager};

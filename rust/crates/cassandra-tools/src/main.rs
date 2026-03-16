@@ -133,6 +133,38 @@ enum Commands {
         /// Path to the SSTable.
         file: String,
     },
+
+    // ── Topology operations ─────────────────────────────────────────
+
+    /// Decommission this node from the cluster.
+    Decommission,
+    /// Remove a dead node from the cluster.
+    Removenode {
+        /// Host ID of the node to remove.
+        host_id: String,
+    },
+    /// Move this node to a new token.
+    Move {
+        /// New token value.
+        new_token: String,
+    },
+    /// Rebuild data from another datacenter.
+    Rebuild {
+        /// Source datacenter (optional; rebuild from all if omitted).
+        #[arg(long)]
+        source_dc: Option<String>,
+    },
+    /// Refresh (load new SSTables for a table).
+    Refresh {
+        /// Keyspace.
+        keyspace: String,
+        /// Table.
+        table: String,
+    },
+    /// Show network streaming statistics.
+    Netstats,
+    /// Show current topology operation status.
+    Topologystatus,
 }
 
 fn main() {
@@ -255,6 +287,65 @@ fn main() {
         }
         Commands::Sstablemetadata { file } => {
             sstable_tools::show_metadata(&file);
+        }
+
+        // ── Topology operation commands ──────────────────────────────
+
+        Commands::Decommission => {
+            println!("Decommissioning node...");
+            println!("POST {}/api/v1/topology/decommission", base_url);
+            println!("Mode: DECOMMISSIONED");
+            // TODO: Actually POST to admin API and poll for completion
+            println!("(stub — connect to admin API for live operation)");
+        }
+        Commands::Removenode { host_id } => {
+            println!("Removing node with Host ID: {}", host_id);
+            println!("POST {}/api/v1/topology/removenode", base_url);
+            // TODO: Validate host_id format, POST to admin API
+            println!("(stub — connect to admin API for live operation)");
+        }
+        Commands::Move { new_token } => {
+            println!("Moving node to new token: {}", new_token);
+            println!("POST {}/api/v1/topology/move", base_url);
+            // TODO: Parse token, POST to admin API
+            println!("(stub — connect to admin API for live operation)");
+        }
+        Commands::Rebuild { source_dc } => {
+            match &source_dc {
+                Some(dc) => println!("Rebuilding from datacenter: {}", dc),
+                None => println!("Rebuilding from all datacenters..."),
+            }
+            println!("POST {}/api/v1/topology/rebuild", base_url);
+            // TODO: POST to admin API with optional source_dc
+            println!("(stub — connect to admin API for live operation)");
+        }
+        Commands::Refresh { keyspace, table } => {
+            println!("Refreshing {}.{}...", keyspace, table);
+            println!("POST {}/api/v1/topology/refresh", base_url);
+            // TODO: POST to admin API
+            println!("(stub — connect to admin API for live operation)");
+        }
+        Commands::Netstats => {
+            println!("Mode: NORMAL");
+            println!("Not sending any streams.");
+            println!("Read Repair Statistics:");
+            println!("Attempted: 0");
+            println!("Mismatch (Blocking): 0");
+            println!("Mismatch (Background): 0");
+            println!("Pool Name    Active  Pending  Completed  Dropped");
+            println!("Large messages  0       0        0          0");
+            println!("Small messages  0       0        0          0");
+            println!("Gossip messages 0       0        0          0");
+            println!();
+            println!("(connect to admin API at {}/api/v1/streaming/sessions for live data)", base_url);
+        }
+        Commands::Topologystatus => {
+            println!("Current topology operation status:");
+            println!("Operation: IDLE");
+            println!("Epoch: 0");
+            println!("Pending ranges: 0");
+            println!();
+            println!("(connect to admin API at {}/api/v1/topology/status for live data)", base_url);
         }
     }
 }

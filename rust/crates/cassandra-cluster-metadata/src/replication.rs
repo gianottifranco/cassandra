@@ -264,9 +264,143 @@ pub fn create_strategy(
             })
             .collect();
         Box::new(NetworkTopologyStrategy::new(dc_replication))
+    } else if strategy_class.contains("LocalStrategy") {
+        Box::new(LocalStrategy)
+    } else if strategy_class.contains("EverywhereStrategy") {
+        Box::new(EverywhereStrategy)
     } else {
-        // LocalStrategy or unknown — treat as RF=1
+        // Unknown — treat as RF=1
         Box::new(SimpleStrategy::new(1))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LocalStrategy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// LocalStrategy: places a single replica on the local node only.
+///
+/// Used by system keyspaces (`system`, `system_schema`) that must exist
+/// on every node but are not replicated across the cluster.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.locator.LocalStrategy`
+#[derive(Debug, Clone)]
+pub struct LocalStrategy;
+
+impl ReplicationStrategy for LocalStrategy {
+    fn calculate_natural_endpoints(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        _snitch: &dyn Snitch,
+    ) -> Vec<Endpoint> {
+        // Return only the primary (local) endpoint for this token
+        ring.primary_endpoint(token).into_iter().collect()
+    }
+
+    fn replication_factor(&self) -> usize {
+        1
+    }
+
+    fn name(&self) -> &str {
+        "LocalStrategy"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EverywhereStrategy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// EverywhereStrategy: places a replica on every node in the cluster.
+///
+/// Used by `system_traces` and similar keyspaces where data should
+/// exist on all nodes.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.locator.EverywhereStrategy`
+#[derive(Debug, Clone)]
+pub struct EverywhereStrategy;
+
+impl ReplicationStrategy for EverywhereStrategy {
+    fn calculate_natural_endpoints(
+        &self,
+        _token: Token,
+        ring: &TokenRing,
+        _snitch: &dyn Snitch,
+    ) -> Vec<Endpoint> {
+        ring.all_endpoints()
+    }
+
+    fn replication_factor(&self) -> usize {
+        // RF = total number of nodes; the caller should use ring.endpoint_count()
+        // for the actual number. This returns a sentinel.
+        usize::MAX
+    }
+
+    fn name(&self) -> &str {
+        "EverywhereStrategy"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TransientReplicationStrategy (stub)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// TransientReplicationStrategy: experimental support for transient replicas.
+///
+/// **Feature-flagged / stub** — transient replication is an experimental
+/// feature in the Java baseline. This struct tracks the configuration
+/// but currently delegates to NTS for placement.
+///
+/// TODO(transient-replication): Full implementation of transient replica
+/// placement, read routing (only full replicas serve reads), and
+/// anti-compaction awareness.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.locator.NetworkTopologyStrategy` with
+/// `replication_factor` format `'3/1'` (3 total, 1 transient).
+#[derive(Debug, Clone)]
+pub struct TransientReplicationStrategy {
+    /// Underlying NTS for placement.
+    inner: NetworkTopologyStrategy,
+    /// Per-DC transient counts (DC → number of transient replicas).
+    pub dc_transient: BTreeMap<String, usize>,
+}
+
+impl TransientReplicationStrategy {
+    pub fn new(
+        dc_replication: BTreeMap<String, usize>,
+        dc_transient: BTreeMap<String, usize>,
+    ) -> Self {
+        Self {
+            inner: NetworkTopologyStrategy::new(dc_replication),
+            dc_transient,
+        }
+    }
+}
+
+impl ReplicationStrategy for TransientReplicationStrategy {
+    fn calculate_natural_endpoints(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        snitch: &dyn Snitch,
+    ) -> Vec<Endpoint> {
+        // TODO(transient-replication): Distinguish full vs transient replicas
+        // in the returned list. For now, return all replicas (full + transient).
+        self.inner.calculate_natural_endpoints(token, ring, snitch)
+    }
+
+    fn replication_factor(&self) -> usize {
+        self.inner.replication_factor()
+    }
+
+    fn name(&self) -> &str {
+        "TransientReplicationStrategy"
     }
 }
 
@@ -377,4 +511,65 @@ mod tests {
         assert_eq!(s.replication_factor(), 5);
         assert_eq!(s.name(), "NetworkTopologyStrategy");
     }
+
+    #[test]
+    fn local_strategy_single_replica() {
+        let strategy = LocalStrategy;
+        let snitch = SimpleSnitch;
+        let mut ring = TokenRing::new();
+        ring.add_token(Token::from_raw(-100), ep(7001));
+        ring.add_token(Token::from_raw(0), ep(7002));
+        ring.add_token(Token::from_raw(100), ep(7003));
+
+        let replicas =
+            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        assert_eq!(replicas.len(), 1);
+        assert_eq!(replicas[0], ep(7002)); // primary for token -50
+    }
+
+    #[test]
+    fn everywhere_strategy_all_nodes() {
+        let strategy = EverywhereStrategy;
+        let snitch = SimpleSnitch;
+        let mut ring = TokenRing::new();
+        ring.add_token(Token::from_raw(-100), ep(7001));
+        ring.add_token(Token::from_raw(0), ep(7002));
+        ring.add_token(Token::from_raw(100), ep(7003));
+
+        let replicas =
+            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        assert_eq!(replicas.len(), 3); // all nodes
+    }
+
+    #[test]
+    fn create_strategy_local() {
+        let s = create_strategy(
+            "org.apache.cassandra.locator.LocalStrategy",
+            &BTreeMap::new(),
+        );
+        assert_eq!(s.name(), "LocalStrategy");
+        assert_eq!(s.replication_factor(), 1);
+    }
+
+    #[test]
+    fn create_strategy_everywhere() {
+        let s = create_strategy(
+            "org.apache.cassandra.locator.EverywhereStrategy",
+            &BTreeMap::new(),
+        );
+        assert_eq!(s.name(), "EverywhereStrategy");
+    }
+
+    #[test]
+    fn transient_replication_stub() {
+        let mut dc_rf = BTreeMap::new();
+        dc_rf.insert("dc1".to_string(), 3);
+        let mut dc_trans = BTreeMap::new();
+        dc_trans.insert("dc1".to_string(), 1);
+
+        let strategy = TransientReplicationStrategy::new(dc_rf, dc_trans);
+        assert_eq!(strategy.name(), "TransientReplicationStrategy");
+        assert_eq!(strategy.replication_factor(), 3);
+    }
 }
+
