@@ -22,6 +22,7 @@
 //! memory thresholds.
 
 pub mod partition;
+pub mod shard;
 pub mod trie;
 
 use std::collections::BTreeMap;
@@ -42,6 +43,8 @@ pub enum MemtableType {
     SkipList,
     /// Prefix-trie based (matches Java TrieMemtable, experimental).
     Trie,
+    /// Sharded trie: N trie backends, each with its own lock.
+    ShardedTrie,
 }
 
 /// Create a memtable backend by type.
@@ -49,6 +52,16 @@ pub fn create_backend(memtable_type: MemtableType) -> Box<dyn MemtableBackend> {
     match memtable_type {
         MemtableType::SkipList => Box::new(SkipListMemtable::new()),
         MemtableType::Trie => Box::new(trie::TrieMemtable::new()),
+        MemtableType::ShardedTrie => {
+            let shard_count = 4; // Default shard count
+            let shards: Vec<Box<dyn MemtableBackend>> = (0..shard_count)
+                .map(|_| {
+                    Box::new(crate::tries::memtable_trie::MemtableTrie::new())
+                        as Box<dyn MemtableBackend>
+                })
+                .collect();
+            Box::new(shard::ShardedMemtable::new(shards))
+        }
     }
 }
 

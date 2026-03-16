@@ -24,6 +24,7 @@ mod shutdown;
 mod term_binding;
 mod transport_metrics;
 mod transport_service;
+mod where_binding;
 
 use std::path::PathBuf;
 use std::sync::Arc;

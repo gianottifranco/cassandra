@@ -31,10 +31,14 @@
 //! virtual dispatch on hot paths, and keeps the type information inline.
 
 pub mod abstract_type;
+pub mod bigint;
+pub mod byte_comparable;
 pub mod clustering_key;
 pub mod codec;
 pub mod collections;
 pub mod comparator;
+pub mod composite;
+pub mod counter;
 pub mod marshal;
 pub mod native;
 pub mod partition_key;

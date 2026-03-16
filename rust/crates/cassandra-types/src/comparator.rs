@@ -152,15 +152,28 @@ fn cmp_decimal(left: &[u8], right: &[u8]) -> Ordering {
 }
 
 /// Duration comparison: months, then days, then nanoseconds.
+///
+/// Falls back to raw byte comparison if vint decoding fails, rather than
+/// silently masking corrupt data with default values.
 fn cmp_duration(left: &[u8], right: &[u8]) -> Ordering {
-    let (ml, n1l) = decode_vint(left).unwrap_or((0, 1));
-    let (dl, n2l) = decode_vint(&left[n1l..]).unwrap_or((0, 1));
-    let (nl, _) = decode_vint(&left[n1l + n2l..]).unwrap_or((0, 1));
-
-    let (mr, n1r) = decode_vint(right).unwrap_or((0, 1));
-    let (dr, n2r) = decode_vint(&right[n1r..]).unwrap_or((0, 1));
-    let (nr, _) = decode_vint(&right[n1r + n2r..]).unwrap_or((0, 1));
-
+    let Ok((ml, n1l)) = decode_vint(left) else {
+        return left.cmp(right);
+    };
+    let Ok((dl, n2l)) = decode_vint(&left[n1l..]) else {
+        return left.cmp(right);
+    };
+    let Ok((nl, _)) = decode_vint(&left[n1l + n2l..]) else {
+        return left.cmp(right);
+    };
+    let Ok((mr, n1r)) = decode_vint(right) else {
+        return left.cmp(right);
+    };
+    let Ok((dr, n2r)) = decode_vint(&right[n1r..]) else {
+        return left.cmp(right);
+    };
+    let Ok((nr, _)) = decode_vint(&right[n1r + n2r..]) else {
+        return left.cmp(right);
+    };
     ml.cmp(&mr).then(dl.cmp(&dr)).then(nl.cmp(&nr))
 }
 
@@ -352,6 +365,15 @@ mod tests {
         let a = 42i32.to_be_bytes();
         let b = 100i32.to_be_bytes();
         assert_eq!(compare_bytes(&rev, &a, &b), Ordering::Greater);
+    }
+
+    #[test]
+    fn duration_corrupt_falls_back_to_byte_comparison() {
+        // Corrupt data that can't be vint-decoded should fall back to byte comparison
+        // rather than silently returning a wrong ordering
+        let a = [0xFF, 0xFF, 0xFF]; // truncated vint
+        let b = [0xFF, 0xFF, 0xFE];
+        assert_eq!(compare_bytes(&CqlType::Duration, &a, &b), Ordering::Greater);
     }
 
     #[test]

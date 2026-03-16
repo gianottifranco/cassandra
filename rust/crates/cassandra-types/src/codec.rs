@@ -391,6 +391,17 @@ fn read_optional_field(data: &[u8], pos: usize) -> (Option<&[u8]>, usize) {
     }
 }
 
+/// Validate that `data` is a valid Inet address (exactly 4 or 16 bytes).
+pub fn validate_inet(data: &[u8]) -> Result<(), CodecError> {
+    match data.len() {
+        4 | 16 => Ok(()),
+        other => Err(CodecError::InvalidLength {
+            expected: 4,
+            got: other,
+        }),
+    }
+}
+
 fn ck(data: &[u8], expected: usize) -> Result<(), CodecError> {
     if data.len() != expected {
         Err(CodecError::InvalidLength {

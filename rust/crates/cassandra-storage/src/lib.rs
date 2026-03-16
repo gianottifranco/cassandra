@@ -35,8 +35,13 @@ pub mod cdc;
 pub mod commitlog;
 pub mod compaction;
 pub mod engine;
+pub mod filter;
 pub mod memtable;
+pub mod partitions;
+pub mod rows;
 pub mod sstable;
+pub mod transform;
+pub mod tries;
 
 // Feature-gated re-exports
 pub use commitlog::{CommitLog, CommitLogConfig, Mutation};

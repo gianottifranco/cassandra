@@ -320,6 +320,107 @@ impl CqlType {
     }
 }
 
+/// Parse a CQL-syntax type string like `frozen<list<int>>`, `map<text, int>`,
+/// or `tuple<int, text>`.
+///
+/// This handles the CQL3 form as opposed to the Java marshal class name form
+/// handled by [`crate::type_parser::parse_type`].
+pub fn parse_cql_type(s: &str) -> Option<CqlType> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Check for parameterized types
+    if let Some(inner) = s.strip_prefix("frozen<").and_then(|r| r.strip_suffix('>')) {
+        let inner_type = parse_cql_type(inner)?;
+        return Some(freeze_cql(inner_type));
+    }
+
+    if let Some(inner) = s.strip_prefix("list<").and_then(|r| r.strip_suffix('>')) {
+        let elem = parse_cql_type(inner)?;
+        return Some(CqlType::List(Box::new(elem), false));
+    }
+
+    if let Some(inner) = s.strip_prefix("set<").and_then(|r| r.strip_suffix('>')) {
+        let elem = parse_cql_type(inner)?;
+        return Some(CqlType::Set(Box::new(elem), false));
+    }
+
+    if let Some(inner) = s.strip_prefix("map<").and_then(|r| r.strip_suffix('>')) {
+        // Split on the top-level comma (not inside nested angle brackets)
+        let split = split_top_level_comma(inner)?;
+        let key = parse_cql_type(split.0.trim())?;
+        let value = parse_cql_type(split.1.trim())?;
+        return Some(CqlType::Map(Box::new(key), Box::new(value), false));
+    }
+
+    if let Some(inner) = s.strip_prefix("tuple<").and_then(|r| r.strip_suffix('>')) {
+        let parts = split_all_top_level_commas(inner);
+        let types: Option<Vec<CqlType>> = parts.iter().map(|p| parse_cql_type(p.trim())).collect();
+        return Some(CqlType::Tuple(types?));
+    }
+
+    // Simple scalar type
+    CqlType::from_cql_name(s)
+}
+
+/// Split a string on the first top-level comma (respecting `<>` nesting).
+fn split_top_level_comma(s: &str) -> Option<(&str, &str)> {
+    let mut depth = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => return Some((&s[..i], &s[i + 1..])),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Split a string on all top-level commas.
+fn split_all_top_level_commas(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+fn freeze_cql(ty: CqlType) -> CqlType {
+    match ty {
+        CqlType::List(inner, _) => CqlType::List(inner, true),
+        CqlType::Set(inner, _) => CqlType::Set(inner, true),
+        CqlType::Map(k, v, _) => CqlType::Map(k, v, true),
+        CqlType::Udt {
+            keyspace,
+            name,
+            field_names,
+            field_types,
+            ..
+        } => CqlType::Udt {
+            keyspace,
+            name,
+            field_names,
+            field_types,
+            is_multi_cell: false,
+        },
+        other => other,
+    }
+}
+
 impl fmt::Display for CqlType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.cql_name())
@@ -417,6 +518,67 @@ mod tests {
         assert_eq!(CqlType::Uuid.fixed_size(), Some(16));
         assert_eq!(CqlType::Varchar.fixed_size(), None);
         assert_eq!(CqlType::Blob.fixed_size(), None);
+    }
+
+    #[test]
+    fn parse_cql_type_simple() {
+        assert_eq!(parse_cql_type("int"), Some(CqlType::Int));
+        assert_eq!(parse_cql_type("text"), Some(CqlType::Varchar));
+        assert_eq!(parse_cql_type("  bigint  "), Some(CqlType::Bigint));
+    }
+
+    #[test]
+    fn parse_cql_type_list() {
+        assert_eq!(
+            parse_cql_type("list<int>"),
+            Some(CqlType::List(Box::new(CqlType::Int), false))
+        );
+    }
+
+    #[test]
+    fn parse_cql_type_frozen_list() {
+        assert_eq!(
+            parse_cql_type("frozen<list<int>>"),
+            Some(CqlType::List(Box::new(CqlType::Int), true))
+        );
+    }
+
+    #[test]
+    fn parse_cql_type_map() {
+        assert_eq!(
+            parse_cql_type("map<text, int>"),
+            Some(CqlType::Map(
+                Box::new(CqlType::Varchar),
+                Box::new(CqlType::Int),
+                false
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cql_type_frozen_map_nested() {
+        assert_eq!(
+            parse_cql_type("frozen<map<text, list<int>>>"),
+            Some(CqlType::Map(
+                Box::new(CqlType::Varchar),
+                Box::new(CqlType::List(Box::new(CqlType::Int), false)),
+                true
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_cql_type_tuple() {
+        assert_eq!(
+            parse_cql_type("tuple<int, text>"),
+            Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar]))
+        );
+    }
+
+    #[test]
+    fn parse_cql_type_unknown() {
+        assert_eq!(parse_cql_type("unknown"), None);
+        assert_eq!(parse_cql_type(""), None);
     }
 
     #[test]

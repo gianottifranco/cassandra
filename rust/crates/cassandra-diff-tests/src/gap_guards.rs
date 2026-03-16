@@ -93,19 +93,17 @@ fn gap_guard_compaction_execution() {
 }
 
 #[test]
-#[ignore = "GAP: Trie index (InMemoryTrie) — Java: db.tries — Target: prompt-12"]
 fn gap_guard_trie_index() {
+    // CLOSED by prompt-05: InMemoryTrie, MergeTrie, MemtableTrie, cursor-based iteration.
     // Java packages: org.apache.cassandra.db.tries
-    // Used in latest SSTable format for partition index.
-    panic!("Trie index not implemented");
+    // Implemented in cassandra-storage::tries
 }
 
 #[test]
-#[ignore = "GAP: Row/partition filters — Java: db.filter — Target: prompt-12"]
 fn gap_guard_db_filters() {
+    // CLOSED by prompt-05: ColumnFilter, ClusteringIndexFilter, RowFilter, DataLimits.
     // Java packages: org.apache.cassandra.db.filter
-    // ClusteringIndexFilter, ColumnFilter, RowFilter
-    panic!("DB filters not implemented");
+    // Implemented in cassandra-storage::filter
 }
 
 #[test]
@@ -117,11 +115,11 @@ fn gap_guard_caching() {
 }
 
 #[test]
-#[ignore = "GAP: Row transformations — Java: db.transform — Target: prompt-12"]
 fn gap_guard_row_transformations() {
+    // CLOSED by prompt-05: Transformation trait, FilteredRows, FilteredPartitions,
+    // PurgeTransform, LimitsTransform, FilterTransform, DuplicateRowChecker, RTBoundCloser.
     // Java packages: org.apache.cassandra.db.transform
-    // Filter, DuplicateRowChecker, full transformation pipeline
-    panic!("Row transformations not implemented");
+    // Implemented in cassandra-storage::transform
 }
 
 #[test]

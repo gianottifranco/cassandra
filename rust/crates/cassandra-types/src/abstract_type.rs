@@ -24,7 +24,9 @@
 //! - `org.apache.cassandra.db.marshal.AbstractType`
 
 use std::cmp::Ordering;
+use std::net::IpAddr;
 
+use crate::bigint;
 use crate::codec::{CqlValue, CodecError};
 use crate::comparator::compare_bytes;
 use crate::marshal::{MarshalError, MarshalResult};
@@ -160,6 +162,45 @@ pub fn from_cql_string(cql_type: &CqlType, s: &str) -> MarshalResult<Vec<u8>> {
         }
         CqlType::Varchar => Ok(s.as_bytes().to_vec()),
         CqlType::Blob => parse_hex_blob(s),
+        CqlType::Varint => bigint::string_to_varint(s),
+        CqlType::Decimal => bigint::string_to_decimal(s),
+        CqlType::Inet => {
+            let addr: IpAddr = s.parse().map_err(|_| MarshalError::InvalidData {
+                type_name: "inet".into(),
+                reason: format!("cannot parse '{}' as IP address", s),
+            })?;
+            match addr {
+                IpAddr::V4(v4) => Ok(v4.octets().to_vec()),
+                IpAddr::V6(v6) => Ok(v6.octets().to_vec()),
+            }
+        }
+        CqlType::Uuid | CqlType::Timeuuid => {
+            let hex: String = s.chars().filter(|c| *c != '-').collect();
+            if hex.len() != 32 {
+                return Err(MarshalError::InvalidData {
+                    type_name: cql_type.cql_name(),
+                    reason: format!("invalid UUID '{}'", s),
+                });
+            }
+            (0..hex.len())
+                .step_by(2)
+                .map(|i| {
+                    hex.get(i..i + 2)
+                        .and_then(|h| u8::from_str_radix(h, 16).ok())
+                        .ok_or(MarshalError::InvalidData {
+                            type_name: cql_type.cql_name(),
+                            reason: format!("invalid hex in UUID at position {}", i),
+                        })
+                })
+                .collect()
+        }
+        CqlType::Date => {
+            let n: u32 = s.parse().map_err(|_| MarshalError::InvalidData {
+                type_name: "date".into(),
+                reason: format!("cannot parse '{}' as date", s),
+            })?;
+            Ok(n.to_be_bytes().to_vec())
+        }
         _ => Err(MarshalError::UnsupportedType(cql_type.cql_name())),
     }
 }

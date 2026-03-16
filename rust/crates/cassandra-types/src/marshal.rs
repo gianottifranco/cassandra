@@ -45,6 +45,19 @@ pub enum MarshalError {
     Overflow,
     /// The type is not supported in this context.
     UnsupportedType(String),
+    /// A collection exceeds the maximum allowed size (65535 elements).
+    CollectionSizeLimitExceeded {
+        type_name: String,
+        size: usize,
+        max: usize,
+    },
+    /// A negative collection size was encountered during deserialization.
+    NegativeCollectionSize {
+        type_name: String,
+        size: i32,
+    },
+    /// Duration type does not support comparison operations in certain contexts.
+    DurationNotComparable,
 }
 
 impl fmt::Display for MarshalError {
@@ -66,6 +79,27 @@ impl fmt::Display for MarshalError {
             Self::Utf8Error => write!(f, "invalid UTF-8 encoding"),
             Self::Overflow => write!(f, "numeric overflow"),
             Self::UnsupportedType(name) => write!(f, "unsupported type: {}", name),
+            Self::CollectionSizeLimitExceeded {
+                type_name,
+                size,
+                max,
+            } => {
+                write!(
+                    f,
+                    "collection '{}' size {} exceeds maximum {}",
+                    type_name, size, max
+                )
+            }
+            Self::NegativeCollectionSize { type_name, size } => {
+                write!(
+                    f,
+                    "negative collection size {} for type '{}'",
+                    size, type_name
+                )
+            }
+            Self::DurationNotComparable => {
+                write!(f, "duration type does not support comparison")
+            }
         }
     }
 }
@@ -108,10 +142,38 @@ mod tests {
             MarshalError::Utf8Error,
             MarshalError::Overflow,
             MarshalError::UnsupportedType("vector".into()),
+            MarshalError::CollectionSizeLimitExceeded {
+                type_name: "list".into(),
+                size: 70000,
+                max: 65535,
+            },
+            MarshalError::NegativeCollectionSize {
+                type_name: "set".into(),
+                size: -1,
+            },
+            MarshalError::DurationNotComparable,
         ];
         for v in variants {
             // All variants must produce non-empty display strings
             assert!(!v.to_string().is_empty());
         }
+    }
+
+    #[test]
+    fn collection_size_limit_message() {
+        let e = MarshalError::CollectionSizeLimitExceeded {
+            type_name: "list<int>".into(),
+            size: 70000,
+            max: 65535,
+        };
+        let msg = e.to_string();
+        assert!(msg.contains("70000"));
+        assert!(msg.contains("65535"));
+    }
+
+    #[test]
+    fn duration_not_comparable() {
+        let e = MarshalError::DurationNotComparable;
+        assert!(e.to_string().contains("duration"));
     }
 }

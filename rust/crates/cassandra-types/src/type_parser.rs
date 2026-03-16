@@ -357,7 +357,13 @@ fn freeze(ty: CqlType) -> CqlType {
 }
 
 /// Decode a hex-encoded string (used for UDT field names in marshal strings).
+///
+/// Rejects odd-length inputs and non-hex characters rather than silently
+/// truncating or producing garbage.
 fn hex_decode_str(hex: &str) -> Result<String, ()> {
+    if hex.is_empty() || hex.len() % 2 != 0 {
+        return Err(());
+    }
     let bytes: Option<Vec<u8>> = (0..hex.len())
         .step_by(2)
         .map(|i| {
@@ -458,5 +464,58 @@ mod tests {
     #[test]
     fn empty_string_error() {
         assert!(matches!(parse_type(""), Err(ParseError::UnexpectedEof)));
+    }
+
+    #[test]
+    fn hex_decode_edge_cases() {
+        // Odd-length hex should fail
+        assert!(hex_decode_str("6").is_err());
+        // Empty hex should fail
+        assert!(hex_decode_str("").is_err());
+        // Valid hex
+        assert_eq!(hex_decode_str("6162").unwrap(), "ab");
+        // Non-hex characters
+        assert!(hex_decode_str("ZZZZ").is_err());
+        // Non-UTF8 bytes
+        assert!(hex_decode_str("FF80").is_err());
+    }
+
+    #[test]
+    fn user_type_with_hex_fields() {
+        // UserType(ks,74657374,6e616d65:UTF8Type)
+        // ks=ks, name_hex=74657374 → "test", field "name" → UTF8Type
+        let ty = parse_type("UserType(ks,74657374,6e616d65:UTF8Type)").unwrap();
+        match ty {
+            CqlType::Udt {
+                keyspace,
+                name,
+                field_names,
+                field_types,
+                ..
+            } => {
+                assert_eq!(keyspace, "ks");
+                assert_eq!(name, "test");
+                assert_eq!(field_names, vec!["name"]);
+                assert_eq!(field_types, vec![CqlType::Varchar]);
+            }
+            _ => panic!("expected UDT"),
+        }
+    }
+
+    #[test]
+    fn composite_type_parsing() {
+        let ty = parse_type("CompositeType(UTF8Type,Int32Type)").unwrap();
+        assert_eq!(ty, CqlType::Tuple(vec![CqlType::Varchar, CqlType::Int]));
+    }
+
+    #[test]
+    fn frozen_set_roundtrip() {
+        let ty = parse_type("FrozenType(SetType(UTF8Type))").unwrap();
+        assert_eq!(ty, CqlType::Set(Box::new(CqlType::Varchar), true));
+    }
+
+    #[test]
+    fn date_type_legacy() {
+        assert_eq!(parse_type("DateType").unwrap(), CqlType::Timestamp);
     }
 }
