@@ -48,6 +48,9 @@ pub mod topology;
 pub use cluster::{ClusterMetadata, ClusterSnapshot};
 pub use gossip::failure_detector::FailureDetector;
 pub use gossip::messages::{GossipDigest, GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
+pub use gossip::metrics::{GossipMetrics, GossipMetricsSnapshot};
+pub use gossip::service::{GossipService, GossipServiceConfig};
+pub use gossip::subscribers::{EndpointStateChangeSubscriber, GossipEvent, SubscriberRegistry};
 pub use gossip::{
     ApplicationState, EndpointState, Gossiper, HeartbeatState, SeedProvider, VersionedValue,
 };

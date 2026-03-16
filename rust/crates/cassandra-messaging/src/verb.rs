@@ -90,6 +90,8 @@ pub enum Verb {
     Ping = 19,
     /// Pong response.
     Pong = 20,
+    /// Gossip shutdown announcement.
+    GossipShutdown = 21,
 
     // ── Streaming ───────────────────────────────────────────────
     /// Initialize a streaming session.
@@ -176,6 +178,7 @@ impl Verb {
             18 => Some(Self::SchemaResponse),
             19 => Some(Self::Ping),
             20 => Some(Self::Pong),
+            21 => Some(Self::GossipShutdown),
             99 => Some(Self::RequestFailure),
             100 => Some(Self::StreamInit),
             101 => Some(Self::StreamInitResponse),
@@ -283,6 +286,7 @@ impl Verb {
             Self::SchemaResponse => "SCHEMA_RSP",
             Self::Ping => "PING",
             Self::Pong => "PONG",
+            Self::GossipShutdown => "GOSSIP_SHUTDOWN",
             Self::StreamInit => "STREAM_INIT",
             Self::StreamInitResponse => "STREAM_INIT_RSP",
             Self::StreamData => "STREAM_DATA",
@@ -342,6 +346,7 @@ mod tests {
             Verb::SchemaResponse,
             Verb::Ping,
             Verb::Pong,
+            Verb::GossipShutdown,
             Verb::StreamInit,
             Verb::StreamInitResponse,
             Verb::StreamData,

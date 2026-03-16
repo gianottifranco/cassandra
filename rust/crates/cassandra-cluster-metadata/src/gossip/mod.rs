@@ -26,7 +26,15 @@
 //! - `org.apache.cassandra.gms.FailureDetector`
 
 pub mod failure_detector;
+pub mod handlers;
 pub mod messages;
+pub mod metrics;
+pub mod schema_exchange;
+pub mod service;
+pub mod shadow;
+pub mod shutdown;
+pub mod subscribers;
+pub mod task;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -671,6 +679,24 @@ impl Gossiper {
     /// Total number of known endpoints (including self).
     pub fn known_endpoint_count(&self) -> usize {
         self.endpoint_states.read().len()
+    }
+
+    /// Get the cluster name used for SYN validation.
+    pub fn cluster_name(&self) -> &str {
+        &self.cluster_name
+    }
+
+    /// Get the seed provider.
+    pub fn seeds(&self) -> &SeedProvider {
+        &self.seeds
+    }
+
+    /// Increment the local heartbeat version (called once per gossip round).
+    pub fn increment_heartbeat(&self) {
+        let mut states = self.endpoint_states.write();
+        if let Some(local) = states.get_mut(&self.local_endpoint) {
+            local.heartbeat.increment();
+        }
     }
 
     // ── Gossip Hardening ───────────────────────────────────────────────

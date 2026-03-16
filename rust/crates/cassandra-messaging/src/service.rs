@@ -358,6 +358,14 @@ impl MessagingService {
         Ok(())
     }
 
+    /// Handle a single inbound connection (dispatch messages until stream closes).
+    pub async fn dispatch_on_stream<S>(&self, stream: S) -> Result<(), std::io::Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        self.handle_connection(stream).await
+    }
+
     /// Handle a single inbound connection.
     async fn handle_connection<S>(&self, stream: S) -> Result<(), std::io::Error>
     where
