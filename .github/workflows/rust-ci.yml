@@ -66,6 +66,20 @@ jobs:
       - name: Compile benchmarks
         run: cargo bench --workspace --no-run
 
+  gap-audit:
+    name: Gap Audit
+    runs-on: ubuntu-latest
+    needs: [check]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Scan TODOs/stubs
+        run: python3 scripts/gap_audit.py todos --strict
+      - name: Scan gap guards
+        run: python3 scripts/gap_audit.py gap-guards --strict
+
   golden-tests:
     name: Golden Tests (offline)
     runs-on: ubuntu-latest

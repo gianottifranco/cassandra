@@ -2,7 +2,7 @@
 # or more contributor license agreements.
 # See the NOTICE file and LICENSE.txt at the repository root.
 
-.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate
+.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate gap-audit
 
 # Default target
 all: check-all
@@ -55,6 +55,11 @@ status:
 	@echo "=== Feature Matrix Status ==="
 	@grep -E "^  - name:|status:" ../docs/rewrite/feature_matrix.yaml | paste - - | \
 		sed 's/  - name: //; s/    status: /\t/' || true
+
+## Run gap audit (TODO/stub/gap-guard scanning)
+gap-audit:
+	python3 scripts/gap_audit.py todos
+	python3 scripts/gap_audit.py gap-guards
 
 ## ── Differential Testing ────────────────────────────────────────────────
 
