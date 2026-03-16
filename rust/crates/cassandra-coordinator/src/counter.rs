@@ -37,13 +37,12 @@
 //! 6. Coordinator waits for acks according to the ConsistencyLevel.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use dashmap::DashMap;
-use tracing::{debug, info, warn};
+use tracing::debug;
 use uuid::Uuid;
 
-use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
+use cassandra_cluster_metadata::{Endpoint, ReplicationStrategy, Snitch};
 
 use crate::consistency::ConsistencyLevel;
 use crate::write::{CoordinatedMutation, WriteCoordinator, WriteError, WriteResult};

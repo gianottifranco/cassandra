@@ -15,7 +15,7 @@
 //! fqltool dump --json <FQL_LOG_FILE>
 //! ```
 
-use cassandra_security::fql::{FqlReader, FqlRecord};
+use cassandra_security::fql::FqlReader;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 
@@ -59,7 +59,7 @@ fn main() -> anyhow::Result<()> {
                     println!("{}", j);
                 }
             } else {
-                println!("{:<26} {:<6} {}", "TIMESTAMP_MICROS", "CL", "QUERY");
+                println!("{:<26} {:<6} QUERY", "TIMESTAMP_MICROS", "CL");
                 println!("{}", "-".repeat(80));
                 for record in &records {
                     println!(

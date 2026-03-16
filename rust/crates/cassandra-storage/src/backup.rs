@@ -92,8 +92,7 @@ pub fn create_snapshot(
 
     // Write manifest
     let manifest_path = snap_dir.join("manifest.json");
-    let json = serde_json::to_vec_pretty(&manifest)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
     fs::write(&manifest_path, json)?;
 
     info!(name, files = manifest.files.len(), "Snapshot created");

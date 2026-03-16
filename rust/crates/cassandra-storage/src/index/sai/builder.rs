@@ -61,7 +61,7 @@ impl SaiSegmentBuilder {
 
     /// Add an entry to the builder.
     pub fn add(&mut self, term: Vec<u8>, partition_key: Vec<u8>, clustering_key: Vec<u8>) {
-        let pl = self.terms.entry(term).or_insert_with(PostingList::new);
+        let pl = self.terms.entry(term).or_default();
         pl.add(partition_key, clustering_key);
         self.row_count += 1;
     }
@@ -104,9 +104,7 @@ pub fn merge_segments(segments: &[SaiSegment], new_generation: u64) -> SaiSegmen
 
     for segment in segments {
         for (term, pl) in &segment.terms {
-            let merged_pl = merged_terms
-                .entry(term.clone())
-                .or_insert_with(PostingList::new);
+            let merged_pl = merged_terms.entry(term.clone()).or_default();
             merged_pl.merge(pl);
         }
         total_rows += segment.row_count;

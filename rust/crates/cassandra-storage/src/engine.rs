@@ -39,7 +39,6 @@ use crate::memtable::partition::{Cell, PartitionData, Row};
 use crate::memtable::{MemtableManager, MemtableType};
 use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
 use crate::sstable::{BtiReader, BtiWriter, SSTableReader, SSTableWriter};
-use std::sync::Arc;
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
@@ -423,9 +422,7 @@ impl StorageEngine {
     ) -> Result<Vec<PartitionData>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
-        let mgr = mgrs
-            .get(&cf_name)
-            .ok_or_else(|| "Index manager not found")?;
+        let mgr = mgrs.get(&cf_name).ok_or("Index manager not found")?;
 
         let entries = mgr.search(index_name, term)?;
 
@@ -451,9 +448,7 @@ impl StorageEngine {
     ) -> Result<Vec<(PartitionData, f32)>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
-        let mgr = mgrs
-            .get(&cf_name)
-            .ok_or_else(|| "Index manager not found")?;
+        let mgr = mgrs.get(&cf_name).ok_or("Index manager not found")?;
 
         let entries = mgr.search_vector(index_name, vector, top_k)?;
 

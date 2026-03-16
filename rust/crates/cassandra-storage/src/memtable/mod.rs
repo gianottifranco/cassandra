@@ -35,18 +35,13 @@ use partition::{PartitionData, Row};
 // ─── Memtable type configuration ──────────────────────────────────────────
 
 /// Which memtable backend to use.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum MemtableType {
     /// BTreeMap-based skiplist (default, matches Java SkipListMemtable).
+    #[default]
     SkipList,
     /// Prefix-trie based (matches Java TrieMemtable, experimental).
     Trie,
-}
-
-impl Default for MemtableType {
-    fn default() -> Self {
-        Self::SkipList
-    }
 }
 
 /// Create a memtable backend by type.
@@ -110,7 +105,7 @@ impl MemtableBackend for SkipListMemtable {
     fn apply(&self, partition_key: Vec<u8>, row: Row) {
         let row_size = estimate_row_size(&row);
         let mut data = self.data.write();
-        let partition = data.entry(partition_key).or_insert_with(PartitionData::new);
+        let partition = data.entry(partition_key).or_default();
         partition.apply_row(row);
         self.approx_size.fetch_add(row_size, Ordering::Relaxed);
         self.op_count.fetch_add(1, Ordering::Relaxed);

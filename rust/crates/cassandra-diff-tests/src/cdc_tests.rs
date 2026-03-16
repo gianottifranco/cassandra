@@ -2,9 +2,6 @@
 
 //! CDC continuity tests across simulated migration boundary.
 
-use std::collections::BTreeSet;
-use std::fs;
-
 #[cfg(test)]
 mod tests {
     use super::*;

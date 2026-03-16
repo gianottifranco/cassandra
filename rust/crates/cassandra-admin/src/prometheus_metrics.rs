@@ -10,12 +10,9 @@
 //! Metric names follow Prometheus conventions but preserve Cassandra semantics.
 //! See ADR-013 for rationale.
 
-use std::sync::Arc;
-
-use parking_lot::RwLock;
 use prometheus::{
-    Counter, CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec,
-    IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry, TextEncoder,
+    Encoder, Gauge, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, Opts,
+    Registry, TextEncoder,
 };
 use tracing::warn;
 

@@ -147,10 +147,7 @@ impl PaxosReplica {
 
     /// Handle a Prepare request.
     pub fn handle_prepare(&self, msg: &PaxosPrepare) -> PaxosPromise {
-        let mut state = self
-            .states
-            .entry(msg.partition_key.clone())
-            .or_insert_with(PaxosState::new);
+        let mut state = self.states.entry(msg.partition_key.clone()).or_default();
 
         let resp = state.prepare(msg.ballot);
         PaxosPromise {
@@ -163,10 +160,7 @@ impl PaxosReplica {
 
     /// Handle a Propose request.
     pub fn handle_propose(&self, msg: &PaxosPropose) -> PaxosAccept {
-        let mut state = self
-            .states
-            .entry(msg.partition_key.clone())
-            .or_insert_with(PaxosState::new);
+        let mut state = self.states.entry(msg.partition_key.clone()).or_default();
 
         let resp = state.propose(msg.proposal.clone());
         PaxosAccept {
@@ -177,10 +171,7 @@ impl PaxosReplica {
 
     /// Handle a Commit message.
     pub fn handle_commit(&self, msg: &PaxosCommit) {
-        let mut state = self
-            .states
-            .entry(msg.partition_key.clone())
-            .or_insert_with(PaxosState::new);
+        let mut state = self.states.entry(msg.partition_key.clone()).or_default();
 
         state.commit(msg.proposal.clone());
     }

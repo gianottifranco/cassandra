@@ -11,16 +11,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// The kind of keyspace.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum KeyspaceKind {
+    #[default]
     Regular,
     Virtual,
-}
-
-impl Default for KeyspaceKind {
-    fn default() -> Self {
-        Self::Regular
-    }
 }
 
 /// Replication parameters for a keyspace.

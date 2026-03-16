@@ -108,18 +108,13 @@ pub struct SSTableDescriptor {
     pub format: SSTableFormat,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SSTableFormat {
     /// Classic big-format with binary-search partition index.
+    #[default]
     Big,
     /// Block-based trie index format.
     Bti,
-}
-
-impl Default for SSTableFormat {
-    fn default() -> Self {
-        Self::Big
-    }
 }
 
 impl SSTableDescriptor {

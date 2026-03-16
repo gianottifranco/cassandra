@@ -175,9 +175,7 @@ impl SecondaryIndex for SaiIndex {
         }
 
         let mut terms = self.terms.write();
-        let posting_list = terms
-            .entry(entry.term.clone())
-            .or_insert_with(PostingList::new);
+        let posting_list = terms.entry(entry.term.clone()).or_default();
         posting_list.add(entry.partition_key.clone(), entry.clustering_key.clone());
         Ok(())
     }
@@ -276,7 +274,7 @@ impl SecondaryIndex for SaiIndex {
                     }
                 }
             }
-            let existing_list = terms.entry(term).or_insert_with(PostingList::new);
+            let existing_list = terms.entry(term).or_default();
             existing_list.merge(&posting_list);
         }
         Ok(())

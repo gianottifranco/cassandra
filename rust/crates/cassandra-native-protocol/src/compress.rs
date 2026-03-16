@@ -58,9 +58,7 @@ impl Compression {
             #[cfg(feature = "compression-snappy")]
             Compression::Snappy => {
                 let mut encoder = snap::raw::Encoder::new();
-                encoder
-                    .compress_vec(data)
-                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
+                encoder.compress_vec(data).map_err(std::io::Error::other)
             }
             #[allow(unreachable_patterns)]
             _ => Err(std::io::Error::new(

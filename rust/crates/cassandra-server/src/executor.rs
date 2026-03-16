@@ -16,14 +16,12 @@ use cassandra_security::Resource as SecurityResource;
 use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 
 use cassandra_cql::ast::{
-    Assignment, ClusteringOrder as AstClusteringOrder, Literal, Relation, SelectColumns, Selector,
-    Term,
+    ClusteringOrder as AstClusteringOrder, Literal, SelectColumns, Selector, Term,
 };
 use cassandra_cql::planner::{
-    AlterKeyspacePlan, AlterRolePlan, AlterTablePlan, BatchPlan, CreateKeyspacePlan,
-    CreateRolePlan, CreateTablePlan, DeletePlan, DropKeyspacePlan, DropRolePlan, DropTablePlan,
-    GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan, TruncatePlan,
-    UpdatePlan, UsePlan,
+    AlterKeyspacePlan, AlterRolePlan, BatchPlan, CreateKeyspacePlan, CreateRolePlan,
+    CreateTablePlan, DeletePlan, DropKeyspacePlan, DropRolePlan, DropTablePlan, GrantPlan,
+    InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan, UpdatePlan, UsePlan,
 };
 use cassandra_schema::{
     ClusteringOrder, ColumnKind, ColumnMetadata, KeyspaceMetadata, KeyspaceParams,
@@ -46,6 +44,7 @@ pub enum ExecutorError {
     TableNotFound(String, String),
     #[error("Storage error: {0}")]
     StorageError(String),
+    #[allow(dead_code)]
     #[error("Schema error: {0}")]
     SchemaError(String),
 }
@@ -53,6 +52,7 @@ pub enum ExecutorError {
 // ─── Query Result ──────────────────────────────────────────────────────────
 
 /// Result of executing a query.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum QueryResult {
     SchemaChange {
@@ -69,6 +69,7 @@ pub enum QueryResult {
     SetKeyspace(String),
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct ResultColumn {
     pub keyspace: String,
@@ -570,14 +571,12 @@ impl QueryExecutor {
                 if let Some(v) = term_to_bytes(&rel.value) {
                     pk_bytes.extend_from_slice(&v);
                 }
-            } else {
-                if let Some(idx) = table_meta
-                    .indexes
-                    .iter()
-                    .find(|i| i.target_column() == Some(&rel.column))
-                {
-                    index_searches.push((rel.clone(), idx.clone()));
-                }
+            } else if let Some(idx) = table_meta
+                .indexes
+                .iter()
+                .find(|i| i.target_column() == Some(&rel.column))
+            {
+                index_searches.push((rel.clone(), idx.clone()));
             }
         }
 

@@ -76,10 +76,13 @@ pub trait UdfExecutor: Send + Sync {
     fn language(&self) -> &str;
 }
 
+/// Type alias for UDF entries stored in the registry.
+type UdfEntry = (UdfMetadata, Arc<dyn UdfExecutor>);
+
 /// Registry for user-defined functions.
 pub struct UdfRegistry {
     /// Key: (keyspace, name, arg_types_signature)
-    functions: RwLock<HashMap<String, (UdfMetadata, Arc<dyn UdfExecutor>)>>,
+    functions: RwLock<HashMap<String, UdfEntry>>,
 }
 
 impl UdfRegistry {

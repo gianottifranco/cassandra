@@ -64,7 +64,4 @@ pub mod triggers;
 
 /// UDF support (feature-gated).
 #[cfg(feature = "udfs")]
-pub mod udf {
-    //! User-defined function operations.
-    //! ## Java Oracle: `org.apache.cassandra.cql3.functions.*`
-}
+pub mod udf {}

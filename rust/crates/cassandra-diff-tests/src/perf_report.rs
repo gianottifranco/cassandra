@@ -106,7 +106,7 @@ pub mod budgets {
 }
 
 /// Compute percentiles from a sorted slice of microsecond samples.
-pub fn compute_latency(name: &str, samples: &mut Vec<u64>) -> LatencyMeasurement {
+pub fn compute_latency(name: &str, samples: &mut [u64]) -> LatencyMeasurement {
     samples.sort();
     let len = samples.len();
     if len == 0 {
@@ -174,6 +174,12 @@ pub struct PerfReport {
     pub throughput_measurements: Vec<ThroughputMeasurement>,
     pub memory_measurements: Vec<MemoryMeasurement>,
     pub overall_pass: bool,
+}
+
+impl Default for PerfReport {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PerfReport {

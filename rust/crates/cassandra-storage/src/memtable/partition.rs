@@ -38,6 +38,7 @@ impl Cell {
     }
 
     /// Merge: higher timestamp wins. If equal timestamp, tombstone wins.
+    #[allow(clippy::if_same_then_else)]
     pub fn merge_with(&self, other: &Cell) -> Cell {
         if other.timestamp > self.timestamp {
             other.clone()

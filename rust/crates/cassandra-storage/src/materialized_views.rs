@@ -82,6 +82,9 @@ pub struct ViewUpdateResult {
     pub had_errors: bool,
 }
 
+/// Type alias for the views index: (keyspace, base_table) → [view definitions].
+type ViewIndex = HashMap<(String, String), Vec<MaterializedViewDefinition>>;
+
 /// Manages materialized view definitions and generates view updates.
 ///
 /// ## Java Oracle
@@ -89,7 +92,7 @@ pub struct ViewUpdateResult {
 /// `org.apache.cassandra.db.view.ViewManager`
 pub struct ViewManager {
     /// Views indexed by (keyspace, base_table) → [view definitions].
-    views: Arc<RwLock<HashMap<(String, String), Vec<MaterializedViewDefinition>>>>,
+    views: Arc<RwLock<ViewIndex>>,
 }
 
 impl ViewManager {

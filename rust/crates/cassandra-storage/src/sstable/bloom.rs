@@ -26,7 +26,7 @@ impl BloomFilter {
     pub fn new(num_elements: usize, fp_rate: f64) -> Self {
         let bit_count = optimal_num_bits(num_elements, fp_rate);
         let num_hash_functions = optimal_num_hashes(bit_count, num_elements);
-        let word_count = ((bit_count + 63) / 64) as usize;
+        let word_count = bit_count.div_ceil(64) as usize;
 
         Self {
             bits: vec![0u64; word_count],
@@ -224,7 +224,7 @@ fn optimal_num_bits(n: usize, fp_rate: f64) -> u64 {
 fn optimal_num_hashes(bits: u64, n: usize) -> u32 {
     let n = n.max(1) as f64;
     let k = (bits as f64 / n) * 2.0_f64.ln();
-    (k.ceil() as u32).max(1).min(30)
+    (k.ceil() as u32).clamp(1, 30)
 }
 
 #[cfg(test)]

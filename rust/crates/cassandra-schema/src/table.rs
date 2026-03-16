@@ -23,8 +23,10 @@ pub enum TableFlag {
 /// Transactional logic routing mode for a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum TransactionalMode {
     /// No strict serializable transactions.
+    #[default]
     Off,
     /// Traditional Paxos LWT.
     Paxos,
@@ -32,12 +34,6 @@ pub enum TransactionalMode {
     Accord,
     /// Migration mode.
     Mixed,
-}
-
-impl Default for TransactionalMode {
-    fn default() -> Self {
-        TransactionalMode::Off
-    }
 }
 
 /// Table-level parameters.

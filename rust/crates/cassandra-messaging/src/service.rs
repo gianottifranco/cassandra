@@ -61,6 +61,7 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Pending response entry.
 struct PendingResponse {
+    #[allow(dead_code)]
     sender: oneshot::Sender<Message>,
     sent_at: std::time::Instant,
 }
@@ -339,10 +340,8 @@ impl MessagingService {
                                         error!(peer = %peer, error = %e, "TLS Handshake failed");
                                     }
                                 }
-                            } else {
-                                if let Err(e) = svc2.handle_connection(stream).await {
-                                    debug!(peer = %peer, error = %e, "Connection ended");
-                                }
+                            } else if let Err(e) = svc2.handle_connection(stream).await {
+                                debug!(peer = %peer, error = %e, "Connection ended");
                             }
                             svc2.metrics
                                 .connections_active

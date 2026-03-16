@@ -73,6 +73,7 @@ impl TrieNode {
         count
     }
 
+    #[allow(dead_code)]
     fn estimate_memory(&self) -> usize {
         let mut size = std::mem::size_of::<TrieNode>();
         if let Some(ref pd) = self.data {
@@ -85,6 +86,7 @@ impl TrieNode {
     }
 }
 
+#[allow(dead_code)]
 fn estimate_partition_size(pd: &PartitionData) -> usize {
     let mut size = 64; // base overhead
     for (ck, row) in &pd.rows {

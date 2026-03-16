@@ -9,15 +9,15 @@ use crate::compaction::anticompact_partitions;
 use crate::memtable::partition::PartitionData;
 use cassandra_common::Token;
 
+/// Type alias for a collection of partitions.
+type PartitionSet = Vec<(Vec<u8>, PartitionData)>;
+
 /// Anti-compacts a set of partitions: separates partitions into "repaired" and "unrepaired"
 /// depending on whether they fall within the given token range.
 pub fn anticompact_range(
     partitions: Vec<(Vec<u8>, PartitionData)>,
     range: (Token, Token),
-) -> (
-    Vec<(Vec<u8>, PartitionData)>, // Inside range (repaired)
-    Vec<(Vec<u8>, PartitionData)>, // Outside range (unrepaired)
-) {
+) -> (PartitionSet, PartitionSet) {
     anticompact_partitions(partitions, |pk| {
         let pk_token = Token::from_partition_key(pk);
         if range.0.value() <= range.1.value() {

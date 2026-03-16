@@ -117,21 +117,24 @@ impl ClusteringBound {
     }
 }
 
+/// Comparator function for a single clustering column.
+pub type ClusteringComparator = fn(&[u8], &[u8]) -> Ordering;
+
 /// Compare two clustering keys using the given comparator functions.
 ///
 /// `comparators` is a slice of comparison functions, one per clustering column.
 pub fn compare_clustering_keys(
     left: &ClusteringKey,
     right: &ClusteringKey,
-    comparators: &[fn(&[u8], &[u8]) -> Ordering],
+    comparators: &[ClusteringComparator],
 ) -> Ordering {
     let len = left
         .values
         .len()
         .min(right.values.len())
         .min(comparators.len());
-    for i in 0..len {
-        match comparators[i](&left.values[i], &right.values[i]) {
+    for (i, comparator) in comparators.iter().enumerate().take(len) {
+        match comparator(&left.values[i], &right.values[i]) {
             Ordering::Equal => continue,
             other => return other,
         }

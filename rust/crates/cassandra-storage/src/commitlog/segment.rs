@@ -200,7 +200,7 @@ impl Segment {
         let writer = self
             .writer
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Segment not open for writing"))?;
+            .ok_or_else(|| io::Error::other("Segment not open for writing"))?;
 
         let offset = self.size;
 
@@ -365,18 +365,13 @@ impl Segment {
 }
 
 /// How to handle corrupt entries during replay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CorruptionPolicy {
     /// Stop at first corrupt entry (default, safest).
+    #[default]
     StopOnCorrupt,
     /// Skip corrupt entries and continue replaying.
     SkipAndContinue,
-}
-
-impl Default for CorruptionPolicy {
-    fn default() -> Self {
-        Self::StopOnCorrupt
-    }
 }
 
 #[cfg(test)]

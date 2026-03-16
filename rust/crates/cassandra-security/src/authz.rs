@@ -285,7 +285,7 @@ impl<R: RoleManager + Send + Sync> Authorizer for CassandraAuthorizer<R> {
             role: grantee.to_string(),
             resource: resource.clone(),
         };
-        let mut entry = self.grants.entry(key).or_insert_with(Vec::new);
+        let mut entry = self.grants.entry(key).or_default();
         if !entry.contains(&permission) {
             entry.push(permission);
         }

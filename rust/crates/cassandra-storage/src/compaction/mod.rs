@@ -34,19 +34,14 @@ use crate::sstable::format::SSTableId;
 // ─── Strategy type enum ────────────────────────────────────────────────────
 
 /// Compaction strategy selector.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 pub enum CompactionStrategyType {
+    #[default]
     SizeTiered,
     Leveled,
     TimeWindow,
     #[cfg(feature = "ucs")]
     Unified,
-}
-
-impl Default for CompactionStrategyType {
-    fn default() -> Self {
-        Self::SizeTiered
-    }
 }
 
 /// Create a compaction strategy from the type enum.
@@ -168,14 +163,15 @@ pub fn find_fully_expired(
         .collect()
 }
 
-// ─── Anticompaction ────────────────────────────────────────────────────────
+/// Type alias for a collection of partitions with their keys.
+pub type PartitionVec = Vec<(Vec<u8>, PartitionData)>;
 
 /// Token-range based split for anticompaction (repair).
 /// Splits a set of partitions into two groups based on a range predicate.
 pub fn anticompact_partitions<F>(
     partitions: Vec<(Vec<u8>, PartitionData)>,
     in_range: F,
-) -> (Vec<(Vec<u8>, PartitionData)>, Vec<(Vec<u8>, PartitionData)>)
+) -> (PartitionVec, PartitionVec)
 where
     F: Fn(&[u8]) -> bool,
 {
@@ -241,7 +237,7 @@ pub fn merge_partitions(
 
     for source in sources {
         for (pk, partition) in source {
-            let entry = merged.entry(pk).or_insert_with(PartitionData::new);
+            let entry = merged.entry(pk).or_default();
 
             if let Some(ts) = partition.tombstone_timestamp {
                 if let Some(ldt) = partition.tombstone_local_deletion_time {

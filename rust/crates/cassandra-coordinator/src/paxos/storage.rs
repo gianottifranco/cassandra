@@ -25,7 +25,6 @@
 
 use std::sync::Arc;
 
-use tracing::{debug, warn};
 use uuid::Uuid;
 
 use cassandra_storage::commitlog::{CellMutation, Mutation, MutationRow};

@@ -41,7 +41,7 @@ impl FromStr for DataSize {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if s.is_empty() {
-            return Err(ParseUnitError(format!("empty data size")));
+            return Err(ParseUnitError("empty data size".to_string()));
         }
         // Try suffixed formats
         let lower = s.to_lowercase();

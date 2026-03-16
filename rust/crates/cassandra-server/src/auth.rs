@@ -12,6 +12,7 @@ use cassandra_storage::engine::StorageEngine;
 
 const SYSTEM_AUTH: &str = "system_auth";
 const ROLES_TABLE: &str = "roles";
+#[allow(dead_code)]
 const PERMISSIONS_TABLE: &str = "role_permissions";
 
 // ─── SystemAuthRoleManager ──────────────────────────────────────────────────
@@ -207,8 +208,8 @@ impl RoleManager for SystemAuthRoleManager {
             }
             if let Some(ref val) = cell.value {
                 match cell.column.as_str() {
-                    "is_superuser" => is_superuser = val.get(0).copied() == Some(1),
-                    "can_login" => can_login = val.get(0).copied() == Some(1),
+                    "is_superuser" => is_superuser = val.first().copied() == Some(1),
+                    "can_login" => can_login = val.first().copied() == Some(1),
                     "salted_hash" => {
                         hashed_password = String::from_utf8(val.clone()).ok();
                     }
@@ -254,6 +255,7 @@ impl RoleManager for SystemAuthRoleManager {
 // ─── SystemAuthAuthorizer ───────────────────────────────────────────────────
 
 pub struct SystemAuthAuthorizer {
+    #[allow(dead_code)]
     engine: Arc<StorageEngine>,
     role_manager: Arc<dyn RoleManager>,
 }

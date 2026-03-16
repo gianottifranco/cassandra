@@ -10,9 +10,10 @@ use crate::tcm::{Epoch, TcmMetadata};
 ///
 /// Determines whether cluster metadata is managed via gossip,
 /// TCM (Transactional Cluster Metadata), or both.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ControlPlaneMode {
     /// Classic gossip-based membership and schema propagation.
+    #[default]
     GossipOnly,
     /// TCM is authoritative for topology and schema; gossip carries
     /// health/status information and TCM epoch for catch-up.
@@ -40,12 +41,6 @@ impl fmt::Display for ControlPlaneMode {
             Self::TcmWithGossipBridge => write!(f, "TcmWithGossipBridge"),
             Self::TcmOnly => write!(f, "TcmOnly"),
         }
-    }
-}
-
-impl Default for ControlPlaneMode {
-    fn default() -> Self {
-        Self::GossipOnly
     }
 }
 

@@ -364,11 +364,9 @@ impl Gossiper {
 
         // Also include endpoints we know about but they didn't mention
         for (ep, state) in states.iter() {
-            if !syn.digests.iter().any(|d| d.endpoint == *ep) {
-                if !self.is_quarantined(ep) {
-                    let delta = self.extract_delta(state, 0);
-                    updated_states.insert(*ep, delta);
-                }
+            if !syn.digests.iter().any(|d| d.endpoint == *ep) && !self.is_quarantined(ep) {
+                let delta = self.extract_delta(state, 0);
+                updated_states.insert(*ep, delta);
             }
         }
 

@@ -166,8 +166,7 @@ impl SSTableWriter {
 
         // ── Write Statistics.db ───────────────────────────────────
         let stats_path = self.descriptor.component_path(Component::Statistics);
-        let stats_json = serde_json::to_vec_pretty(&stats)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let stats_json = serde_json::to_vec_pretty(&stats).map_err(io::Error::other)?;
         fs::write(&stats_path, stats_json)?;
 
         // ── Write TOC.txt ─────────────────────────────────────────

@@ -20,7 +20,6 @@
 //! - `org.apache.cassandra.transport.Event`
 //! - `org.apache.cassandra.service.StorageService` (event emission points)
 
-use parking_lot::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 

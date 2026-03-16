@@ -311,7 +311,7 @@ impl PendingRanges {
 /// Each topology operation is associated with an epoch that allows
 /// safe recovery after restarts, as well as linearization of concurrent
 /// operations across the cluster.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, Default)]
 pub struct TopologyEpoch(pub u64);
 
 impl TopologyEpoch {
@@ -325,12 +325,6 @@ impl TopologyEpoch {
 
     pub fn is_empty(&self) -> bool {
         self.0 == 0
-    }
-}
-
-impl Default for TopologyEpoch {
-    fn default() -> Self {
-        Self(0)
     }
 }
 

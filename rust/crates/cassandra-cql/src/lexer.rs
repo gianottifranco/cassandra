@@ -264,7 +264,6 @@ impl Keyword {
             "FROZEN" => Some(Keyword::Frozen),
             "LIST" => Some(Keyword::List),
             "MAP" => Some(Keyword::Map),
-            "SET" => Some(Keyword::Set),
             "TUPLE" => Some(Keyword::Tuple),
             "CLUSTERING" => Some(Keyword::Clustering),
             "COMPACT" => Some(Keyword::Compact),
@@ -448,7 +447,7 @@ impl<'a> Lexer<'a> {
             }
             b':' if self
                 .peek(1)
-                .map_or(false, |b| b.is_ascii_alphanumeric() || b == b'_') =>
+                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') =>
             {
                 self.pos += 1;
                 let name = self.read_ident_text();
@@ -458,7 +457,7 @@ impl<'a> Lexer<'a> {
                 self.pos += 1;
                 TokenKind::Colon
             }
-            b'-' if self.peek(1).map_or(false, |b| b.is_ascii_digit()) => {
+            b'-' if self.peek(1).is_some_and(|b| b.is_ascii_digit()) => {
                 return self.read_number(start);
             }
             b'-' => {

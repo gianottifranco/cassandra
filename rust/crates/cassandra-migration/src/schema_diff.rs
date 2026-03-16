@@ -622,8 +622,7 @@ fn extract_primary_key(line: &str) -> Option<Vec<String>> {
     let inner = &line[start + 1..end];
     // Handle composite: ((pk1, pk2), ck1, ck2)
     let keys: Vec<String> = inner
-        .replace('(', "")
-        .replace(')', "")
+        .replace(['(', ')'], "")
         .split(',')
         .map(|s| s.trim().trim_matches('"').to_string())
         .filter(|s| !s.is_empty())

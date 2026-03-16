@@ -359,6 +359,7 @@ impl VirtualTable for ThreadPoolsTable {
 // ─── system_views.sstable_tasks ────────────────────────────────────────────
 
 /// `system_views.sstable_tasks` — active SSTable compaction/streaming tasks.
+#[derive(Default)]
 pub struct SstableTasksTable {
     pub tasks: Vec<SstableTask>,
 }
@@ -370,12 +371,6 @@ pub struct SstableTask {
     pub task_id: String,
     pub kind: String,
     pub progress: f64,
-}
-
-impl Default for SstableTasksTable {
-    fn default() -> Self {
-        Self { tasks: Vec::new() }
-    }
 }
 
 impl VirtualTable for SstableTasksTable {
@@ -427,6 +422,7 @@ impl VirtualTable for SstableTasksTable {
 // ─── system_views.clients ──────────────────────────────────────────────────
 
 /// `system_views.clients` — connected native protocol clients.
+#[derive(Default)]
 pub struct ClientsTable {
     pub clients: Vec<ClientInfo>,
 }
@@ -439,14 +435,6 @@ pub struct ClientInfo {
     pub connection_stage: String,
     pub protocol_version: u8,
     pub ssl: bool,
-}
-
-impl Default for ClientsTable {
-    fn default() -> Self {
-        Self {
-            clients: Vec::new(),
-        }
-    }
 }
 
 impl VirtualTable for ClientsTable {

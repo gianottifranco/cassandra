@@ -295,7 +295,7 @@ fn evaluate_path(
 /// Return all known supported migration paths.
 pub fn supported_paths() -> Vec<UpgradeCheckResult> {
     let rust_target = CassandraVersion::rust(0, 1, 0);
-    let sources = vec![
+    let sources = [
         CassandraVersion::java(4, 0, 0),
         CassandraVersion::java(4, 1, 0),
         CassandraVersion::java(5, 0, 0),
@@ -310,7 +310,7 @@ pub fn supported_paths() -> Vec<UpgradeCheckResult> {
 /// Return explicitly unsupported migration paths.
 pub fn unsupported_paths() -> Vec<UpgradeCheckResult> {
     let rust_target = CassandraVersion::rust(0, 1, 0);
-    let sources = vec![
+    let sources = [
         CassandraVersion::java(3, 0, 0),
         CassandraVersion::java(3, 11, 0),
         CassandraVersion::java(2, 2, 0),

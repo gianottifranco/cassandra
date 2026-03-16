@@ -272,19 +272,18 @@ pub struct RepairMutation {
 fn merge_partition_data(versions: &[Option<&PartitionData>]) -> PartitionData {
     let mut merged = PartitionData::new();
 
-    for version in versions {
-        if let Some(pd) = version {
-            // Merge partition tombstone
-            if let (Some(ts), Some(ldt)) =
-                (pd.tombstone_timestamp, pd.tombstone_local_deletion_time)
-            {
-                merged.set_tombstone(ts, ldt);
-            }
+    for version in versions.iter().flatten() {
+        // Merge partition tombstone
+        if let (Some(ts), Some(ldt)) = (
+            version.tombstone_timestamp,
+            version.tombstone_local_deletion_time,
+        ) {
+            merged.set_tombstone(ts, ldt);
+        }
 
-            // Merge rows
-            for (_ck, row) in &pd.rows {
-                merged.apply_row(row.clone());
-            }
+        // Merge rows
+        for row in version.rows.values() {
+            merged.apply_row(row.clone());
         }
     }
 

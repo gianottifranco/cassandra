@@ -419,8 +419,7 @@ impl BtiWriter {
 
     fn write_statistics(&self, stats: &super::writer::SSTableStats) -> io::Result<()> {
         let path = self.descriptor.component_path(Component::Statistics);
-        let json = serde_json::to_vec_pretty(stats)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let json = serde_json::to_vec_pretty(stats).map_err(io::Error::other)?;
         fs::write(&path, json)?;
         Ok(())
     }

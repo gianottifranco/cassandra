@@ -153,8 +153,7 @@ fn find_gaps(ids: &BTreeSet<u64>) -> Vec<(u64, u64)> {
 
 /// Write CDC checkpoint for migration handoff.
 pub fn write_checkpoint(state: &CdcState, path: &Path) -> io::Result<()> {
-    let json =
-        serde_json::to_vec_pretty(state).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec_pretty(state).map_err(io::Error::other)?;
     fs::write(path, json)?;
     debug!(path = %path.display(), "CDC checkpoint written");
     Ok(())

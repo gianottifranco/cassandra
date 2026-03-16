@@ -30,6 +30,7 @@ impl ConsensusRouter {
     /// Execute a Compare-And-Set (CAS) conditional update.
     ///
     /// Routes the operation to Accord or Paxos based on the table's `TransactionalMode`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn execute_cas<R, F1, F2>(
         &self,
         keyspace: &str,

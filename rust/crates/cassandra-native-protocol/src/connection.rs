@@ -29,9 +29,7 @@
 //! ```
 
 use crate::auth::{AuthResult, Authenticator};
-use crate::frame::{
-    self, Frame, FrameHeader, Opcode, PROTOCOL_V4, PROTOCOL_V5, RESPONSE_FLAG, flags,
-};
+use crate::frame::{Frame, PROTOCOL_V4, RESPONSE_FLAG, flags};
 use crate::message::*;
 use crate::request;
 use crate::response;
@@ -219,7 +217,7 @@ impl ConnectionContext {
         custom_payload: Option<&std::collections::HashMap<String, Vec<u8>>>,
     ) -> Frame {
         use crate::types;
-        use bytes::{BufMut, BytesMut};
+        use bytes::BytesMut;
 
         let mut extra_flags: u8 = 0;
         let mut prefix = BytesMut::new();

@@ -26,6 +26,7 @@
 //! 1. A `Trigger` trait matching ITrigger's interface
 //! 2. A registry for managing trigger instances per table
 //! 3. Pre/post mutation hook points
+//!
 //! The feature is gated behind a compile-time flag.
 
 use parking_lot::RwLock;
@@ -140,7 +141,7 @@ impl TriggerRegistry {
         self.triggers
             .read()
             .get(&key)
-            .map_or(false, |v| !v.is_empty())
+            .is_some_and(|v| !v.is_empty())
     }
 
     /// Total number of registered triggers across all tables.

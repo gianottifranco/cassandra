@@ -41,17 +41,12 @@ impl fmt::Display for ColumnKind {
 }
 
 /// Clustering order for a clustering column.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum ClusteringOrder {
     Asc,
     Desc,
+    #[default]
     None,
-}
-
-impl Default for ClusteringOrder {
-    fn default() -> Self {
-        Self::None
-    }
 }
 
 /// Metadata for a single column in a table.

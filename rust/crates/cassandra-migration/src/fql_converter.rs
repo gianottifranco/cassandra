@@ -100,8 +100,7 @@ fn copy_json(source: &Path, target: &Path) -> io::Result<ConversionReport> {
         serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let count = entries.len();
-    let json_out =
-        serde_json::to_vec_pretty(&entries).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json_out = serde_json::to_vec_pretty(&entries).map_err(io::Error::other)?;
     fs::write(target, &json_out)?;
 
     Ok(ConversionReport {
@@ -149,8 +148,7 @@ fn convert_chronicle(source: &Path, target: &Path) -> io::Result<ConversionRepor
         warn!("Consider using Java `fqltool dump` to pre-convert to JSON");
     }
 
-    let json =
-        serde_json::to_vec_pretty(&entries).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec_pretty(&entries).map_err(io::Error::other)?;
     fs::write(target, &json)?;
 
     let written = entries.len();
@@ -217,8 +215,7 @@ pub fn merge_fql_files(sources: &[&Path], target: &Path) -> io::Result<usize> {
     all_entries.sort_by_key(|e| e.timestamp);
     let count = all_entries.len();
 
-    let json = serde_json::to_vec_pretty(&all_entries)
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    let json = serde_json::to_vec_pretty(&all_entries).map_err(io::Error::other)?;
     fs::write(target, &json)?;
 
     debug!(sources = sources.len(), entries = count, "FQL files merged");

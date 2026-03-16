@@ -40,7 +40,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
 use cassandra_common::Token;
@@ -566,7 +566,7 @@ impl ReadCoordinator {
 
         // TODO: Send READ_DATA to all replicas via MessagingService and collect responses.
         // For now, we simulate fetching data from the replicas to feed the DataResolver.
-        for (_i, ep) in replicas.iter().enumerate() {
+        for _ep in replicas.iter() {
             // Simulated partition data (empty for simplicity, but forces DataResolver to process)
             let pd = cassandra_storage::memtable::partition::PartitionData::new();
             resolver.add_response(DataResponse {
@@ -588,7 +588,7 @@ impl ReadCoordinator {
         let resolved = resolver.resolve(now);
 
         // Stage mutations in the handler
-        let mut handler = ReadRepairHandler::new(self.read_repair_strategy.clone());
+        let mut handler = ReadRepairHandler::new(self.read_repair_strategy);
         for rm in resolved.repair_mutations {
             let target = replicas[rm.replica_index];
             handler.stage_repair(

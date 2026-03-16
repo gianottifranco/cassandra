@@ -36,9 +36,10 @@ use tracing::{debug, info};
 ///
 /// `org.apache.cassandra.service.reads.repair.ReadRepairStrategy`
 /// controlled by `read_repair` table property.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReadRepairStrategy {
     /// Blocking: repair before returning to client (default in Java 4.x+).
+    #[default]
     Blocking,
     /// None: no read repair (configurable per table).
     None,
@@ -51,12 +52,6 @@ impl ReadRepairStrategy {
             "NONE" => Self::None,
             _ => Self::Blocking,
         }
-    }
-}
-
-impl Default for ReadRepairStrategy {
-    fn default() -> Self {
-        Self::Blocking
     }
 }
 

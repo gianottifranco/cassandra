@@ -5,8 +5,6 @@
 //! Verifies that rollback produces correct data state at each point:
 //! pre-cutover, mid-cutover, and post-cutover.
 
-use std::fs;
-
 #[cfg(test)]
 mod tests {
     use super::*;

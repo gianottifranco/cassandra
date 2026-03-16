@@ -87,6 +87,7 @@ impl Default for UnifiedCompactionStrategy {
 struct DensityBucket {
     sstables: Vec<SSTableId>,
     total_size: u64,
+    #[allow(dead_code)]
     min_density: f64,
     max_density: f64,
 }

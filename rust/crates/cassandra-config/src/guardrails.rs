@@ -13,9 +13,10 @@
 use serde::{Deserialize, Serialize};
 
 /// The action a guardrail takes when triggered.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GuardrailAction {
     /// No limit enforced.
+    #[default]
     Disabled,
     /// Log a warning but allow the operation.
     Warn,
@@ -23,28 +24,13 @@ pub enum GuardrailAction {
     Fail,
 }
 
-impl Default for GuardrailAction {
-    fn default() -> Self {
-        Self::Disabled
-    }
-}
-
 /// A threshold guardrail with optional warn and fail values.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ThresholdGuardrail {
     /// Threshold that triggers a warning. `None` = disabled.
     pub warn_threshold: Option<i64>,
     /// Threshold that triggers a failure. `None` = disabled.
     pub fail_threshold: Option<i64>,
-}
-
-impl Default for ThresholdGuardrail {
-    fn default() -> Self {
-        Self {
-            warn_threshold: None,
-            fail_threshold: None,
-        }
-    }
 }
 
 impl ThresholdGuardrail {

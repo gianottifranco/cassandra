@@ -24,7 +24,7 @@ pub enum TimeUnit {
 }
 
 impl TimeUnit {
-    fn to_micros(&self) -> i64 {
+    fn as_micros(self) -> i64 {
         match self {
             TimeUnit::Minutes => 60 * 1_000_000,
             TimeUnit::Hours => 3600 * 1_000_000,
@@ -63,7 +63,7 @@ impl Default for TimeWindowCompactionStrategy {
 impl TimeWindowCompactionStrategy {
     /// Calculate the window ID for a given timestamp (microseconds since epoch).
     pub fn window_for(&self, timestamp_micros: i64) -> i64 {
-        let window_micros = self.time_unit.to_micros() * self.window_size;
+        let window_micros = self.time_unit.as_micros() * self.window_size;
         if window_micros == 0 {
             return 0;
         }

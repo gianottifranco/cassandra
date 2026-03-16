@@ -918,20 +918,16 @@ impl Parser {
     }
 
     fn parse_if_not_exists(&mut self) -> bool {
-        if self.eat_keyword(Keyword::If) {
-            if self.eat_keyword(Keyword::Not) {
-                let _ = self.expect_keyword(Keyword::Exists);
-                return true;
-            }
+        if self.eat_keyword(Keyword::If) && self.eat_keyword(Keyword::Not) {
+            let _ = self.expect_keyword(Keyword::Exists);
+            return true;
         }
         false
     }
 
     fn parse_if_exists(&mut self) -> bool {
-        if self.eat_keyword(Keyword::If) {
-            if self.eat_keyword(Keyword::Exists) {
-                return true;
-            }
+        if self.eat_keyword(Keyword::If) && self.eat_keyword(Keyword::Exists) {
+            return true;
         }
         false
     }

@@ -38,16 +38,11 @@ pub const DEFAULT_RATE_LIMIT_BYTES_PER_SEC: u64 = 0;
 ///
 /// Java Cassandra supports both CRC32 and Adler32 for on-disk checksums;
 /// for streaming it uses CRC32 (post-4.0). We support MD5 (legacy) and CRC32.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ChecksumAlgorithm {
     Md5,
+    #[default]
     Crc32,
-}
-
-impl Default for ChecksumAlgorithm {
-    fn default() -> Self {
-        Self::Crc32
-    }
 }
 
 impl fmt::Display for ChecksumAlgorithm {
@@ -344,7 +339,7 @@ impl StreamTransfer {
         }
 
         let mut chunks = Vec::new();
-        let total_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        let total_chunks = data.len().div_ceil(chunk_size);
 
         for (i, chunk_data) in data.chunks(chunk_size).enumerate() {
             chunks.push(DataChunk {

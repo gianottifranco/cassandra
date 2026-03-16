@@ -38,7 +38,7 @@
 //! - [ ] Integrate with compaction: rebuild vector index on merge
 
 use parking_lot::RwLock;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use super::posting::RowLocation;
 use cassandra_types::vector::{SimilarityMetric, VectorValue, compute_similarity};

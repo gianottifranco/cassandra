@@ -41,12 +41,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{IndexDefinition, IndexEntry, IndexError, IndexType, SecondaryIndex};
 
+/// Type alias for the inverted index data structure.
+type InvertedIndex = BTreeMap<Vec<u8>, BTreeSet<(Vec<u8>, Vec<u8>)>>;
+
 /// A legacy key-based secondary index (inverted index in memory).
 #[derive(Debug)]
 pub struct LegacyIndex {
     definition: IndexDefinition,
     /// term → set of (partition_key, clustering_key)
-    entries: RwLock<BTreeMap<Vec<u8>, BTreeSet<(Vec<u8>, Vec<u8>)>>>,
+    entries: RwLock<InvertedIndex>,
 }
 
 impl LegacyIndex {

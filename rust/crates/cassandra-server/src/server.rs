@@ -4,7 +4,7 @@
 //!
 //! Listens for incoming CQL client connections (typically port 9042).
 
-use bytes::{Buf, BytesMut};
+use bytes::BytesMut;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -12,7 +12,7 @@ use tracing::{debug, error, info};
 
 use cassandra_native_protocol::auth::{AuthResult, Authenticator as NativeAuthenticator};
 use cassandra_native_protocol::connection::ConnectionContext;
-use cassandra_native_protocol::frame::{self, Frame, FrameCodec};
+use cassandra_native_protocol::frame::{Frame, FrameCodec};
 use cassandra_security::audit::{AuditEvent, AuditEventType, AuditLogger, AuditStatus};
 use cassandra_security::auth::{Authenticator as SecAuthenticator, Credentials};
 use cassandra_security::fql::{FqlLogger, FqlRecord};
@@ -91,10 +91,8 @@ impl NativeServer {
                             error!("TLS handshake failed for {}: {}", addr, e);
                         }
                     }
-                } else {
-                    if let Err(e) = server.handle_connection(stream).await {
-                        debug!("Connection {} error: {}", addr, e);
-                    }
+                } else if let Err(e) = server.handle_connection(stream).await {
+                    debug!("Connection {} error: {}", addr, e);
                 }
             });
         }

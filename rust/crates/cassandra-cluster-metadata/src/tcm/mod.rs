@@ -541,7 +541,7 @@ impl TcmMetadata {
             } => {
                 self.locked_ranges
                     .lock(*operation_id, ranges.clone())
-                    .map_err(|r| TcmError::RangeConflict(r))?;
+                    .map_err(TcmError::RangeConflict)?;
             }
             Transformation::UnlockRanges { operation_id } => {
                 self.locked_ranges.unlock(operation_id);
