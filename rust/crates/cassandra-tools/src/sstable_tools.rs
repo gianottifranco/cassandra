@@ -8,10 +8,35 @@
 
 use std::path::Path;
 
+use cassandra_storage::sstable::{
+    reader::SSTableReader,
+    format::{SSTableDescriptor, SSTableFormat},
+};
+
+fn parse_descriptor(file: &str) -> Option<SSTableDescriptor> {
+    let path = Path::new(file);
+    let file_name = path.file_name()?.to_string_lossy();
+    let parts: Vec<&str> = file_name.split('-').collect();
+    if parts.len() < 5 {
+        return None;
+    }
+
+    let ks = parts[0];
+    let tbl = parts[1];
+    let fmt_str = parts[2];
+    let gen_str = parts[3];
+
+    let generation = gen_str.parse::<u64>().ok()?;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+
+    let mut desc = SSTableDescriptor::new(dir, ks, tbl, generation);
+    if fmt_str == "bti" {
+        desc.format = SSTableFormat::Bti;
+    }
+    Some(desc)
+}
+
 /// Dump the contents of an SSTable to stdout in JSON format.
-///
-/// TODO: Actually read the SSTable using cassandra-storage.
-/// Current implementation is a stub that reports the file status.
 pub fn dump_sstable(file: &str) {
     let path = Path::new(file);
     if !path.exists() {
@@ -19,23 +44,78 @@ pub fn dump_sstable(file: &str) {
         return;
     }
 
-    let size = std::fs::metadata(path)
-        .map(|m| m.len())
-        .unwrap_or(0);
+    let desc = match parse_descriptor(file) {
+        Some(d) => d,
+        None => {
+            eprintln!("Error: invalid SSTable filename format: {}", file);
+            return;
+        }
+    };
 
-    println!("SSTable: {}", file);
-    println!("Size: {} bytes", size);
-    println!();
+    let reader = match SSTableReader::open(desc) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error opening SSTable for dump: {}", e);
+            return;
+        }
+    };
+
     println!("[");
-    println!("  // SSTable dump not yet implemented.");
-    println!("  // TODO: Parse SSTable format via cassandra-storage crate.");
-    println!("  // File exists and is {} bytes.", size);
-    println!("]");
+    match reader.iter_partitions() {
+        Ok(partitions) => {
+            let mut first_p = true;
+            for (pk, data) in partitions {
+                if !first_p {
+                    println!(",");
+                }
+                first_p = false;
+                println!("  {{");
+                println!("    \"partition_key\": \"{}\",", String::from_utf8_lossy(&pk));
+                println!("    \"rows\": [");
+                let mut first_r = true;
+                for (ck, row) in &data.rows {
+                    if !first_r {
+                        println!(",");
+                    }
+                    first_r = false;
+                    println!("      {{");
+                    println!("        \"clustering_key\": \"{}\",", String::from_utf8_lossy(ck));
+                    println!("        \"is_tombstone\": {},", row.is_tombstone);
+                    if let Some(ldt) = row.local_deletion_time {
+                        println!("        \"local_deletion_time\": {},", ldt);
+                    }
+                    println!("        \"cells\": [");
+                    let mut first_c = true;
+                    for cell in &row.cells {
+                        if !first_c {
+                            println!(",");
+                        }
+                        first_c = false;
+                        println!("          {{");
+                        println!("            \"column\": \"{}\",", cell.column);
+                        let val_str = cell.value.as_deref().map(|v| String::from_utf8_lossy(v).into_owned()).unwrap_or_else(|| "null".to_string());
+                        println!("            \"value\": \"{}\",", val_str);
+                        println!("            \"timestamp\": {},", cell.timestamp);
+                        println!("            \"ttl\": {},", cell.ttl);
+                        println!("            \"is_tombstone\": {}", cell.is_tombstone);
+                        print!("          }}");
+                    }
+                    println!("\n        ]");
+                    print!("      }}");
+                }
+                println!("\n    ]");
+                print!("  }}");
+            }
+        }
+        Err(e) => {
+            eprintln!("Error iterating partitions: {}", e);
+            return;
+        }
+    }
+    println!("\n]");
 }
 
 /// Show SSTable metadata statistics.
-///
-/// TODO: Actually parse SSTable-Statistics.db and TOC.
 pub fn show_metadata(file: &str) {
     let path = Path::new(file);
     if !path.exists() {
@@ -47,17 +127,37 @@ pub fn show_metadata(file: &str) {
         .map(|m| m.len())
         .unwrap_or(0);
 
-    println!("SSTable: {}", file);
+    let desc = match parse_descriptor(file) {
+        Some(d) => d,
+        None => {
+            eprintln!("Error: invalid SSTable filename format: {}", file);
+            return;
+        }
+    };
+
+    println!("SSTable: {}", desc.file_prefix());
+    println!("Format: {:?}", desc.format);
+    println!("Generation: {}", desc.generation);
     println!("Size: {} bytes", size);
     println!();
     println!("Metadata:");
-    println!("  Estimated partitions : (not yet implemented)");
-    println!("  Estimated cells      : (not yet implemented)");
-    println!("  SSTable Level        : 0");
-    println!("  Compression          : none (not yet implemented)");
-    println!("  Min/Max timestamp    : (not yet implemented)");
-    println!("  Min/Max local del    : (not yet implemented)");
-    println!("  Bloom filter FP      : (not yet implemented)");
-    println!();
-    println!("  // TODO: Parse SSTable metadata via cassandra-storage crate.");
+
+    match SSTableReader::open(desc) {
+        Ok(reader) => {
+            if let Some(stats) = reader.stats() {
+                println!("  Estimated partitions : {}", stats.partition_count);
+                println!("  Estimated cells      : {}", stats.cell_count);
+                println!("  Estimated rows       : {}", stats.row_count);
+                println!("  Min timestamp        : {}", stats.min_timestamp);
+                println!("  Max timestamp        : {}", stats.max_timestamp);
+                println!("  Data size            : {}", stats.data_size);
+                println!("  Index size           : {}", stats.index_size);
+            } else {
+                println!("  (No Statistics.db available)");
+            }
+        }
+        Err(e) => {
+            eprintln!("  Error reading SSTable metadata: {}", e);
+        }
+    }
 }

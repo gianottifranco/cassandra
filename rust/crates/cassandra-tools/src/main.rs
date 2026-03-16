@@ -38,6 +38,7 @@
 //! cassandra-tools setlogginglevel     Set a logging level
 //! cassandra-tools sstabledump         Dump SSTable contents
 //! cassandra-tools sstablemetadata     Show SSTable metadata
+//! cassandra-tools rebuild_index       A full rebuild of native secondary indexes for a given table
 //! ```
 
 mod sstable_tools;
@@ -104,6 +105,17 @@ enum Commands {
     Repair {
         /// Keyspace.
         keyspace: Option<String>,
+        /// Tables to repair.
+        tables: Vec<String>,
+        /// Full repair.
+        #[arg(long, default_value_t = false)]
+        full: bool,
+        /// Incremental repair.
+        #[arg(long, default_value_t = false)]
+        incremental: bool,
+        /// Preview repair.
+        #[arg(long, default_value_t = false)]
+        preview: bool,
     },
     /// Run cleanup (remove data not belonging to this node).
     Cleanup {
@@ -114,6 +126,14 @@ enum Commands {
     Enableauditlog,
     /// Disable audit logging.
     Disableauditlog,
+    /// Enable full query logging.
+    Enablefql {
+        /// FQL log directory.
+        #[arg(long, default_value = "logs/fql")]
+        log_dir: String,
+    },
+    /// Disable full query logging.
+    Disablefql,
     /// Show current logging levels.
     Getlogginglevels,
     /// Set a logging level.
@@ -132,6 +152,37 @@ enum Commands {
     Sstablemetadata {
         /// Path to the SSTable.
         file: String,
+    },
+    /// Bulk load SSTables to a cluster.
+    Sstableloader {
+        /// Path to the SSTables directory.
+        dir: String,
+    },
+    /// View audit logs.
+    Auditlogviewer {
+        /// Directory or files to view.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Full query log tool (fqltool).
+    Fqltool {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Cassandra stress testing tool.
+    CassandraStress {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Rebuild a native secondary index.
+    #[command(name = "rebuild_index")]
+    RebuildIndex {
+        /// Keyspace.
+        keyspace: String,
+        /// Table.
+        table: String,
+        /// Index names (comma separated).
+        index_names: String,
     },
 
     // ── Topology operations ─────────────────────────────────────────
@@ -250,12 +301,41 @@ fn main() {
             // TODO: POST to /api/v1/operations/compact
             println!("(stub — implement via admin API)");
         }
-        Commands::Repair { keyspace } => {
-            match keyspace {
-                Some(ks) => println!("Repairing keyspace {}...", ks),
-                None => println!("Repairing all keyspaces..."),
+        Commands::Repair { keyspace, tables, full, incremental, preview } => {
+            let ks = keyspace.unwrap_or_else(|| "system_distributed".to_string());
+            let is_full = full || (!incremental && !preview);
+            
+            println!("Starting {}repair on keyspace {}...", if preview { "preview " } else if is_full { "full " } else { "incremental " }, ks);
+            
+            let payload = serde_json::json!({
+                "keyspace": ks,
+                "tables": tables,
+                "full": is_full,
+                "preview": preview,
+            });
+            
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/api/v1/operations/repair", base_url);
+            
+            match client.post(&url).json(&payload).send() {
+                Ok(resp) => {
+                    if resp.status().is_success() {
+                        if let Ok(json) = resp.json::<serde_json::Value>() {
+                            println!("Repair started successfully. Session ID: {}", json["repair_id"]);
+                        } else {
+                            println!("Repair started successfully.");
+                        }
+                    } else {
+                        println!("Failed to start repair. Status: {}", resp.status());
+                        if let Ok(err_text) = resp.text() {
+                            println!("Error: {}", err_text);
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("Failed to connect to admin API: {}", e);
+                }
             }
-            println!("(stub — implement via admin API)");
         }
         Commands::Cleanup { keyspace } => {
             match keyspace {
@@ -266,12 +346,44 @@ fn main() {
         }
         Commands::Enableauditlog => {
             println!("Enabling audit logging...");
-            // TODO: POST to /api/v1/operations/enableauditlog
-            println!("(stub — implement via admin API)");
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/api/v1/operations/enableauditlog", base_url);
+            match client.post(&url).send() {
+                Ok(resp) if resp.status().is_success() => println!("Audit logging enabled."),
+                Ok(resp) => println!("Failed: {}", resp.status()),
+                Err(e) => println!("Failed to connect to admin API: {}", e),
+            }
         }
         Commands::Disableauditlog => {
             println!("Disabling audit logging...");
-            println!("(stub — implement via admin API)");
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/api/v1/operations/disableauditlog", base_url);
+            match client.post(&url).send() {
+                Ok(resp) if resp.status().is_success() => println!("Audit logging disabled."),
+                Ok(resp) => println!("Failed: {}", resp.status()),
+                Err(e) => println!("Failed to connect to admin API: {}", e),
+            }
+        }
+        Commands::Enablefql { log_dir } => {
+            println!("Enabling full query logging to {}...", log_dir);
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/api/v1/operations/enablefql", base_url);
+            let payload = serde_json::json!({ "log_dir": log_dir });
+            match client.post(&url).json(&payload).send() {
+                Ok(resp) if resp.status().is_success() => println!("FQL enabled."),
+                Ok(resp) => println!("Failed: {}", resp.status()),
+                Err(e) => println!("Failed to connect to admin API: {}", e),
+            }
+        }
+        Commands::Disablefql => {
+            println!("Disabling full query logging...");
+            let client = reqwest::blocking::Client::new();
+            let url = format!("{}/api/v1/operations/disablefql", base_url);
+            match client.post(&url).send() {
+                Ok(resp) if resp.status().is_success() => println!("FQL disabled."),
+                Ok(resp) => println!("Failed: {}", resp.status()),
+                Err(e) => println!("Failed to connect to admin API: {}", e),
+            }
         }
         Commands::Getlogginglevels => {
             println!("Logger Name           Log Level");
@@ -287,6 +399,52 @@ fn main() {
         }
         Commands::Sstablemetadata { file } => {
             sstable_tools::show_metadata(&file);
+        }
+        Commands::Sstableloader { dir } => {
+            println!("Loading SSTables from {}...", dir);
+            // TODO: POST to /api/v1/operations/sstableloader
+            println!("(stub — implement via admin API)");
+        }
+        Commands::Auditlogviewer { args } => {
+            println!("Auditlogviewer: {:?}", args);
+            // TODO: read audit logs
+            println!("(stub — implemented in cassandra-tools)");
+        }
+        Commands::Fqltool { args } => {
+            println!("fqltool: {:?}", args);
+            // TODO: read or manipulate FQL
+            println!("(stub — implemented in cassandra-tools)");
+        }
+        Commands::CassandraStress { args } => {
+            println!("cassandra-stress: {:?}", args);
+            // TODO: load generation and stress testing
+            println!("(stub — implemented in cassandra-tools)");
+        }
+        Commands::RebuildIndex { keyspace, table, index_names } => {
+            println!("Rebuilding indexes: {} on {}.{}...", index_names, keyspace, table);
+            for idx_name in index_names.split(',') {
+                let idx_name = idx_name.trim();
+                let payload = serde_json::json!({
+                    "keyspace": keyspace,
+                    "table": table,
+                    "index_name": idx_name,
+                });
+                let client = reqwest::blocking::Client::new();
+                let url = format!("{}/api/v1/operations/rebuild_index", base_url);
+                match client.post(&url).json(&payload).send() {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            println!("Index {} rebuilt successfully.", idx_name);
+                        } else {
+                            println!("Failed to rebuild {}. Status: {}", idx_name, resp.status());
+                            if let Ok(err) = resp.text() {
+                                println!("Error: {}", err);
+                            }
+                        }
+                    }
+                    Err(e) => println!("Failed to connect to admin API: {}", e),
+                }
+            }
         }
 
         // ── Topology operation commands ──────────────────────────────

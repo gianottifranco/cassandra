@@ -69,6 +69,9 @@ pub struct ColumnMetadata {
     /// Clustering order (only meaningful for clustering columns).
     #[serde(default)]
     pub clustering_order: ClusteringOrder,
+    /// Dynamic Data Masking configuration (function_name, args)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub masked_with: Option<(String, Vec<String>)>,
 }
 
 impl ColumnMetadata {
@@ -79,28 +82,35 @@ impl ColumnMetadata {
         position: u32,
         column_type: CqlType,
         clustering_order: ClusteringOrder,
+        masked_with: Option<(String, Vec<String>)>,
     ) -> Self {
-        Self { name, kind, position, column_type, clustering_order }
+        Self { name, kind, position, column_type, clustering_order, masked_with }
     }
 
     /// Convenience: create a partition key column.
     pub fn partition_key(name: impl Into<String>, position: u32, cql_type: CqlType) -> Self {
-        Self::new(name.into(), ColumnKind::PartitionKey, position, cql_type, ClusteringOrder::None)
+        Self::new(name.into(), ColumnKind::PartitionKey, position, cql_type, ClusteringOrder::None, None)
     }
 
     /// Convenience: create a clustering column.
     pub fn clustering(name: impl Into<String>, position: u32, cql_type: CqlType, order: ClusteringOrder) -> Self {
-        Self::new(name.into(), ColumnKind::Clustering, position, cql_type, order)
+        Self::new(name.into(), ColumnKind::Clustering, position, cql_type, order, None)
     }
 
     /// Convenience: create a regular column.
     pub fn regular(name: impl Into<String>, cql_type: CqlType) -> Self {
-        Self::new(name.into(), ColumnKind::Regular, 0, cql_type, ClusteringOrder::None)
+        Self::new(name.into(), ColumnKind::Regular, 0, cql_type, ClusteringOrder::None, None)
     }
 
     /// Convenience: create a static column.
     pub fn static_col(name: impl Into<String>, cql_type: CqlType) -> Self {
-        Self::new(name.into(), ColumnKind::Static, 0, cql_type, ClusteringOrder::None)
+        Self::new(name.into(), ColumnKind::Static, 0, cql_type, ClusteringOrder::None, None)
+    }
+
+    /// Add masking configuration to this column.
+    pub fn masked_with(mut self, function_name: String, args: Vec<String>) -> Self {
+        self.masked_with = Some((function_name, args));
+        self
     }
 
     /// Returns `true` if this column is part of the primary key.

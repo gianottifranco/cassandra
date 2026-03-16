@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use cassandra_cluster_metadata::Endpoint;
 use cassandra_common::Token;
+use crate::coordinator::RepairType;
+use crate::merkle::MerkleTree;
 
 /// Unique repair session identifier.
 pub type RepairSessionId = Uuid;
@@ -56,6 +58,10 @@ impl fmt::Display for RepairSessionState {
 pub struct RepairSession {
     /// Unique session identifier.
     pub id: RepairSessionId,
+    /// Parent repair identifier
+    pub parent_id: Uuid,
+    /// Type of repair.
+    pub repair_type: RepairType,
     /// Keyspace being repaired.
     pub keyspace: String,
     /// Table being repaired (empty = all tables).
@@ -79,6 +85,8 @@ pub struct RepairSession {
 impl RepairSession {
     /// Create a new repair session.
     pub fn new(
+        parent_id: Uuid,
+        repair_type: RepairType,
         keyspace: impl Into<String>,
         table: impl Into<String>,
         range: (Token, Token),
@@ -86,6 +94,8 @@ impl RepairSession {
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
+            parent_id,
+            repair_type,
             keyspace: keyspace.into(),
             table: table.into(),
             range,
@@ -176,6 +186,25 @@ pub enum RepairSessionError {
     },
 }
 
+/// Request to a replica to validate a token range (build a Merkle tree).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationRequest {
+    pub session_id: RepairSessionId,
+    pub keyspace: String,
+    pub table: String,
+    pub range: (Token, Token),
+    pub repair_type: RepairType,
+    pub gc_grace_seconds: i32,
+    pub now_seconds: i32,
+}
+
+/// Response from a replica containing the built Merkle tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ValidationResponse {
+    pub session_id: RepairSessionId,
+    pub tree: MerkleTree,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,6 +220,8 @@ mod tests {
     #[test]
     fn session_happy_path() {
         let mut s = RepairSession::new(
+            Uuid::new_v4(),
+            RepairType::Full,
             "ks", "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![ep(7001), ep(7002)],
@@ -208,6 +239,8 @@ mod tests {
     #[test]
     fn session_no_diffs_complete_from_exchange() {
         let mut s = RepairSession::new(
+            Uuid::new_v4(),
+            RepairType::Full,
             "ks", "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![ep(7001)],
@@ -223,6 +256,8 @@ mod tests {
     #[test]
     fn session_failure() {
         let mut s = RepairSession::new(
+            Uuid::new_v4(),
+            RepairType::Full,
             "ks", "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![ep(7001)],
@@ -236,6 +271,8 @@ mod tests {
     #[test]
     fn session_invalid_transition() {
         let mut s = RepairSession::new(
+            Uuid::new_v4(),
+            RepairType::Full,
             "ks", "t1",
             (Token::from_raw(0), Token::from_raw(100)),
             vec![],

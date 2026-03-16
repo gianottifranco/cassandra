@@ -69,6 +69,7 @@ impl SystemTableDef {
                 position: col.position,
                 column_type: col.cql_type.clone(),
                 clustering_order: ClusteringOrder::Asc,
+                masked_with: None,
             });
         }
         builder.build()

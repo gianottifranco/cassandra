@@ -30,6 +30,28 @@ use crate::node::Endpoint;
 use crate::ring::TokenRing;
 use crate::snitch::Snitch;
 
+/// A replica holds a copy of data for a token range.
+/// It can be a full replica or a transient replica (only receives writes).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Replica {
+    pub endpoint: Endpoint,
+    pub is_transient: bool,
+}
+
+impl Replica {
+    pub fn full(endpoint: Endpoint) -> Self {
+        Self { endpoint, is_transient: false }
+    }
+
+    pub fn transient(endpoint: Endpoint) -> Self {
+        Self { endpoint, is_transient: true }
+    }
+
+    pub fn is_full(&self) -> bool {
+        !self.is_transient
+    }
+}
+
 /// A replication strategy determines which endpoints store replicas.
 pub trait ReplicationStrategy: Send + Sync {
     /// Calculate the set of endpoints that should hold replicas for the given token.
@@ -41,6 +63,20 @@ pub trait ReplicationStrategy: Send + Sync {
         ring: &TokenRing,
         snitch: &dyn Snitch,
     ) -> Vec<Endpoint>;
+
+    /// Calculate the set of replicas for the given token.
+    /// Distinguishes between full and transient replicas.
+    fn calculate_natural_replicas(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        snitch: &dyn Snitch,
+    ) -> Vec<Replica> {
+        self.calculate_natural_endpoints(token, ring, snitch)
+            .into_iter()
+            .map(Replica::full)
+            .collect()
+    }
 
     /// The replication factor (total number of replicas).
     fn replication_factor(&self) -> usize;
@@ -390,9 +426,43 @@ impl ReplicationStrategy for TransientReplicationStrategy {
         ring: &TokenRing,
         snitch: &dyn Snitch,
     ) -> Vec<Endpoint> {
-        // TODO(transient-replication): Distinguish full vs transient replicas
-        // in the returned list. For now, return all replicas (full + transient).
         self.inner.calculate_natural_endpoints(token, ring, snitch)
+    }
+
+    fn calculate_natural_replicas(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        snitch: &dyn Snitch,
+    ) -> Vec<Replica> {
+        let endpoints = self.inner.calculate_natural_endpoints(token, ring, snitch);
+        
+        let mut dc_totals = HashMap::new();
+        for ep in &endpoints {
+            *dc_totals.entry(snitch.datacenter(ep)).or_insert(0) += 1;
+        }
+        
+        let mut dc_seen = HashMap::new();
+        let mut result = Vec::with_capacity(endpoints.len());
+        
+        for ep in endpoints {
+            let dc = snitch.datacenter(&ep);
+            let seen = dc_seen.entry(dc.clone()).or_insert(0);
+            *seen += 1;
+            
+            let total = *dc_totals.get(&dc).unwrap();
+            let transient_count = self.dc_transient.get(&dc).copied().unwrap_or(0);
+            
+            // The last `transient_count` replicas for a DC are transient.
+            let remaining = total - *seen + 1;
+            if remaining <= transient_count {
+                result.push(Replica::transient(ep));
+            } else {
+                result.push(Replica::full(ep));
+            }
+        }
+        
+        result
     }
 
     fn replication_factor(&self) -> usize {

@@ -75,6 +75,8 @@ pub struct SaiIndex {
     definition: IndexDefinition,
     /// term → posting list (sorted row locations)
     terms: RwLock<BTreeMap<Vec<u8>, PostingList>>,
+    /// Vector search index, instantiated if this is a vector column
+    vector_index: Option<std::sync::Arc<crate::index::sai::vector_index::VectorIndex>>,
 }
 
 impl SaiIndex {
@@ -84,9 +86,23 @@ impl SaiIndex {
             IndexType::Sai,
             "SaiIndex requires IndexType::Sai"
         );
+        let vector_index = if let Some(dims_str) = definition.options.get("vector_dimensions") {
+            let dims = dims_str.parse().unwrap_or(0);
+            let metric_str = definition.options.get("vector_similarity_metric").map(|s| s.as_str()).unwrap_or("cosine");
+            let metric = match metric_str.to_lowercase().as_str() {
+                "euclidean" => cassandra_types::vector::SimilarityMetric::Euclidean,
+                "dot_product" => cassandra_types::vector::SimilarityMetric::DotProduct,
+                _ => cassandra_types::vector::SimilarityMetric::Cosine,
+            };
+            Some(std::sync::Arc::new(crate::index::sai::vector_index::VectorIndex::new(dims, metric)))
+        } else {
+            None
+        };
+
         Self {
             definition,
             terms: RwLock::new(BTreeMap::new()),
+            vector_index,
         }
     }
 
@@ -149,6 +165,12 @@ impl SaiIndex {
 
 impl SecondaryIndex for SaiIndex {
     fn insert(&self, entry: &IndexEntry) -> Result<(), IndexError> {
+        if let Some(ref vi) = self.vector_index {
+            if let Ok(vec_val) = cassandra_types::vector::VectorValue::deserialize(&entry.term, vi.dimensions()) {
+                let _ = vi.insert(vec_val, entry.partition_key.clone(), entry.clustering_key.clone());
+            }
+        }
+        
         let mut terms = self.terms.write();
         let posting_list = terms
             .entry(entry.term.clone())
@@ -197,6 +219,24 @@ impl SecondaryIndex for SaiIndex {
         Ok(self.range_search_inner(start, end))
     }
 
+    fn search_vector(&self, vector_bytes: &[u8], top_k: usize) -> Result<Vec<(IndexEntry, f32)>, IndexError> {
+        if let Some(ref vi) = self.vector_index {
+            let vec_val = cassandra_types::vector::VectorValue::deserialize(vector_bytes, vi.dimensions())
+                .map_err(|e| IndexError::ReadFailed(e.to_string()))?;
+            let results = vi.knn_search(&vec_val, top_k);
+            let entries = results.into_iter().map(|res| {
+                (IndexEntry {
+                    term: vector_bytes.to_vec(),
+                    partition_key: res.location.partition_key,
+                    clustering_key: res.location.clustering_key,
+                }, res.score)
+            }).collect();
+            Ok(entries)
+        } else {
+            Err(IndexError::ReadFailed("Not a vector index".into()))
+        }
+    }
+
     fn truncate(&self) -> Result<(), IndexError> {
         self.terms.write().clear();
         Ok(())
@@ -204,6 +244,22 @@ impl SecondaryIndex for SaiIndex {
 
     fn definition(&self) -> &IndexDefinition {
         &self.definition
+    }
+
+    fn add_sai_segment(&self, segment: crate::index::sai::builder::SaiSegment) -> Result<(), IndexError> {
+        let mut terms = self.terms.write();
+        for (term, posting_list) in segment.terms {
+            if let Some(ref vi) = self.vector_index {
+                if let Ok(vec_val) = cassandra_types::vector::VectorValue::deserialize(&term, vi.dimensions()) {
+                    for loc in posting_list.locations() {
+                        let _ = vi.insert(vec_val.clone(), loc.partition_key.clone(), loc.clustering_key.clone());
+                    }
+                }
+            }
+            let existing_list = terms.entry(term).or_insert_with(PostingList::new);
+            existing_list.merge(&posting_list);
+        }
+        Ok(())
     }
 }
 

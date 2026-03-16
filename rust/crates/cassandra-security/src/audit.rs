@@ -258,10 +258,24 @@ impl AsyncAuditLogger {
     }
 
     /// Send an audit event (non-blocking).
-    pub fn log(&self, event: AuditEvent) {
+    pub fn send_event(&self, event: AuditEvent) {
         if let Err(e) = self.sender.send(event) {
             warn!("Audit event dropped: {}", e);
         }
+    }
+}
+
+impl AuditLogger for AsyncAuditLogger {
+    fn log(&self, event: &AuditEvent) {
+        self.send_event(event.clone());
+    }
+
+    fn is_enabled(&self) -> bool {
+        true
+    }
+
+    fn name(&self) -> &str {
+        "AsyncAuditLogger"
     }
 }
 

@@ -21,8 +21,8 @@ pub mod merkle;
 pub mod coordinator;
 pub mod session;
 pub mod metrics;
+pub mod history;
 
 pub use merkle::MerkleTree;
 pub use coordinator::{RepairCoordinator, RepairType, RepairError};
-pub use session::{RepairSession, RepairSessionState};
-pub use metrics::RepairMetrics;
+pub use history::{RepairHistoryTracker, LoggingRepairHistoryTracker};

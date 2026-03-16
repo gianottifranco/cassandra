@@ -49,30 +49,18 @@ pub use memtable::MemtableType;
 // ─── Modules with stubs (from original crate) ─────────────────────────────
 
 /// Counter mutation support.
-pub mod counter {
-    //! Counter mutation operations.
-    //! ## Java Oracle: `org.apache.cassandra.db.CounterMutation`
-}
+pub mod counter;
 
 /// Secondary index support.
-pub mod index {
-    //! Secondary index operations.
-    //! ## Java Oracle: `org.apache.cassandra.index.*`
-}
+pub mod index;
 
 /// Materialized view support (feature-gated).
 #[cfg(feature = "materialized-views")]
-pub mod materialized_views {
-    //! Materialized view operations.
-    //! ## Java Oracle: `org.apache.cassandra.db.view.*`
-}
+pub mod materialized_views;
 
 /// Trigger support (feature-gated).
 #[cfg(feature = "triggers")]
-pub mod triggers {
-    //! Trigger operations.
-    //! ## Java Oracle: `org.apache.cassandra.triggers.*`
-}
+pub mod triggers;
 
 /// UDF support (feature-gated).
 #[cfg(feature = "udfs")]

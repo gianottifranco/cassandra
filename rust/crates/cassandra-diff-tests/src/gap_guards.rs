@@ -63,6 +63,14 @@ fn gap_guard_cql_advanced_restrictions() {
     panic!("Advanced CQL restrictions not yet implemented");
 }
 
+#[test]
+#[ignore = "GAP: Secondary Index differential testing — Java: index — Target: prompt-21"]
+fn gap_guard_index_differential_testing() {
+    // Need to update the differential testing harness to create secondary indexes, SAI, and MVs,
+    // and verify queries return identical results to Java.
+    panic!("Index differential tests not yet implemented");
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // STORAGE GAPS
 // ═══════════════════════════════════════════════════════════════════════

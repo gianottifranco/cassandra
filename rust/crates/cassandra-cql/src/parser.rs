@@ -151,6 +151,28 @@ impl Parser {
         }
     }
 
+    // ─── DDM ────────────────────────────────────────────────────────────
+
+    fn parse_masked_with(&mut self) -> Result<Option<(String, Vec<Term>)>, ParseError> {
+        if self.eat_keyword(Keyword::Masked) {
+            self.expect_keyword(Keyword::With)?;
+            let func_name = self.expect_ident()?;
+            let mut args = Vec::new();
+            if self.eat_if(TokenKind::LParen) {
+                if *self.peek_kind() != TokenKind::RParen {
+                    loop {
+                        args.push(self.parse_term()?);
+                        if !self.eat_if(TokenKind::Comma) { break; }
+                    }
+                }
+                self.expect(TokenKind::RParen)?;
+            }
+            Ok(Some((func_name, args)))
+        } else {
+            Ok(None)
+        }
+    }
+
     // ─── USE ────────────────────────────────────────────────────────────
 
     fn parse_use(&mut self) -> Result<Statement, ParseError> {
@@ -274,6 +296,7 @@ impl Parser {
                 let col_name = self.expect_ident()?;
                 let cql_type = self.parse_cql_type()?;
                 let is_static = self.eat_keyword(Keyword::Static);
+                let masked_with = self.parse_masked_with()?;
                 let is_pk = self.eat_keyword(Keyword::Primary) && {
                     self.expect_keyword(Keyword::Key)?;
                     true
@@ -285,6 +308,7 @@ impl Parser {
                     name: col_name,
                     cql_type,
                     is_static,
+                    masked_with,
                 });
             }
 
@@ -392,7 +416,24 @@ impl Parser {
                     let col_name = self.expect_ident()?;
                     let cql_type = self.parse_cql_type()?;
                     let is_static = self.eat_keyword(Keyword::Static);
-                    AlterTableOp::AddColumn(ColumnDef { name: col_name, cql_type, is_static })
+                    let masked_with = self.parse_masked_with()?;
+                    AlterTableOp::AddColumn(ColumnDef { name: col_name, cql_type, is_static, masked_with })
+                } else if self.eat_keyword(Keyword::Alter) {
+                    self.eat_keyword(Keyword::Column); // Optional COLUMN keyword
+                    let col_name = self.expect_ident()?;
+                    if self.eat_keyword(Keyword::Drop) {
+                        self.expect_keyword(Keyword::Masked)?;
+                        AlterTableOp::DropMask(col_name)
+                    } else if let Some((func, args)) = self.parse_masked_with()? {
+                        AlterTableOp::MaskColumn(col_name, func, args)
+                    } else if self.eat_keyword(Keyword::Type) {
+                        let cql_type = self.parse_cql_type()?;
+                        AlterTableOp::AlterColumn(col_name, cql_type)
+                    } else {
+                        // Fallback type alter without TYPE
+                        let cql_type = self.parse_cql_type()?;
+                        AlterTableOp::AlterColumn(col_name, cql_type)
+                    }
                 } else if self.eat_keyword(Keyword::Drop) {
                     let col_name = self.expect_ident()?;
                     AlterTableOp::DropColumn(col_name)
@@ -407,7 +448,7 @@ impl Parser {
                     }
                     AlterTableOp::WithOptions(opts)
                 } else {
-                    return Err(self.error("expected ADD, DROP, or WITH after ALTER TABLE".into()));
+                    return Err(self.error("expected ADD, ALTER, DROP, or WITH after ALTER TABLE".into()));
                 };
                 Ok(Statement::AlterTable(AlterTable { keyspace: ks, name, operation }))
             }

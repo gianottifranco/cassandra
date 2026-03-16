@@ -124,7 +124,7 @@ pub enum Keyword {
     Function, Aggregate, Trigger, Returns, Language,
     Called, Input, Sfunc, Stype, Finalfunc, Initcond,
     Custom, Replace, Login, Superuser, Password,
-    Norecursive, Of, All, Cast, Vector,
+    Norecursive, Of, All, Cast, Vector, Masked,
 }
 
 impl Keyword {
@@ -230,6 +230,7 @@ impl Keyword {
             "ALL" => Some(Keyword::All),
             "CAST" => Some(Keyword::Cast),
             "VECTOR" => Some(Keyword::Vector),
+            "MASKED" => Some(Keyword::Masked),
             _ => None,
         }
     }

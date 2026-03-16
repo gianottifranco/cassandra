@@ -28,6 +28,7 @@
 pub mod command;
 pub mod executor;
 pub mod paging;
+pub mod planners;
 pub mod repair;
 pub mod resolver;
 pub mod response;
@@ -39,7 +40,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use cassandra_cluster_metadata::{
     ClusterMetadata, Endpoint, ReplicationStrategy, Snitch,
@@ -317,8 +318,8 @@ impl ReadCoordinator {
         let snapshot = self.cluster.snapshot();
 
         // Get replicas
-        let replicas = snapshot.replicas_for_token(token, strategy, snitch);
-        let rf = replicas.len();
+        let natural_replicas = snapshot.natural_replicas_for_token(token, strategy, snitch);
+        let rf = natural_replicas.len();
 
         if rf == 0 {
             self.metrics.reads_unavailable.fetch_add(1, Ordering::Relaxed);
@@ -331,27 +332,36 @@ impl ReadCoordinator {
 
         let required = cl.block_for(rf);
 
-        // Check live replicas
-        let live_replicas: Vec<Endpoint> = replicas
-            .iter()
-            .filter(|ep| {
-                snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live())
-            })
-            .copied()
-            .collect();
+        // Check live replicas and partition into full vs transient
+        let mut full_replicas: Vec<Endpoint> = Vec::new();
+        let mut transient_replicas: Vec<Endpoint> = Vec::new();
 
-        if live_replicas.len() < required {
+        for r in natural_replicas {
+            if snapshot.nodes.get(&r.endpoint).is_some_and(|n| n.state.is_live()) {
+                if r.is_full() {
+                    full_replicas.push(r.endpoint);
+                } else {
+                    transient_replicas.push(r.endpoint);
+                }
+            }
+        }
+
+        let live_count = full_replicas.len() + transient_replicas.len();
+        if live_count < required {
             self.metrics.reads_unavailable.fetch_add(1, Ordering::Relaxed);
             return Err(ReadError::Unavailable {
                 cl,
                 required,
-                alive: live_replicas.len(),
+                alive: live_count,
             });
         }
 
-        // Sort by proximity
-        let mut sorted_replicas = live_replicas.clone();
-        snitch.sort_by_proximity(&self.local_endpoint, &mut sorted_replicas);
+        // Sort by proximity, keeping full replicas before transient replicas
+        snitch.sort_by_proximity(&self.local_endpoint, &mut full_replicas);
+        snitch.sort_by_proximity(&self.local_endpoint, &mut transient_replicas);
+
+        let mut sorted_replicas = full_replicas;
+        sorted_replicas.extend(transient_replicas);
 
         // Compute execution plan
         let plan = compute_execution_plan(
@@ -438,8 +448,8 @@ impl ReadCoordinator {
         // Simplified: use a representative token from the range.
         let representative_token = cmd.data_range.start_token;
         let snapshot = self.cluster.snapshot();
-        let replicas = snapshot.replicas_for_token(representative_token, strategy, snitch);
-        let rf = replicas.len();
+        let natural_replicas = snapshot.natural_replicas_for_token(representative_token, strategy, snitch);
+        let rf = natural_replicas.len();
 
         if rf == 0 {
             self.metrics.reads_unavailable.fetch_add(1, Ordering::Relaxed);
@@ -452,25 +462,36 @@ impl ReadCoordinator {
 
         let required = cl.block_for(rf);
 
-        let live_replicas: Vec<Endpoint> = replicas
-            .iter()
-            .filter(|ep| {
-                snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live())
-            })
-            .copied()
-            .collect();
+        // Check live replicas and partition into full vs transient
+        let mut full_replicas: Vec<Endpoint> = Vec::new();
+        let mut transient_replicas: Vec<Endpoint> = Vec::new();
 
-        if live_replicas.len() < required {
+        for r in natural_replicas {
+            if snapshot.nodes.get(&r.endpoint).is_some_and(|n| n.state.is_live()) {
+                if r.is_full() {
+                    full_replicas.push(r.endpoint);
+                } else {
+                    transient_replicas.push(r.endpoint);
+                }
+            }
+        }
+
+        let live_count = full_replicas.len() + transient_replicas.len();
+        if live_count < required {
             self.metrics.reads_unavailable.fetch_add(1, Ordering::Relaxed);
             return Err(ReadError::Unavailable {
                 cl,
                 required,
-                alive: live_replicas.len(),
+                alive: live_count,
             });
         }
 
-        let mut sorted = live_replicas.clone();
-        snitch.sort_by_proximity(&self.local_endpoint, &mut sorted);
+        // Sort by proximity, keeping full replicas before transient replicas
+        snitch.sort_by_proximity(&self.local_endpoint, &mut full_replicas);
+        snitch.sort_by_proximity(&self.local_endpoint, &mut transient_replicas);
+
+        let mut sorted = full_replicas;
+        sorted.extend(transient_replicas);
 
         debug!(
             range_start = %cmd.data_range.start_token,
@@ -508,7 +529,7 @@ impl ReadCoordinator {
     /// 3. Send the merged result to out-of-date replicas
     pub fn read_repair(
         &self,
-        _read: &CoordinatedRead,
+        read: &CoordinatedRead,
         replicas: &[Endpoint],
     ) -> Result<(), ReadError> {
         info!(
@@ -516,11 +537,45 @@ impl ReadCoordinator {
             "Triggering read repair"
         );
         self.metrics.read_repairs_triggered.fetch_add(1, Ordering::Relaxed);
-        // TODO: Implement full read repair via MessagingService:
-        // 1. Send READ_DATA to all replicas
-        // 2. Collect DataResponses
-        // 3. Use DataResolver to merge
-        // 4. Send repair mutations to stale replicas via ReadRepairHandler
+        
+        let mut resolver = DataResolver::new(self.tombstone_thresholds.clone());
+        
+        // TODO: Send READ_DATA to all replicas via MessagingService and collect responses.
+        // For now, we simulate fetching data from the replicas to feed the DataResolver.
+        for (_i, ep) in replicas.iter().enumerate() {
+            // Simulated partition data (empty for simplicity, but forces DataResolver to process)
+            let pd = cassandra_storage::memtable::partition::PartitionData::new();
+            resolver.add_response(DataResponse {
+                partitions: vec![PartitionResult {
+                    partition_key: read.partition_key.clone(),
+                    data: Some(pd),
+                    live_row_count: 0,
+                    was_truncated: false,
+                }],
+                tombstones_read: 0,
+                is_short_read: false,
+            });
+        }
+        
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i32;
+        let resolved = resolver.resolve(now);
+        
+        // Stage mutations in the handler
+        let mut handler = ReadRepairHandler::new(self.read_repair_strategy.clone());
+        for rm in resolved.repair_mutations {
+            let target = replicas[rm.replica_index];
+            handler.stage_repair(target, read.keyspace.clone(), read.table.clone(), rm.partition_key, rm.merged_data);
+        }
+        
+        // Execute repairs (spawned to background for non-blocking execution)
+        if handler.pending_count() > 0 {
+            tokio::spawn(async move {
+                // Here we would pass `Some(messaging_service.clone())`
+                let count = handler.execute_repairs(None).await;
+                debug!("Executed {} read repair mutations in background", count);
+            });
+        }
+        
         Ok(())
     }
 }

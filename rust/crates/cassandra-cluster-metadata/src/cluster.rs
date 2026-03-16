@@ -34,7 +34,7 @@ use uuid::Uuid;
 use cassandra_common::Token;
 
 use crate::node::{Endpoint, NodeInfo, NodeState};
-use crate::replication::{create_strategy, ReplicationStrategy};
+use crate::replication::ReplicationStrategy;
 use crate::ring::TokenRing;
 use crate::snitch::Snitch;
 
@@ -71,6 +71,16 @@ impl ClusterSnapshot {
         strategy.calculate_natural_endpoints(token, &self.ring, snitch)
     }
 
+    /// Get replicas (with full/transient distinction) for a partition key using the given strategy.
+    pub fn natural_replicas_for_token(
+        &self,
+        token: Token,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Vec<crate::replication::Replica> {
+        strategy.calculate_natural_replicas(token, &self.ring, snitch)
+    }
+
     /// Get replicas for a partition key (raw bytes).
     pub fn replicas_for_key(
         &self,
@@ -80,6 +90,17 @@ impl ClusterSnapshot {
     ) -> Vec<Endpoint> {
         let token = Token::from_partition_key(partition_key);
         self.replicas_for_token(token, strategy, snitch)
+    }
+
+    /// Get replicas (with full/transient distinction) for a partition key (raw bytes).
+    pub fn natural_replicas_for_key(
+        &self,
+        partition_key: &[u8],
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Vec<crate::replication::Replica> {
+        let token = Token::from_partition_key(partition_key);
+        self.natural_replicas_for_token(token, strategy, snitch)
     }
 
     /// Number of known nodes (all states).

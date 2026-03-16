@@ -32,6 +32,15 @@ pub struct MetricsRegistry {
     pub key_cache_hit_rate: Gauge,
     pub storage_load_bytes: IntGauge,
     pub exceptions_count: IntCounterVec,
+    
+    // Repair metrics
+    pub repair_trees_built: IntGauge,
+    pub repair_trees_exchanged: IntGauge,
+    pub repair_ranges_repaired: IntGauge,
+    pub repair_bytes_streamed: IntGauge,
+    pub repair_sessions_active: IntGauge,
+    pub repair_sessions_completed: IntGauge,
+    pub repair_sessions_failed: IntGauge,
 }
 
 impl MetricsRegistry {
@@ -139,6 +148,34 @@ impl MetricsRegistry {
             .register(Box::new(exceptions_count.clone()))
             .expect("register exceptions");
 
+        let repair_trees_built = IntGauge::new("cassandra_repair_trees_built", "Total repair trees built")
+            .expect("gauge");
+        registry.register(Box::new(repair_trees_built.clone())).unwrap();
+        
+        let repair_trees_exchanged = IntGauge::new("cassandra_repair_trees_exchanged", "Total repair trees exchanged")
+            .expect("gauge");
+        registry.register(Box::new(repair_trees_exchanged.clone())).unwrap();
+
+        let repair_ranges_repaired = IntGauge::new("cassandra_repair_ranges_repaired", "Total ranges repaired")
+            .expect("gauge");
+        registry.register(Box::new(repair_ranges_repaired.clone())).unwrap();
+
+        let repair_bytes_streamed = IntGauge::new("cassandra_repair_bytes_streamed", "Total repair bytes streamed")
+            .expect("gauge");
+        registry.register(Box::new(repair_bytes_streamed.clone())).unwrap();
+
+        let repair_sessions_active = IntGauge::new("cassandra_repair_sessions_active", "Active repair sessions")
+            .expect("gauge");
+        registry.register(Box::new(repair_sessions_active.clone())).unwrap();
+
+        let repair_sessions_completed = IntGauge::new("cassandra_repair_sessions_completed", "Completed repair sessions")
+            .expect("gauge");
+        registry.register(Box::new(repair_sessions_completed.clone())).unwrap();
+
+        let repair_sessions_failed = IntGauge::new("cassandra_repair_sessions_failed", "Failed repair sessions")
+            .expect("gauge");
+        registry.register(Box::new(repair_sessions_failed.clone())).unwrap();
+
         Self {
             registry,
             client_request_latency,
@@ -151,6 +188,13 @@ impl MetricsRegistry {
             key_cache_hit_rate,
             storage_load_bytes,
             exceptions_count,
+            repair_trees_built,
+            repair_trees_exchanged,
+            repair_ranges_repaired,
+            repair_bytes_streamed,
+            repair_sessions_active,
+            repair_sessions_completed,
+            repair_sessions_failed,
         }
     }
 
@@ -187,6 +231,17 @@ impl MetricsRegistry {
         self.exceptions_count
             .with_label_values(&[exception_type])
             .inc();
+    }
+    
+    /// Sync from repair metrics snapshot.
+    pub fn sync_from_repair_metrics(&self, snapshot: &cassandra_repair::metrics::RepairMetricsSnapshot) {
+        self.repair_trees_built.set(snapshot.trees_built as i64);
+        self.repair_trees_exchanged.set(snapshot.trees_exchanged as i64);
+        self.repair_ranges_repaired.set(snapshot.ranges_repaired as i64);
+        self.repair_bytes_streamed.set(snapshot.bytes_streamed as i64);
+        self.repair_sessions_active.set(snapshot.sessions_active as i64);
+        self.repair_sessions_completed.set(snapshot.sessions_completed as i64);
+        self.repair_sessions_failed.set(snapshot.sessions_failed as i64);
     }
 }
 

@@ -63,6 +63,8 @@ pub struct ConnectionContext {
     pub registered_events: HashSet<String>,
     /// Optional keyspace set via USE or per-query.
     pub keyspace: Option<String>,
+    /// Authenticated user, if any.
+    pub authenticated_user: Option<String>,
 }
 
 impl Default for ConnectionContext {
@@ -74,6 +76,7 @@ impl Default for ConnectionContext {
             compression: None,
             registered_events: HashSet::new(),
             keyspace: None,
+            authenticated_user: None,
         }
     }
 }
@@ -154,8 +157,11 @@ impl ConnectionContext {
             // ── Authenticating state ───────────────────────────────
             (ConnectionState::Authenticating, Message::AuthResponse(auth_resp)) => {
                 match authenticator.authenticate(auth_resp.token.as_deref()) {
-                    Ok(AuthResult::Success(final_token)) => {
+                    Ok(AuthResult::Success(user, final_token)) => {
                         self.state = ConnectionState::Ready;
+                        if let Some(u) = user {
+                            self.authenticated_user = Some(u);
+                        }
                         Ok(Some(response::encode_response(
                             &Message::AuthSuccess(final_token),
                             version,

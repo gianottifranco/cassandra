@@ -37,8 +37,8 @@ pub trait Authenticator: Send + Sync {
 /// Result of an authentication step.
 #[derive(Debug)]
 pub enum AuthResult {
-    /// Authentication succeeded, optionally with a final token.
-    Success(Option<Vec<u8>>),
+    /// Authentication succeeded, optionally returning the authenticated username and a final token.
+    Success(Option<String>, Option<Vec<u8>>),
     /// Multi-step auth: send this challenge to the client.
     Challenge(Vec<u8>),
 }
@@ -59,7 +59,7 @@ impl Authenticator for AllowAllAuthenticator {
     }
 
     fn authenticate(&self, _token: Option<&[u8]>) -> Result<AuthResult, String> {
-        Ok(AuthResult::Success(None))
+        Ok(AuthResult::Success(Some("anonymous".to_string()), None))
     }
 }
 
@@ -108,7 +108,7 @@ impl Authenticator for PasswordAuthenticator {
         // TODO(phase-7): Real credential verification against system_auth.roles.
         // For now, accept any non-empty credentials (stub).
         tracing::info!("PasswordAuthenticator: accepted user '{}' (stub)", username);
-        Ok(AuthResult::Success(None))
+        Ok(AuthResult::Success(Some(username.to_string()), None))
     }
 }
 
@@ -121,7 +121,7 @@ mod tests {
         let auth = AllowAllAuthenticator;
         assert!(!auth.requires_auth());
         let result = auth.authenticate(None).unwrap();
-        assert!(matches!(result, AuthResult::Success(None)));
+        assert!(matches!(result, AuthResult::Success(Some(_), None)));
     }
 
     #[test]
@@ -131,7 +131,7 @@ mod tests {
 
         let token = b"\0cassandra\0cassandra";
         let result = auth.authenticate(Some(token)).unwrap();
-        assert!(matches!(result, AuthResult::Success(None)));
+        assert!(matches!(result, AuthResult::Success(Some(_), None)));
     }
 
     #[test]

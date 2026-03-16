@@ -27,6 +27,12 @@ pub enum QueryPlan {
     Use(UsePlan),
     Truncate(TruncatePlan),
     Batch(BatchPlan),
+    CreateRole(CreateRolePlan),
+    AlterRole(AlterRolePlan),
+    DropRole(DropRolePlan),
+    Grant(GrantPlan),
+    Revoke(RevokePlan),
+    ListRoles(ListRolesPlan),
 }
 
 impl QueryPlan {
@@ -81,6 +87,7 @@ pub struct ResolvedColumnDef {
     pub name: String,
     pub cql_type: cassandra_types::CqlType,
     pub is_static: bool,
+    pub masked_with: Option<(String, Vec<String>)>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,6 +159,49 @@ pub struct TruncatePlan {
 pub struct BatchPlan {
     pub batch_type: BatchType,
     pub plans: Vec<QueryPlan>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateRolePlan {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub is_superuser: bool,
+    pub can_login: bool,
+    pub password: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterRolePlan {
+    pub name: String,
+    pub password: Option<String>,
+    pub superuser: Option<bool>,
+    pub login: Option<bool>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropRolePlan {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct GrantPlan {
+    pub permissions: Vec<String>,
+    pub resource: Resource,
+    pub role: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RevokePlan {
+    pub permissions: Vec<String>,
+    pub resource: Resource,
+    pub role: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListRolesPlan {
+    pub of_role: Option<String>,
+    pub no_recursive: bool,
 }
 
 /// Plan a parsed statement against the current schema.
@@ -236,10 +286,25 @@ pub fn plan(
                 let cql_type = col.cql_type.resolve().ok_or_else(|| {
                     PlanError::InvalidQuery(format!("Unknown type for column '{}'", col.name))
                 })?;
+                
+                let masked_with = col.masked_with.as_ref().map(|(func, args)| {
+                    let arg_strs = args.iter().map(|t| {
+                        match t {
+                            crate::ast::Term::Literal(crate::ast::Literal::String(s)) => s.clone(),
+                            crate::ast::Term::Literal(crate::ast::Literal::Integer(i)) => i.to_string(),
+                            crate::ast::Term::Literal(crate::ast::Literal::Float(f)) => f.to_string(),
+                            crate::ast::Term::Literal(crate::ast::Literal::Boolean(b)) => b.to_string(),
+                            _ => format!("{:?}", t),
+                        }
+                    }).collect();
+                    (func.clone(), arg_strs)
+                });
+
                 resolved_cols.push(ResolvedColumnDef {
                     name: col.name.clone(),
                     cql_type,
                     is_static: col.is_static,
+                    masked_with,
                 });
             }
 
@@ -350,6 +415,43 @@ pub fn plan(
                 plans,
             }))
         }
+
+        Statement::CreateRole(cr) => Ok(QueryPlan::CreateRole(CreateRolePlan {
+            name: cr.name.clone(),
+            if_not_exists: cr.if_not_exists,
+            is_superuser: cr.superuser.unwrap_or(false),
+            can_login: cr.login.unwrap_or(false),
+            password: cr.password.clone(),
+        })),
+
+        Statement::AlterRole(ar) => Ok(QueryPlan::AlterRole(AlterRolePlan {
+            name: ar.name.clone(),
+            password: ar.password.clone(),
+            superuser: ar.superuser,
+            login: ar.login,
+        })),
+
+        Statement::DropRole(dr) => Ok(QueryPlan::DropRole(DropRolePlan {
+            name: dr.name.clone(),
+            if_exists: dr.if_exists,
+        })),
+
+        Statement::Grant(gr) => Ok(QueryPlan::Grant(GrantPlan {
+            permissions: gr.permissions.clone(),
+            resource: gr.resource.clone(),
+            role: gr.role.clone(),
+        })),
+
+        Statement::Revoke(rv) => Ok(QueryPlan::Revoke(RevokePlan {
+            permissions: rv.permissions.clone(),
+            resource: rv.resource.clone(),
+            role: rv.role.clone(),
+        })),
+
+        Statement::ListRoles(lr) => Ok(QueryPlan::ListRoles(ListRolesPlan {
+            of_role: lr.of_role.clone(),
+            no_recursive: lr.no_recursive,
+        })),
 
         // Phase 12: new statement types not yet fully plannable
         _ => Err(PlanError::InvalidQuery(

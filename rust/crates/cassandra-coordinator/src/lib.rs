@@ -45,6 +45,8 @@ pub mod hint_segment;
 pub mod batch;
 pub mod tracing;
 pub mod paxos;
+pub mod counter;
+pub mod consensus;
 
 pub use consistency::ConsistencyLevel;
 pub use write::{
@@ -75,3 +77,5 @@ pub use batch::{
 };
 pub use self::tracing::TraceSession;
 pub use paxos::{Ballot, PaxosState, PaxosCoordinator, PaxosReplica, CasResult, PaxosConfig};
+pub use counter::{CounterCoordinator, CounterReplica};
+pub use consensus::ConsensusRouter;

@@ -42,6 +42,10 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use futures_util::{SinkExt, StreamExt};
 use tracing::{debug, error, info, warn};
 
+use cassandra_security::tls::ReloadableTlsAcceptor;
+use tokio_rustls::TlsConnector;
+use rustls::pki_types::ServerName;
+
 use crate::frame::{Message, MessageCodec};
 use crate::metrics::MessagingMetrics;
 use crate::verb::Verb;
@@ -61,6 +65,10 @@ struct PendingResponse {
     sent_at: std::time::Instant,
 }
 
+/// Helper trait for streams that support both reading and writing asynchronously.
+pub trait AsyncStream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncStream for T {}
+
 /// The messaging service: manages all internode communication.
 ///
 /// Register handlers for verbs, then send messages to other nodes.
@@ -78,8 +86,11 @@ pub struct MessagingService {
     max_inflight: usize,
     /// Per-endpoint in-flight counters (for backpressure).
     inflight_per_endpoint: DashMap<SocketAddr, usize>,
-    /// Metrics.
     pub metrics: Arc<MessagingMetrics>,
+    /// Optional TLS acceptor for incoming connections.
+    tls_acceptor: Option<ReloadableTlsAcceptor>,
+    /// Optional TLS connector for outgoing connections.
+    tls_connector: Option<TlsConnector>,
 }
 
 impl MessagingService {
@@ -93,6 +104,8 @@ impl MessagingService {
             max_inflight: DEFAULT_MAX_INFLIGHT,
             inflight_per_endpoint: DashMap::new(),
             metrics: Arc::new(MessagingMetrics::new()),
+            tls_acceptor: None,
+            tls_connector: None,
         }
     }
 
@@ -101,6 +114,17 @@ impl MessagingService {
         let mut svc = Self::new(listen_addr);
         svc.max_inflight = max_inflight;
         svc
+    }
+
+    /// Configure TLS for the messaging service.
+    pub fn with_tls(
+        mut self,
+        acceptor: ReloadableTlsAcceptor,
+        connector: TlsConnector,
+    ) -> Self {
+        self.tls_acceptor = Some(acceptor);
+        self.tls_connector = Some(connector);
+        self
     }
 
     /// Get the current in-flight count for an endpoint.
@@ -159,10 +183,19 @@ impl MessagingService {
         self.metrics.verb(msg.header.verb).record_sent();
 
         let result = async {
-            let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+            let tcp_stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
                 .await
                 .map_err(|_| MessagingError::Timeout)?
                 .map_err(MessagingError::Io)?;
+
+            let stream: Box<dyn AsyncStream> = if let Some(ref tls) = self.tls_connector {
+                let domain = ServerName::try_from(endpoint.ip().to_string())
+                    .map_err(|_| MessagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid IP for ServerName")))?;
+                let tls_stream = tls.connect(domain, tcp_stream).await.map_err(MessagingError::Io)?;
+                Box::new(tls_stream)
+            } else {
+                Box::new(tcp_stream)
+            };
 
             let mut framed = FramedWrite::new(stream, MessageCodec);
             framed.send(msg).await.map_err(MessagingError::Io)?;
@@ -199,9 +232,18 @@ impl MessagingService {
         );
 
         // Connect and send
-        let stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
+        let tcp_stream = tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(endpoint))
             .await
             .map_err(|_| MessagingError::Timeout)??;
+
+        let stream: Box<dyn AsyncStream> = if let Some(ref tls) = self.tls_connector {
+            let domain = ServerName::try_from(endpoint.ip().to_string())
+                .map_err(|_| MessagingError::Io(std::io::Error::new(std::io::ErrorKind::InvalidInput, "Invalid IP for ServerName")))?;
+            let tls_stream = tls.connect(domain, tcp_stream).await.map_err(MessagingError::Io)?;
+            Box::new(tls_stream)
+        } else {
+            Box::new(tcp_stream)
+        };
 
         let (read_half, write_half) = tokio::io::split(stream);
         let mut writer = FramedWrite::new(write_half, MessageCodec);
@@ -278,8 +320,22 @@ impl MessagingService {
 
                         let svc2 = Arc::clone(&svc);
                         tokio::spawn(async move {
-                            if let Err(e) = svc2.handle_connection(stream).await {
-                                debug!(peer = %peer, error = %e, "Connection ended");
+                            if let Some(ref tls) = svc2.tls_acceptor {
+                                let acceptor = tls.acceptor();
+                                match acceptor.accept(stream).await {
+                                    Ok(tls_stream) => {
+                                        if let Err(e) = svc2.handle_connection(tls_stream).await {
+                                            debug!(peer = %peer, error = %e, "TLS Connection ended(err)");
+                                        }
+                                    }
+                                    Err(e) => {
+                                        error!(peer = %peer, error = %e, "TLS Handshake failed");
+                                    }
+                                }
+                            } else {
+                                if let Err(e) = svc2.handle_connection(stream).await {
+                                    debug!(peer = %peer, error = %e, "Connection ended");
+                                }
                             }
                             svc2.metrics
                                 .connections_active
@@ -297,7 +353,10 @@ impl MessagingService {
     }
 
     /// Handle a single inbound connection.
-    async fn handle_connection(&self, stream: TcpStream) -> Result<(), std::io::Error> {
+    async fn handle_connection<S>(&self, stream: S) -> Result<(), std::io::Error>
+    where
+        S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (read_half, write_half) = tokio::io::split(stream);
         let mut reader = FramedRead::new(read_half, MessageCodec);
         let mut writer = FramedWrite::new(write_half, MessageCodec);
@@ -371,8 +430,6 @@ pub struct ConnectionPool {
 struct ConnectionInfo {
     /// Negotiated protocol version.
     negotiated_version: i32,
-    /// When the connection was established.
-    established_at: std::time::Instant,
 }
 
 impl ConnectionPool {
@@ -390,7 +447,6 @@ impl ConnectionPool {
             endpoint,
             ConnectionInfo {
                 negotiated_version: version,
-                established_at: std::time::Instant::now(),
             },
         );
     }

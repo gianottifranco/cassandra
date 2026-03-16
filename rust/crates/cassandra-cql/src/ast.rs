@@ -131,6 +131,7 @@ pub struct ColumnDef {
     pub name: String,
     pub cql_type: CqlTypeName,
     pub is_static: bool,
+    pub masked_with: Option<(String, Vec<Term>)>,
 }
 
 /// CQL type name as parsed (not yet resolved against the type system).
@@ -194,6 +195,8 @@ pub enum AlterTableOp {
     AddColumn(ColumnDef),
     DropColumn(String),
     AlterColumn(String, CqlTypeName),
+    MaskColumn(String, String, Vec<Term>), // col, func, args
+    DropMask(String),                      // col
     WithOptions(HashMap<String, String>),
 }
 

@@ -21,8 +21,8 @@
 //! - `org.apache.cassandra.db.ReadCommand`
 //! - `org.apache.cassandra.db.SinglePartitionReadCommand`
 //! - `org.apache.cassandra.db.PartitionRangeReadCommand`
-//! - `org.apache.cassandra.db.filter.ClusteringIndexFilter`
 //! - `org.apache.cassandra.db.filter.ColumnFilter`
+//! - `org.apache.cassandra.db.filter.RowFilter`
 //! - `org.apache.cassandra.db.filter.DataLimits`
 
 use std::fmt;
@@ -96,6 +96,8 @@ pub struct SinglePartitionReadCommand {
     pub partition_key: Vec<u8>,
     /// Optional clustering range filter.
     pub clustering_slice: Option<ClusteringSlice>,
+    /// Row filter applied to regular/static columns.
+    pub row_filter: RowFilter,
     /// Column filter: which columns to return.
     pub column_filter: ColumnFilter,
     /// Per-partition and per-query limits.
@@ -124,6 +126,7 @@ impl SinglePartitionReadCommand {
             table: table.into(),
             partition_key,
             clustering_slice: None,
+            row_filter: RowFilter::default(),
             column_filter: ColumnFilter::All,
             limits: ReadLimits::default(),
             is_reversed: false,
@@ -147,6 +150,11 @@ impl SinglePartitionReadCommand {
         self
     }
 
+    pub fn with_row_filter(mut self, filter: RowFilter) -> Self {
+        self.row_filter = filter;
+        self
+    }
+
     pub fn reversed(mut self) -> Self {
         self.is_reversed = true;
         self
@@ -164,6 +172,8 @@ pub struct PartitionRangeReadCommand {
     pub table: String,
     /// Token range to scan.
     pub data_range: DataRange,
+    /// Row filter applied to regular/static columns.
+    pub row_filter: RowFilter,
     /// Column filter.
     pub column_filter: ColumnFilter,
     /// Limits.
@@ -190,6 +200,7 @@ impl PartitionRangeReadCommand {
             keyspace: keyspace.into(),
             table: table.into(),
             data_range: DataRange::full_ring(),
+            row_filter: RowFilter::default(),
             column_filter: ColumnFilter::All,
             limits: ReadLimits::default(),
             is_reversed: false,
@@ -200,6 +211,11 @@ impl PartitionRangeReadCommand {
 
     pub fn with_range(mut self, range: DataRange) -> Self {
         self.data_range = range;
+        self
+    }
+
+    pub fn with_row_filter(mut self, filter: RowFilter) -> Self {
+        self.row_filter = filter;
         self
     }
 
@@ -345,6 +361,47 @@ impl ColumnFilter {
             Self::All => true,
             Self::Selection(cols) => cols.iter().any(|c| c == column),
         }
+    }
+}
+
+// ─── Row Filter ─────────────────────────────────────────────────
+
+/// An operator for a row filter expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Operator {
+    Eq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+    Contains,
+    ContainsKey,
+    Ann, // Approximate Nearest Neighbor for vectors
+}
+
+/// A single filter expression (e.g., column_name = value).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Expression {
+    pub column: String,
+    pub operator: Operator,
+    pub value: Vec<u8>,
+}
+
+/// A filter that applies to rows inside a partition.
+/// Used for secondary index queries or local filtering.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RowFilter {
+    pub expressions: Vec<Expression>,
+}
+
+impl RowFilter {
+    pub fn is_empty(&self) -> bool {
+        self.expressions.is_empty()
+    }
+
+    pub fn add_expression(mut self, expr: Expression) -> Self {
+        self.expressions.push(expr);
+        self
     }
 }
 

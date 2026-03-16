@@ -386,13 +386,41 @@ impl HintedHandoffManager {
 
     /// Called when a node comes back online.
     ///
-    /// Drains and returns all hints for the target.
-    /// In a full implementation this would send hints via messaging.
-    pub fn on_node_recovered(&self, target: &Endpoint) -> Vec<Hint> {
+    /// Drains and returns all hints for the target, filtering out hints for
+    /// partitions the node no longer owns due to topology changes.
+    pub fn on_node_recovered(
+        &self,
+        target: &Endpoint,
+        snapshot: &cassandra_cluster_metadata::ClusterSnapshot,
+        snitch: &dyn cassandra_cluster_metadata::Snitch,
+        strategies: &HashMap<String, Box<dyn cassandra_cluster_metadata::ReplicationStrategy>>,
+    ) -> Vec<Hint> {
         if !self.config.enabled {
             return Vec::new();
         }
-        self.store.drain_hints(target)
+        
+        let mut valid_hints = Vec::new();
+        for hint in self.store.drain_hints(target) {
+            let ks = &hint.mutation.keyspace;
+            if let Some(strategy) = strategies.get(ks) {
+                let replicas = snapshot.replicas_for_key(&hint.mutation.partition_key, strategy.as_ref(), snitch);
+                if replicas.contains(target) {
+                    valid_hints.push(hint);
+                } else {
+                    tracing::debug!(
+                        target = %target,
+                        keyspace = %ks,
+                        "Hint discarded during replay: target no longer a replica for partition"
+                    );
+                    // Drop hint - Anti-entropy (repair) will synchronize the new replicas.
+                }
+            } else {
+                // Keep the hint if we don't know the keyspace strategy (safe fallback).
+                valid_hints.push(hint);
+            }
+        }
+        
+        valid_hints
     }
 
     /// Called when a node is permanently removed.
@@ -547,13 +575,29 @@ mod tests {
 
     #[test]
     fn manager_node_recovered() {
+        use cassandra_cluster_metadata::{ClusterMetadata, NodeId, NodeInfo, SimpleStrategy, SimpleSnitch};
+        use cassandra_common::Token;
+        
         let mgr = HintedHandoffManager::new(HintConfig::default());
         mgr.store().store_hint(ep(7002), test_mutation());
         mgr.store().store_hint(ep(7002), test_mutation());
 
         assert!(mgr.has_hints_for(&ep(7002)));
 
-        let hints = mgr.on_node_recovered(&ep(7002));
+        let node = NodeInfo::new(
+            NodeId::random(),
+            ep(7002),
+            "dc1",
+            "rack1",
+            vec![Token::from_raw(0)],
+        );
+        let cm = ClusterMetadata::new(node);
+        let snapshot = cm.snapshot();
+        let snitch = SimpleSnitch;
+        let mut strategies: HashMap<String, Box<dyn cassandra_cluster_metadata::ReplicationStrategy>> = HashMap::new();
+        strategies.insert("ks".to_string(), Box::new(SimpleStrategy::new(1)));
+
+        let hints = mgr.on_node_recovered(&ep(7002), &snapshot, &snitch, &strategies);
         assert_eq!(hints.len(), 2);
         assert!(!mgr.has_hints_for(&ep(7002)));
     }

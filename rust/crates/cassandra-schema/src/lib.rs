@@ -9,6 +9,7 @@
 pub mod schema_constants;
 pub mod table_id;
 pub mod column;
+pub mod index;
 pub mod table;
 pub mod keyspace;
 pub mod catalog;
@@ -18,6 +19,7 @@ pub mod schema_agreement;
 
 pub use table_id::TableId;
 pub use column::{ColumnMetadata, ColumnKind, ClusteringOrder};
+pub use index::{IndexMetadata, IndexKind};
 pub use table::{TableMetadata, TableMetadataBuilder, TableParams, TableFlag};
 pub use keyspace::{KeyspaceMetadata, KeyspaceParams, ReplicationParams, KeyspaceKind};
 pub use catalog::{SchemaCatalog, SchemaSnapshot};

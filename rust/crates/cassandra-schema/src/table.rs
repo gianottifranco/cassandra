@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use crate::table_id::TableId;
 use crate::column::{ColumnMetadata, ColumnKind};
+use crate::index::IndexMetadata;
 
 /// Flags on a table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -17,6 +18,26 @@ pub enum TableFlag {
     Counter,
     Dense,
     Compound,
+}
+
+/// Transactional logic routing mode for a table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransactionalMode {
+    /// No strict serializable transactions.
+    Off,
+    /// Traditional Paxos LWT.
+    Paxos,
+    /// Accord distributed transactions.
+    Accord,
+    /// Migration mode.
+    Mixed,
+}
+
+impl Default for TransactionalMode {
+    fn default() -> Self {
+        TransactionalMode::Off
+    }
 }
 
 /// Table-level parameters.
@@ -40,6 +61,8 @@ pub struct TableParams {
     pub compaction: BTreeMap<String, String>,
     #[serde(default)]
     pub compression: BTreeMap<String, String>,
+    #[serde(default)]
+    pub transactional_mode: TransactionalMode,
 }
 
 fn default_gc_grace() -> i32 { 864_000 } // 10 days
@@ -60,6 +83,7 @@ impl Default for TableParams {
             comment: String::new(),
             compaction: BTreeMap::new(),
             compression: BTreeMap::new(),
+            transactional_mode: TransactionalMode::default(),
         }
     }
 }
@@ -71,6 +95,7 @@ pub struct TableMetadata {
     pub name: String,
     pub id: TableId,
     pub columns: Vec<ColumnMetadata>,
+    pub indexes: Vec<IndexMetadata>,
     pub flags: Vec<TableFlag>,
     pub params: TableParams,
 }
@@ -118,6 +143,11 @@ impl TableMetadata {
     pub fn is_counter(&self) -> bool {
         self.flags.contains(&TableFlag::Counter)
     }
+
+    /// Look up an index by name.
+    pub fn index(&self, name: &str) -> Option<&IndexMetadata> {
+        self.indexes.iter().find(|i| i.name == name)
+    }
 }
 
 /// Builder for constructing `TableMetadata`.
@@ -126,6 +156,7 @@ pub struct TableMetadataBuilder {
     name: String,
     id: TableId,
     columns: Vec<ColumnMetadata>,
+    indexes: Vec<IndexMetadata>,
     flags: Vec<TableFlag>,
     params: TableParams,
 }
@@ -140,6 +171,7 @@ impl TableMetadataBuilder {
             name: n,
             id,
             columns: Vec::new(),
+            indexes: Vec::new(),
             flags: vec![TableFlag::Compound],
             params: TableParams::default(),
         }
@@ -147,6 +179,7 @@ impl TableMetadataBuilder {
 
     pub fn id(mut self, id: TableId) -> Self { self.id = id; self }
     pub fn add_column(mut self, col: ColumnMetadata) -> Self { self.columns.push(col); self }
+    pub fn add_index(mut self, idx: IndexMetadata) -> Self { self.indexes.push(idx); self }
     pub fn flags(mut self, flags: Vec<TableFlag>) -> Self { self.flags = flags; self }
     pub fn params(mut self, params: TableParams) -> Self { self.params = params; self }
     pub fn gc_grace(mut self, seconds: i32) -> Self { self.params.gc_grace_seconds = seconds; self }
@@ -158,6 +191,7 @@ impl TableMetadataBuilder {
             name: self.name,
             id: self.id,
             columns: self.columns,
+            indexes: self.indexes,
             flags: self.flags,
             params: self.params,
         }

@@ -80,6 +80,41 @@ class TestJavaSchema:
         )
         assert len(list(result)) == 0
 
+    def test_create_index_and_mv(self, java_session):
+        """CREATE INDEX and CREATE MATERIALIZED VIEW should succeed."""
+        java_session.execute(
+            "CREATE KEYSPACE IF NOT EXISTS diff_schema_test "
+            "WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}"
+        )
+        java_session.execute(
+            "CREATE TABLE IF NOT EXISTS diff_schema_test.idx_test ("
+            "  pk int PRIMARY KEY,"
+            "  v1 int,"
+            "  v2 text"
+            ")"
+        )
+        java_session.execute(
+            "CREATE INDEX IF NOT EXISTS test_idx ON diff_schema_test.idx_test (v1)"
+        )
+        java_session.execute(
+            "CREATE MATERIALIZED VIEW IF NOT EXISTS diff_schema_test.test_mv AS "
+            "SELECT * FROM diff_schema_test.idx_test "
+            "WHERE v1 IS NOT NULL AND pk IS NOT NULL "
+            "PRIMARY KEY (v1, pk)"
+        )
+        
+        result = java_session.execute(
+            "SELECT index_name FROM system_schema.indexes "
+            "WHERE keyspace_name = 'diff_schema_test' AND table_name = 'idx_test'"
+        )
+        assert len(list(result)) == 1
+
+        result = java_session.execute(
+            "SELECT view_name FROM system_schema.views "
+            "WHERE keyspace_name = 'diff_schema_test' AND view_name = 'test_mv'"
+        )
+        assert len(list(result)) == 1
+
 
 class TestRustSchema:
     """

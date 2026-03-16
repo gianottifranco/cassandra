@@ -22,6 +22,8 @@
 pub mod lcs;
 pub mod twcs;
 pub mod ucs;
+pub mod validation;
+pub mod anticompaction;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};

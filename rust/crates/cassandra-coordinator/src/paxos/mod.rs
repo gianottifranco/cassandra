@@ -43,6 +43,7 @@ pub mod ballot;
 pub mod state;
 pub mod messages;
 pub mod coordinator;
+pub mod storage;
 
 pub use ballot::Ballot;
 pub use state::{PaxosState, Proposal};

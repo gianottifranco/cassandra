@@ -12,19 +12,24 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
+use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
+use cassandra_security::Resource as SecurityResource;
+
 use cassandra_cql::ast::{
     Assignment, ClusteringOrder as AstClusteringOrder, Literal, Relation, SelectColumns, Selector,
     Term,
 };
 use cassandra_cql::planner::{
-    AlterKeyspacePlan, BatchPlan, CreateKeyspacePlan, CreateTablePlan, DeletePlan,
-    DropKeyspacePlan, DropTablePlan, InsertPlan, QueryPlan, SelectPlan, TruncatePlan, UpdatePlan,
-    UsePlan,
+    AlterKeyspacePlan, AlterRolePlan, AlterTablePlan, BatchPlan, CreateKeyspacePlan,
+    CreateRolePlan, CreateTablePlan, DeletePlan, DropKeyspacePlan, DropRolePlan, DropTablePlan,
+    GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan, TruncatePlan,
+    UpdatePlan, UsePlan,
 };
 use cassandra_schema::{
     ClusteringOrder, ColumnKind, ColumnMetadata, KeyspaceMetadata, KeyspaceParams,
     ReplicationParams, SchemaCatalog,
 };
+use cassandra_storage::commitlog::{CellMutation, Mutation, MutationRow};
 use cassandra_storage::engine::StorageEngine;
 use cassandra_storage::memtable::partition::{Cell, Row};
 use cassandra_types::CqlType;
@@ -77,14 +82,30 @@ pub struct ResultColumn {
 pub struct QueryExecutor {
     engine: Arc<StorageEngine>,
     catalog: Arc<RwLock<SchemaCatalog>>,
+    role_manager: Arc<dyn RoleManager>,
+    authorizer: Arc<dyn Authorizer>,
 }
 
 impl QueryExecutor {
-    pub fn new(engine: Arc<StorageEngine>, catalog: Arc<RwLock<SchemaCatalog>>) -> Self {
-        Self { engine, catalog }
+    pub fn new(
+        engine: Arc<StorageEngine>,
+        catalog: Arc<RwLock<SchemaCatalog>>,
+        role_manager: Arc<dyn RoleManager>,
+        authorizer: Arc<dyn Authorizer>,
+    ) -> Self {
+        Self {
+            engine,
+            catalog,
+            role_manager,
+            authorizer,
+        }
     }
 
-    pub fn execute(&self, plan: &QueryPlan) -> Result<QueryResult, ExecutorError> {
+    pub fn catalog(&self) -> Arc<RwLock<SchemaCatalog>> {
+        Arc::clone(&self.catalog)
+    }
+
+    pub fn execute(&self, plan: &QueryPlan, user: Option<&str>) -> Result<QueryResult, ExecutorError> {
         match plan {
             QueryPlan::Use(u) => self.execute_use(u),
             QueryPlan::CreateKeyspace(ck) => self.execute_create_keyspace(ck),
@@ -96,12 +117,18 @@ impl QueryExecutor {
             QueryPlan::Insert(ins) => self.execute_insert(ins),
             QueryPlan::Update(upd) => self.execute_update(upd),
             QueryPlan::Delete(del) => self.execute_delete(del),
-            QueryPlan::Select(sel) => self.execute_select(sel),
+            QueryPlan::Select(sel) => self.execute_select(sel, user),
             QueryPlan::Truncate(_) => {
                 info!("TRUNCATE executed (stub)");
                 Ok(QueryResult::Void)
             }
-            QueryPlan::Batch(batch) => self.execute_batch(batch),
+            QueryPlan::Batch(batch) => self.execute_batch(batch, user),
+            QueryPlan::CreateRole(cr) => self.execute_create_role(cr),
+            QueryPlan::AlterRole(ar) => self.execute_alter_role(ar),
+            QueryPlan::DropRole(dr) => self.execute_drop_role(dr),
+            QueryPlan::Grant(gr) => self.execute_grant(gr),
+            QueryPlan::Revoke(rv) => self.execute_revoke(rv),
+            QueryPlan::ListRoles(lr) => self.execute_list_roles(lr),
         }
     }
 
@@ -262,6 +289,7 @@ impl QueryExecutor {
                 position,
                 col.cql_type.clone(),
                 clustering_order,
+                col.masked_with.clone(),
             ));
         }
 
@@ -367,8 +395,17 @@ impl QueryExecutor {
             local_deletion_time: None,
         };
 
+        let mutation = Mutation {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            partition_key: pk_bytes.clone(),
+            rows: vec![row_to_mutation_row(row)],
+            timestamp: now,
+            cdc_enabled: false,
+        };
+
         self.engine
-            .apply_mutation(&plan.keyspace, &plan.table, pk_bytes, vec![row], now)
+            .apply_mutation(&mutation)
             .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
 
         Ok(QueryResult::Void)
@@ -428,8 +465,17 @@ impl QueryExecutor {
             local_deletion_time: None,
         };
 
+        let mutation = Mutation {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            partition_key: pk_bytes.clone(),
+            rows: vec![row_to_mutation_row(row)],
+            timestamp: now,
+            cdc_enabled: false,
+        };
+
         self.engine
-            .apply_mutation(&plan.keyspace, &plan.table, pk_bytes, vec![row], now)
+            .apply_mutation(&mutation)
             .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
 
         Ok(QueryResult::Void)
@@ -499,14 +545,23 @@ impl QueryExecutor {
             },
         };
 
+        let mutation = Mutation {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            partition_key: pk_bytes.clone(),
+            rows: vec![row_to_mutation_row(row)],
+            timestamp: now,
+            cdc_enabled: false,
+        };
+
         self.engine
-            .apply_mutation(&plan.keyspace, &plan.table, pk_bytes, vec![row], now)
+            .apply_mutation(&mutation)
             .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
 
         Ok(QueryResult::Void)
     }
 
-    fn execute_select(&self, plan: &SelectPlan) -> Result<QueryResult, ExecutorError> {
+    fn execute_select(&self, plan: &SelectPlan, user: Option<&str>) -> Result<QueryResult, ExecutorError> {
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
         let table_meta = snapshot
@@ -519,10 +574,15 @@ impl QueryExecutor {
         let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
 
         let mut pk_bytes = Vec::new();
+        let mut index_searches = Vec::new();
         for rel in &plan.where_clause {
             if pk_names.contains(&rel.column.as_str()) {
                 if let Some(v) = term_to_bytes(&rel.value) {
                     pk_bytes.extend_from_slice(&v);
+                }
+            } else {
+                if let Some(idx) = table_meta.indexes.iter().find(|i| i.target_column() == Some(&rel.column)) {
+                    index_searches.push((rel.clone(), idx.clone()));
                 }
             }
         }
@@ -556,9 +616,104 @@ impl QueryExecutor {
                 .collect(),
         };
 
+        // Determine if DDM must be applied (User lacks UNMASK permission)
+        // By default, if user is not available or authorizer triggers, we mask.
+        // For phase 7, if Authorizer traits properly resolve "has_permission", we use them.
+        let mut apply_masking = false;
+        
+        if let Some(username) = user {
+            use cassandra_security::authz::Permission;
+            let resource = cassandra_security::authz::Resource::Table { 
+                keyspace: plan.keyspace.clone(), 
+                table: plan.table.clone() 
+            };
+            if self.authorizer.authorize(username, &resource, Permission::Unmask).is_err() {
+                apply_masking = true;
+            }
+        } else {
+            // Unauthenticated requests should definitely be masked if there are policies
+            apply_masking = true;
+        }
+
+        // Setup ephemeral masking registry for this query
+        let mut masking_registry = cassandra_security::masking::MaskingRegistry::new();
+        if apply_masking {
+            for col in &table_meta.columns {
+                if let Some((func, args)) = &col.masked_with {
+                    masking_registry.add_policy(cassandra_security::masking::ColumnMaskingConfig {
+                        keyspace: plan.keyspace.clone(),
+                        table: plan.table.clone(),
+                        column: col.name.clone(),
+                        function_name: func.clone(),
+                        function_args: args.clone(),
+                    });
+                }
+            }
+        }
+
         drop(catalog);
 
         if pk_bytes.is_empty() {
+            if !index_searches.is_empty() {
+                let (rel, idx) = &index_searches[0];
+                let is_vector = idx.options.get("class_name").map(|s| s.contains("StorageAttachedIndex")).unwrap_or(false)
+                    && idx.options.contains_key("vector_dimensions");
+
+                let term_bytes = term_to_bytes(&rel.value).unwrap_or_default();
+
+                let search_results = if is_vector {
+                    let k = plan.limit.as_ref().and_then(term_to_i64).unwrap_or(10) as usize;
+                    self.engine
+                        .search_vector_index(&plan.keyspace, &plan.table, &idx.name, &term_bytes, k)
+                        .map_err(|e: Box<dyn std::error::Error>| ExecutorError::StorageError(e.to_string()))?
+                        .into_iter()
+                        .map(|(pd, _score)| pd)
+                        .collect::<Vec<_>>()
+                } else {
+                    self.engine
+                        .search_index(&plan.keyspace, &plan.table, &idx.name, &term_bytes)
+                        .map_err(|e: Box<dyn std::error::Error>| ExecutorError::StorageError(e.to_string()))?
+                };
+
+                let mut result_rows = Vec::new();
+                let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
+
+                for pd in search_results {
+                    let live: Vec<&Row> = pd.live_rows(now_secs);
+                    for row in live {
+                        let mut result_row = Vec::new();
+                        for rc in &result_columns {
+                            let mut value = row
+                                .cells
+                                .iter()
+                                .find(|c| c.column == rc.name && c.is_live_at(now_secs))
+                                .and_then(|c| c.value.clone());
+                                
+                            if apply_masking {
+                                if let Some(v) = &value {
+                                    if let Some(masked) = masking_registry.apply_mask(&plan.keyspace, &plan.table, &rc.name, v) {
+                                        value = Some(masked);
+                                    }
+                                }
+                            }
+                            result_row.push(value);
+                        }
+                        result_rows.push(result_row);
+                    }
+                }
+
+                if let Some(ref limit_term) = plan.limit {
+                    if let Some(limit) = term_to_i64(limit_term) {
+                        result_rows.truncate(limit as usize);
+                    }
+                }
+
+                return Ok(QueryResult::Rows {
+                    columns: result_columns,
+                    rows: result_rows,
+                });
+            }
+
             return Ok(QueryResult::Rows {
                 columns: result_columns,
                 rows: Vec::new(),
@@ -567,24 +722,31 @@ impl QueryExecutor {
 
         let partition = self
             .engine
-            .read_partition(&plan.keyspace, &plan.table, &pk_bytes)
-            .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
+            .read_partition(&plan.keyspace, &plan.table, &pk_bytes);
 
         let mut result_rows = Vec::new();
 
         if let Some(pd) = partition {
             let now_secs =
                 (current_timestamp_micros() / 1_000_000) as i32;
-            let live = pd.live_rows(now_secs);
+            let live: Vec<&Row> = pd.live_rows(now_secs);
 
             for row in live {
                 let mut result_row = Vec::new();
                 for rc in &result_columns {
-                    let value = row
+                    let mut value = row
                         .cells
                         .iter()
                         .find(|c| c.column == rc.name && c.is_live_at(now_secs))
                         .and_then(|c| c.value.clone());
+                        
+                    if apply_masking {
+                        if let Some(v) = &value {
+                            if let Some(masked) = masking_registry.apply_mask(&plan.keyspace, &plan.table, &rc.name, v) {
+                                value = Some(masked);
+                            }
+                        }
+                    }
                     result_row.push(value);
                 }
                 result_rows.push(result_row);
@@ -603,10 +765,101 @@ impl QueryExecutor {
         })
     }
 
-    fn execute_batch(&self, plan: &BatchPlan) -> Result<QueryResult, ExecutorError> {
+    fn execute_batch(&self, plan: &BatchPlan, user: Option<&str>) -> Result<QueryResult, ExecutorError> {
         for sub in &plan.plans {
-            self.execute(sub)?;
+            self.execute(sub, user)?;
         }
+        Ok(QueryResult::Void)
+    }
+
+    // ─── DCL / Role Management ─────────────────────────────────────────────
+
+    fn execute_create_role(&self, plan: &CreateRolePlan) -> Result<QueryResult, ExecutorError> {
+        if !plan.if_not_exists && self.role_manager.role_exists(&plan.name) {
+            return Err(ExecutorError::InvalidQuery(format!(
+                "Role '{}' already exists",
+                plan.name
+            )));
+        }
+
+        let hashed_password = plan
+            .password
+            .as_deref()
+            .map(|p| cassandra_security::auth::hash_password(p).unwrap());
+
+        self.role_manager.create_role(Role {
+            name: plan.name.clone(),
+            is_superuser: plan.is_superuser,
+            can_login: plan.can_login,
+            hashed_password,
+            member_of: vec![],
+            network_permissions: None,
+        });
+
+        info!(role = %plan.name, "Created role");
+        Ok(QueryResult::Void)
+    }
+
+    fn execute_alter_role(&self, plan: &AlterRolePlan) -> Result<QueryResult, ExecutorError> {
+        let opts = RoleOptions {
+            is_superuser: plan.superuser,
+            can_login: plan.login,
+            password: plan.password.clone(),
+            network_permissions: None,
+        };
+
+        self.role_manager
+            .alter_role(&plan.name, opts)
+            .map_err(|e| ExecutorError::InvalidQuery(e.to_string()))?;
+
+        info!(role = %plan.name, "Altered role");
+        Ok(QueryResult::Void)
+    }
+
+    fn execute_drop_role(&self, plan: &DropRolePlan) -> Result<QueryResult, ExecutorError> {
+        if !plan.if_exists && !self.role_manager.role_exists(&plan.name) {
+            return Err(ExecutorError::InvalidQuery(format!(
+                "Role '{}' doesn't exist",
+                plan.name
+            )));
+        }
+
+        if self.role_manager.role_exists(&plan.name) {
+            self.role_manager
+                .drop_role(&plan.name)
+                .map_err(|e| ExecutorError::InvalidQuery(e.to_string()))?;
+            info!(role = %plan.name, "Dropped role");
+        }
+        Ok(QueryResult::Void)
+    }
+
+    fn execute_grant(&self, plan: &GrantPlan) -> Result<QueryResult, ExecutorError> {
+        let sec_resource = ast_resource_to_security(&plan.resource)?;
+        for p_str in &plan.permissions {
+            let p = parse_permission(p_str)?;
+            self.authorizer
+                .grant("cassandra", &plan.role, &sec_resource, p)
+                .map_err(|e| ExecutorError::InvalidQuery(e.to_string()))?;
+        }
+        info!(role = %plan.role, "Granted permissions");
+        Ok(QueryResult::Void)
+    }
+
+    fn execute_revoke(&self, plan: &RevokePlan) -> Result<QueryResult, ExecutorError> {
+        let sec_resource = ast_resource_to_security(&plan.resource)?;
+        for p_str in &plan.permissions {
+            let p = parse_permission(p_str)?;
+            self.authorizer
+                .revoke("cassandra", &plan.role, &sec_resource, p)
+                .map_err(|e| ExecutorError::InvalidQuery(e.to_string()))?;
+        }
+        info!(role = %plan.role, "Revoked permissions");
+        Ok(QueryResult::Void)
+    }
+
+    fn execute_list_roles(&self, _plan: &ListRolesPlan) -> Result<QueryResult, ExecutorError> {
+        let _roles = self.role_manager.list_roles();
+        // Return void for now as we don't return virtual tables fully here yet.
         Ok(QueryResult::Void)
     }
 }
@@ -655,4 +908,59 @@ fn parse_uuid_bytes(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
         .collect()
+}
+
+fn row_to_mutation_row(row: Row) -> MutationRow {
+    MutationRow {
+        clustering_key: row.clustering_key,
+        cells: row.cells.into_iter().map(|c| CellMutation {
+            column: c.column,
+            value: c.value,
+            timestamp: c.timestamp,
+            ttl: c.ttl,
+            local_deletion_time: c.local_deletion_time,
+            is_tombstone: c.is_tombstone,
+        }).collect(),
+        is_tombstone: row.is_tombstone,
+        local_deletion_time: row.local_deletion_time,
+    }
+}
+
+fn parse_permission(p: &str) -> Result<Permission, ExecutorError> {
+    match p.to_uppercase().as_str() {
+        "CREATE" => Ok(Permission::Create),
+        "ALTER" => Ok(Permission::Alter),
+        "DROP" => Ok(Permission::Drop),
+        "SELECT" => Ok(Permission::Select),
+        "MODIFY" => Ok(Permission::Modify),
+        "AUTHORIZE" => Ok(Permission::Authorize),
+        "DESCRIBE" => Ok(Permission::Describe),
+        "EXECUTE" => Ok(Permission::Execute),
+        "UNMASK" => Ok(Permission::Unmask),
+        "SELECT_MASKED" => Ok(Permission::SelectMasked),
+        _ => Err(ExecutorError::InvalidQuery(format!("Unknown permission '{}'", p))),
+    }
+}
+
+fn ast_resource_to_security(r: &cassandra_cql::ast::Resource) -> Result<SecurityResource, ExecutorError> {
+    use cassandra_cql::ast::Resource as AstRes;
+    match r {
+        AstRes::AllKeyspaces => Ok(SecurityResource::Root),
+        AstRes::Keyspace(ks) => Ok(SecurityResource::Keyspace(ks.clone())),
+        AstRes::Table { keyspace, table } => Ok(SecurityResource::Table {
+            keyspace: keyspace.clone().unwrap_or_else(|| "system".into()), // Needs active keyspace context ideally
+            table: table.clone(),
+        }),
+        AstRes::AllRoles => Ok(SecurityResource::Root),
+        AstRes::Role(r) => Ok(SecurityResource::Role(r.clone())),
+        AstRes::AllFunctions => Ok(SecurityResource::Root),
+        AstRes::FunctionInKeyspace(ks) => Ok(SecurityResource::Keyspace(ks.clone())),
+        AstRes::Function { keyspace, name, .. } => Ok(SecurityResource::Function {
+            keyspace: keyspace.clone().unwrap_or_else(|| "system".into()),
+            name: name.clone(),
+        }),
+        AstRes::AllMBeans => Ok(SecurityResource::Root),
+        AstRes::MBean(m) => Ok(SecurityResource::Jmx(m.clone())),
+        AstRes::MBeanPattern(p) => Ok(SecurityResource::Jmx(p.clone())),
+    }
 }

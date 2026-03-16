@@ -22,6 +22,7 @@ use cassandra_common::Token;
 use crate::merkle::MerkleTree;
 use crate::metrics::RepairMetrics;
 use crate::session::{RepairSession, RepairSessionId, RepairSessionState};
+use crate::history::{RepairHistoryTracker, LoggingRepairHistoryTracker};
 
 /// Type of repair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,8 @@ pub enum RepairType {
     Full,
     /// Incremental repair: only repair unrepaired data (data added since last repair).
     Incremental,
+    /// Preview repair: compute differences but do not stream data or change states.
+    Preview,
 }
 
 impl std::fmt::Display for RepairType {
@@ -37,6 +40,7 @@ impl std::fmt::Display for RepairType {
         match self {
             Self::Full => write!(f, "FULL"),
             Self::Incremental => write!(f, "INCREMENTAL"),
+            Self::Preview => write!(f, "PREVIEW"),
         }
     }
 }
@@ -94,6 +98,8 @@ pub struct RepairCoordinator {
     pub metrics: Arc<RepairMetrics>,
     /// Whether the repair has been cancelled.
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    /// Tracker for system_distributed repair history
+    pub history_tracker: Arc<dyn RepairHistoryTracker>,
 }
 
 impl RepairCoordinator {
@@ -104,6 +110,18 @@ impl RepairCoordinator {
             active_repair: Arc::new(Mutex::new(None)),
             metrics: Arc::new(RepairMetrics::new()),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history_tracker: Arc::new(LoggingRepairHistoryTracker),
+        }
+    }
+
+    /// Create a new coordinator with a specific history tracker.
+    pub fn with_tracker(tracker: Arc<dyn RepairHistoryTracker>) -> Self {
+        Self {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            active_repair: Arc::new(Mutex::new(None)),
+            metrics: Arc::new(RepairMetrics::new()),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            history_tracker: tracker,
         }
     }
 
@@ -141,7 +159,14 @@ impl RepairCoordinator {
             "Starting repair"
         );
 
-        // Create a repair session for each range
+        self.history_tracker.record_parent_repair_start(
+            repair_id,
+            keyspace,
+            tables,
+            ranges,
+            repair_type,
+        );
+
         let mut sessions = self.sessions.lock();
         for range in ranges {
             let table_name = if tables.is_empty() {
@@ -150,11 +175,23 @@ impl RepairCoordinator {
                 tables.join(",")
             };
             let session = RepairSession::new(
+                repair_id,
+                repair_type,
                 keyspace,
-                table_name,
+                &table_name,
                 *range,
                 replicas.to_vec(),
             );
+            
+            self.history_tracker.record_session_start(
+                session.id,
+                repair_id,
+                keyspace,
+                &table_name,
+                *range,
+                replicas,
+            );
+            
             sessions.insert(session.id, session);
         }
 
@@ -242,6 +279,7 @@ impl RepairCoordinator {
                 RepairError::TreeExchangeFailed(e.to_string())
             })?;
             self.metrics.session_completed();
+            self.history_tracker.record_session_finish(*session_id, RepairSessionState::Complete, None);
         } else {
             session.start_streaming(diffs.len()).map_err(|e| {
                 RepairError::StreamingFailed(e.to_string())
@@ -272,6 +310,8 @@ impl RepairCoordinator {
                 RepairSessionState::Complete | RepairSessionState::Failed
             )
         });
+
+        self.history_tracker.record_session_finish(*session_id, RepairSessionState::Complete, None);
 
         if all_done {
             drop(sessions);
@@ -312,6 +352,22 @@ impl RepairCoordinator {
         let mut active = self.active_repair.lock();
         if let Some(id) = *active {
             info!(repair_id = %id, "Repair finished");
+            
+            let sessions = self.sessions.lock();
+            let mut successful = Vec::new();
+            let mut error = None;
+            for s in sessions.values() {
+                if s.state == RepairSessionState::Complete {
+                    successful.push(s.range);
+                } else if s.state == RepairSessionState::Failed {
+                    error = s.error.clone().or_else(|| Some("Session failed".to_string()));
+                } else if self.is_cancelled() {
+                    error = Some("Repair cancelled".to_string());
+                }
+            }
+            
+            self.history_tracker.record_parent_repair_finish(id, &successful, error);
+            drop(sessions);
         }
         *active = None;
         self.sessions.lock().clear();
@@ -473,5 +529,6 @@ mod tests {
     fn repair_type_display() {
         assert_eq!(RepairType::Full.to_string(), "FULL");
         assert_eq!(RepairType::Incremental.to_string(), "INCREMENTAL");
+        assert_eq!(RepairType::Preview.to_string(), "PREVIEW");
     }
 }

@@ -13,7 +13,7 @@ tokio = { workspace = true }
 tracing = { workspace = true }
 cassandra-types = { path = "../cassandra-types" }
 cassandra-schema = { path = "../cassandra-schema" }
-cassandra-storage = { path = "../cassandra-storage" }
+cassandra-storage = { path = "../cassandra-storage", features = ["materialized-views", "triggers", "udfs", "ucs"] }
 cassandra-messaging = { path = "../cassandra-messaging" }
 cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
 uuid = { workspace = true }
@@ -24,6 +24,7 @@ dashmap = { workspace = true }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+cassandra-accord = { version = "0.1.0", path = "../cassandra-accord" }
 
 [dev-dependencies]
 proptest = { workspace = true }
