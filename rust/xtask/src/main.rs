@@ -33,6 +33,7 @@ fn main() -> ExitCode {
         Some("diff-test") => cmd_diff_test(),
         Some("golden-test") => cmd_golden_test(),
         Some("generate-golden") => cmd_generate_golden(),
+        Some("coverage-audit") => cmd_coverage_audit(),
         Some("help") | Some("--help") | Some("-h") | None => {
             print_help();
             ExitCode::SUCCESS
@@ -67,14 +68,106 @@ COMMANDS:
     generate-golden   Generate golden fixtures from a running Java oracle.
                       Requires Docker or a local Cassandra instance.
 
+    coverage-audit    Audit Java→Rust coverage:
+                      1. Regenerate package inventory from Java source tree
+                      2. Validate gap matrix completeness
+                      3. Report unclassified features
+                      Fails CI if any Java package is unclassified.
+
     help              Show this help message.
 
 EXAMPLES:
     cargo xtask diff-test          # Full end-to-end
     cargo xtask golden-test        # Just offline tests
+    cargo xtask coverage-audit     # Check coverage completeness
     make diff-test                 # Same as cargo xtask diff-test
 "#
     );
+}
+
+fn cmd_coverage_audit() -> ExitCode {
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Coverage Audit — Java→Rust Gap Analysis");
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    let repo_root = repo_root();
+
+    // Step 1: Regenerate package inventory
+    println!("── Step 1: Regenerating Package Inventory ─────────────────\n");
+    let inventory_ok = run_cmd(
+        "python3",
+        &[
+            "scripts/coverage_audit.py",
+            "--generate-inventory",
+            "--repo-root",
+            ".",
+        ],
+        Some(&repo_root),
+    );
+
+    if !inventory_ok {
+        eprintln!("❌ Failed to generate package inventory");
+        return ExitCode::FAILURE;
+    }
+
+    // Step 2: Validate gap matrix
+    println!("\n── Step 2: Validating Gap Matrix ────────────────────────\n");
+    let matrix_ok = run_cmd(
+        "python3",
+        &[
+            "scripts/coverage_audit.py",
+            "--check-matrix",
+            "--repo-root",
+            ".",
+        ],
+        Some(&repo_root),
+    );
+
+    // Step 3: Check gap matrix YAML exists and is non-empty
+    println!("\n── Step 3: Checking Matrix YAML ─────────────────────────\n");
+    let matrix_path = repo_root.join("docs/rewrite/final_gap_matrix.yaml");
+    let yaml_ok = if matrix_path.exists() {
+        let content = std::fs::read_to_string(&matrix_path).unwrap_or_default();
+        if content.contains("status:") {
+            println!("  ✅ Gap matrix YAML exists and contains entries");
+            true
+        } else {
+            eprintln!("  ❌ Gap matrix YAML exists but has no status entries");
+            false
+        }
+    } else {
+        eprintln!("  ❌ Gap matrix YAML not found at {:?}", matrix_path);
+        false
+    };
+
+    // Summary
+    println!("\n═══════════════════════════════════════════════════════════");
+    println!("  Coverage Audit Results");
+    println!("═══════════════════════════════════════════════════════════");
+    println!(
+        "  Inventory generation: {}",
+        status_icon(inventory_ok)
+    );
+    println!("  Matrix validation:   {}", status_icon(matrix_ok));
+    println!("  Matrix YAML:         {}", status_icon(yaml_ok));
+    println!("═══════════════════════════════════════════════════════════\n");
+
+    if inventory_ok && matrix_ok && yaml_ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Repo root is two levels up from xtask: rust/xtask -> rust -> cassandra
+fn repo_root() -> std::path::PathBuf {
+    let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 fn cmd_diff_test() -> ExitCode {

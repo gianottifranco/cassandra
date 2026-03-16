@@ -13,9 +13,13 @@ pub mod table;
 pub mod keyspace;
 pub mod catalog;
 pub mod persistence;
+pub mod system_keyspaces;
+pub mod schema_agreement;
 
 pub use table_id::TableId;
 pub use column::{ColumnMetadata, ColumnKind, ClusteringOrder};
 pub use table::{TableMetadata, TableMetadataBuilder, TableParams, TableFlag};
 pub use keyspace::{KeyspaceMetadata, KeyspaceParams, ReplicationParams, KeyspaceKind};
 pub use catalog::{SchemaCatalog, SchemaSnapshot};
+pub use system_keyspaces::{SystemTableDef, SystemColumnSpec, BootstrapState};
+

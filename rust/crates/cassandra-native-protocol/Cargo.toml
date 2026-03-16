@@ -22,6 +22,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 md-5 = { workspace = true }
 uuid = { workspace = true }
+parking_lot = { workspace = true }
 
 # Optional compression backends
 lz4_flex = { workspace = true, optional = true }

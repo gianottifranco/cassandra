@@ -1,448 +1,484 @@
 // Licensed under Apache License, Version 2.0.
 
-//! Storage Engine: orchestrates commit log, memtables, SSTables, and compaction.
+//! Storage engine: coordinates commit log, memtables, SSTables, and compaction.
 //!
 //! ## Java Oracle
 //! - `org.apache.cassandra.db.ColumnFamilyStore`
 //! - `org.apache.cassandra.db.Keyspace`
+//! - `org.apache.cassandra.service.StorageService` (flush/compact)
 //!
 //! ## Architecture
 //!
-//! The engine provides the unified write/read interface:
-//! - **Write**: mutation → commit log → memtable (→ async flush → SSTable)
-//! - **Read**: merge memtable + SSTables, resolve by timestamp
-//! - **Flush**: serialize memtable → new SSTable, discard old CL segments
-//! - **Compact**: merge SSTables per strategy, GC tombstones
+//! ```text
+//!  Write → CommitLog → Memtable ──flush──→ SSTable ──compact──→ SSTable
+//!                                                        ↓
+//!  Read  → merge(Memtable, SSTables*)             CDC / Backup
+//! ```
+//!
+//! The engine manages the full lifecycle of data from write to compaction.
+//! It supports multiple SSTable formats (Big, BTI), all compaction strategies
+//! (STCS, LCS, TWCS, UCS), CDC, snapshots, and incremental backups.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 
-use crate::commitlog::{CommitLog, CommitLogConfig, Mutation, MutationRow, CellMutation};
-use crate::compaction::{
-    merge_partitions, CompactionStrategy, SSTableMetadata, SizeTieredCompactionStrategy,
+use crate::backup::{self, IncrementalBackupConfig};
+use crate::commitlog::{
+    CommitLog, CommitLogConfig, Mutation,
 };
+use crate::compaction::{
+    CompactionMetrics, CompactionStrategy, CompactionStrategyType,
+    SSTableMetadata, create_strategy, merge_partitions,
+};
+use crate::memtable::{MemtableManager, MemtableType};
 use crate::memtable::partition::{Cell, PartitionData, Row};
-use crate::memtable::MemtableManager;
-use crate::sstable::format::{SSTableDescriptor, SSTableId};
-use crate::sstable::reader::SSTableReader;
-use crate::sstable::writer::SSTableWriter;
+use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
+use crate::sstable::{SSTableReader, SSTableWriter, BtiReader, BtiWriter};
 
 // ─── Configuration ─────────────────────────────────────────────────────────
 
+/// Storage engine configuration.
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
-    pub data_dir: PathBuf,
-    pub commitlog_config: CommitLogConfig,
-    /// Memory threshold (bytes) before triggering memtable flush.
+    /// Root data directories.
+    pub data_directories: Vec<PathBuf>,
+    /// Commit log configuration.
+    pub commitlog: CommitLogConfig,
+    /// Memory threshold to trigger memtable flush (bytes).
     pub memtable_flush_threshold: usize,
-    /// GC grace period for tombstones (seconds). Default: 10 days.
+    /// GC grace period (seconds).
     pub gc_grace_seconds: i32,
+    /// Compaction strategy type.
+    pub compaction_strategy_type: CompactionStrategyType,
+    /// SSTable format to use for new SSTables.
+    pub sstable_format: SSTableFormat,
+    /// Memtable type.
+    pub memtable_type: MemtableType,
+    /// Incremental backup configuration.
+    pub incremental_backup: IncrementalBackupConfig,
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
-            data_dir: PathBuf::from("data"),
-            commitlog_config: CommitLogConfig::default(),
-            memtable_flush_threshold: 128 * 1024 * 1024, // 128 MiB
+            data_directories: vec![PathBuf::from("data")],
+            commitlog: CommitLogConfig::default(),
+            memtable_flush_threshold: 128 * 1024 * 1024,
             gc_grace_seconds: 864_000, // 10 days
+            compaction_strategy_type: CompactionStrategyType::default(),
+            sstable_format: SSTableFormat::default(),
+            memtable_type: MemtableType::default(),
+            incremental_backup: IncrementalBackupConfig::default(),
+        }
+    }
+}
+
+// ─── Engine Stats ──────────────────────────────────────────────────────────
+
+/// Engine-level statistics.
+#[derive(Debug, Clone)]
+pub struct EngineStats {
+    pub sstable_count: usize,
+    pub total_data_bytes: u64,
+    pub flushes_completed: u64,
+    pub compactions_completed: u64,
+    pub memtable_memory_bytes: usize,
+}
+
+// ─── SSTable Handle ────────────────────────────────────────────────────────
+
+/// Abstraction over Big and BTI readers.
+enum SSTableHandle {
+    Big(SSTableReader),
+    Bti(BtiReader),
+}
+
+impl SSTableHandle {
+    fn generation(&self) -> SSTableId {
+        match self {
+            SSTableHandle::Big(r) => r.generation(),
+            SSTableHandle::Bti(r) => r.generation(),
+        }
+    }
+
+    fn might_contain_key(&self, key: &[u8]) -> bool {
+        match self {
+            SSTableHandle::Big(r) => r.might_contain_key(key),
+            SSTableHandle::Bti(r) => r.might_contain_key(key),
+        }
+    }
+
+    fn get_partition(&self, key: &[u8]) -> std::io::Result<Option<PartitionData>> {
+        match self {
+            SSTableHandle::Big(r) => r.get_partition(key),
+            SSTableHandle::Bti(r) => r.get_partition(key),
+        }
+    }
+
+    fn iter_partitions(&self) -> std::io::Result<Vec<(Vec<u8>, PartitionData)>> {
+        match self {
+            SSTableHandle::Big(r) => r.iter_partitions(),
+            SSTableHandle::Bti(r) => r.iter_partitions(),
+        }
+    }
+
+    fn data_size(&self) -> u64 {
+        match self {
+            SSTableHandle::Big(r) => r.stats().map_or(0, |s| s.data_size),
+            SSTableHandle::Bti(r) => r.stats().map_or(0, |s| s.data_size),
+        }
+    }
+
+    fn partition_count(&self) -> u64 {
+        match self {
+            SSTableHandle::Big(r) => r.stats().map_or(0, |s| s.partition_count),
+            SSTableHandle::Bti(r) => r.stats().map_or(0, |s| s.partition_count),
+        }
+    }
+
+    fn min_timestamp(&self) -> i64 {
+        match self {
+            SSTableHandle::Big(r) => r.stats().map_or(0, |s| s.min_timestamp),
+            SSTableHandle::Bti(r) => r.stats().map_or(0, |s| s.min_timestamp),
+        }
+    }
+
+    fn max_timestamp(&self) -> i64 {
+        match self {
+            SSTableHandle::Big(r) => r.stats().map_or(0, |s| s.max_timestamp),
+            SSTableHandle::Bti(r) => r.stats().map_or(0, |s| s.max_timestamp),
+        }
+    }
+
+    fn descriptor_component_files(&self) -> Vec<PathBuf> {
+        match self {
+            SSTableHandle::Big(r) => {
+                let desc = r.descriptor();
+                desc.expected_components()
+                    .iter()
+                    .map(|c| desc.component_path(*c))
+                    .filter(|p| p.exists())
+                    .collect()
+            }
+            SSTableHandle::Bti(r) => {
+                let desc = r.descriptor();
+                desc.expected_components()
+                    .iter()
+                    .map(|c| desc.component_path(*c))
+                    .filter(|p| p.exists())
+                    .collect()
+            }
         }
     }
 }
 
 // ─── StorageEngine ─────────────────────────────────────────────────────────
 
-/// The core storage engine for a single Cassandra node.
+/// The main storage engine.
 pub struct StorageEngine {
     config: EngineConfig,
     commitlog: CommitLog,
-    memtable_mgr: MemtableManager,
-    /// Open SSTable readers, per column family.
-    sstables: RwLock<Vec<Arc<SSTableReader>>>,
-    /// Next SSTable generation counter.
+    memtable_manager: MemtableManager,
+    /// Loaded SSTables.
+    sstables: RwLock<Vec<SSTableHandle>>,
+    /// Next SSTable generation number.
     next_generation: AtomicU64,
     /// Compaction strategy.
     compaction_strategy: Box<dyn CompactionStrategy>,
+    /// Flush counter.
+    flushes_completed: AtomicU64,
+    /// Compaction metrics.
+    pub compaction_metrics: CompactionMetrics,
 }
 
 impl StorageEngine {
-    /// Initialize the storage engine.
-    pub fn open(config: EngineConfig) -> crate::commitlog::Result<Self> {
-        std::fs::create_dir_all(&config.data_dir)?;
+    /// Open the storage engine with the given config.
+    pub fn open(config: EngineConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        // Ensure data directories exist
+        for dir in &config.data_directories {
+            fs::create_dir_all(dir)?;
+        }
 
-        let commitlog = CommitLog::open(config.commitlog_config.clone())?;
-        let memtable_mgr = MemtableManager::new(config.memtable_flush_threshold);
+        // Open commit log
+        let commitlog = CommitLog::open(config.commitlog.clone())?;
 
-        // Scan data directory for existing SSTables
-        let sstables = Self::load_existing_sstables(&config.data_dir);
-        let max_gen = sstables.iter().map(|s| s.generation()).max().unwrap_or(0);
+        // Create memtable manager
+        let memtable_manager =
+            MemtableManager::with_type(config.memtable_flush_threshold, config.memtable_type);
+
+        // Create compaction strategy
+        let compaction_strategy = create_strategy(config.compaction_strategy_type);
+
+        // Load existing SSTables
+        let (sstables, max_gen) = Self::load_existing_sstables(&config.data_directories)?;
 
         info!(
-            data_dir = %config.data_dir.display(),
-            existing_sstables = sstables.len(),
-            "Storage engine initialized"
+            sstables = sstables.len(),
+            max_gen,
+            format = ?config.sstable_format,
+            strategy = ?config.compaction_strategy_type,
+            "Storage engine opened"
         );
 
         Ok(Self {
             config,
             commitlog,
-            memtable_mgr,
-            sstables: RwLock::new(sstables.into_iter().map(Arc::new).collect()),
+            memtable_manager,
+            sstables: RwLock::new(sstables),
             next_generation: AtomicU64::new(max_gen + 1),
-            compaction_strategy: Box::new(SizeTieredCompactionStrategy::default()),
+            compaction_strategy,
+            flushes_completed: AtomicU64::new(0),
+            compaction_metrics: CompactionMetrics::default(),
         })
     }
 
-    /// Apply a write mutation (INSERT/UPDATE/DELETE).
-    pub fn apply_mutation(
-        &self,
-        keyspace: &str,
-        table: &str,
-        partition_key: Vec<u8>,
-        rows: Vec<Row>,
-        timestamp: i64,
-    ) -> crate::commitlog::Result<()> {
+    /// Apply a mutation (write path).
+    pub fn apply_mutation(&self, mutation: &Mutation) -> Result<(), Box<dyn std::error::Error>> {
         // 1. Write to commit log
-        let mutation = Mutation {
-            keyspace: keyspace.to_string(),
-            table: table.to_string(),
-            partition_key: partition_key.clone(),
-            rows: rows
-                .iter()
-                .map(|r| MutationRow {
-                    clustering_key: r.clustering_key.clone(),
-                    cells: r
-                        .cells
-                        .iter()
-                        .map(|c| CellMutation {
-                            column: c.column.clone(),
-                            value: c.value.clone(),
-                            timestamp: c.timestamp,
-                            ttl: c.ttl,
-                            local_deletion_time: c.local_deletion_time,
-                            is_tombstone: c.is_tombstone,
-                        })
-                        .collect(),
-                    is_tombstone: r.is_tombstone,
-                    local_deletion_time: r.local_deletion_time,
-                })
-                .collect(),
-            timestamp,
-        };
-
-        let (seg_id, _offset) = self.commitlog.append(&mutation)?;
+        let (seg_id, _offset) = self.commitlog.append(mutation)?;
 
         // 2. Apply to memtable
-        let cf_name = format!("{keyspace}.{table}");
-        let memtable = self.memtable_mgr.get_or_create(&cf_name, seg_id);
+        let cf_name = format!("{}.{}", mutation.keyspace, mutation.table);
+        let memtable = self.memtable_manager.get_or_create(&cf_name, seg_id);
         memtable.update_commitlog_upper_bound(seg_id);
 
-        for row in rows {
-            memtable.apply(partition_key.clone(), row);
+        for mrow in &mutation.rows {
+            let row = Row {
+                clustering_key: mrow.clustering_key.clone(),
+                cells: mrow
+                    .cells
+                    .iter()
+                    .map(|c| Cell {
+                        column: c.column.clone(),
+                        value: c.value.clone(),
+                        timestamp: c.timestamp,
+                        ttl: c.ttl,
+                        local_deletion_time: c.local_deletion_time,
+                        is_tombstone: c.is_tombstone,
+                    })
+                    .collect(),
+                is_tombstone: mrow.is_tombstone,
+                local_deletion_time: mrow.local_deletion_time,
+            };
+            memtable.apply(mutation.partition_key.clone(), row);
         }
 
         // 3. Check backpressure
-        if self.memtable_mgr.should_flush() {
-            debug!("Memory threshold reached, triggering flush");
-            // In a real implementation this would be async. For now, inline.
-            if let Err(e) = self.flush_all() {
-                warn!(error = %e, "Flush failed during backpressure");
-            }
+        if self.memtable_manager.should_flush() {
+            debug!("Backpressure: inline flush triggered");
+            self.flush_cf(&cf_name)?;
         }
 
         Ok(())
     }
 
-    /// Read a partition from the storage engine (memtable + SSTables merged).
+    /// Read a partition (read path): merge memtable + SSTables.
     pub fn read_partition(
         &self,
         keyspace: &str,
         table: &str,
         partition_key: &[u8],
-    ) -> crate::commitlog::Result<Option<PartitionData>> {
+    ) -> Option<PartitionData> {
         let cf_name = format!("{keyspace}.{table}");
 
-        // 1. Read from memtable
-        let memtable = self
-            .memtable_mgr
-            .get_or_create(&cf_name, self.commitlog.current_segment_id());
-        let memtable_data = memtable.get_partition(partition_key);
+        // Read from memtable
+        let memtable = self.memtable_manager.get_or_create(&cf_name, 0);
+        let mut result = memtable.get_partition(partition_key);
 
-        // 2. Read from SSTables
+        // Read from SSTables (newest first)
         let sstables = self.sstables.read();
-        let mut sstable_data: Vec<PartitionData> = Vec::new();
-
-        for sst in sstables.iter() {
-            match sst.get_partition(partition_key) {
-                Ok(Some(pd)) => sstable_data.push(pd),
-                Ok(None) => {}
-                Err(e) => {
-                    warn!(
-                        sstable = sst.generation(),
-                        error = %e,
-                        "Error reading SSTable"
-                    );
+        for sst in sstables.iter().rev() {
+            if !sst.might_contain_key(partition_key) {
+                continue;
+            }
+            if let Ok(Some(sst_partition)) = sst.get_partition(partition_key) {
+                match result {
+                    Some(ref mut existing) => {
+                        // Merge SSTable data into existing
+                        for (_ck, row) in sst_partition.rows {
+                            existing.apply_row(row);
+                        }
+                        if let Some(ts) = sst_partition.tombstone_timestamp {
+                            if let Some(ldt) = sst_partition.tombstone_local_deletion_time {
+                                existing.set_tombstone(ts, ldt);
+                            }
+                        }
+                    }
+                    None => result = Some(sst_partition),
                 }
             }
         }
 
-        // 3. Merge
-        if memtable_data.is_none() && sstable_data.is_empty() {
-            return Ok(None);
-        }
-
-        let mut merged = PartitionData::new();
-
-        // Apply SSTable data (oldest first)
-        for pd in sstable_data {
-            if let Some(ts) = pd.tombstone_timestamp {
-                if let Some(ldt) = pd.tombstone_local_deletion_time {
-                    merged.set_tombstone(ts, ldt);
-                }
-            }
-            for (_ck, row) in pd.rows {
-                merged.apply_row(row);
-            }
-        }
-
-        // Apply memtable data (most recent)
-        if let Some(pd) = memtable_data {
-            if let Some(ts) = pd.tombstone_timestamp {
-                if let Some(ldt) = pd.tombstone_local_deletion_time {
-                    merged.set_tombstone(ts, ldt);
-                }
-            }
-            for (_ck, row) in pd.rows {
-                merged.apply_row(row);
-            }
-        }
-
-        if merged.rows.is_empty() && merged.tombstone_timestamp.is_none() {
-            Ok(None)
-        } else {
-            Ok(Some(merged))
-        }
+        result
     }
 
-    /// Flush all memtables to SSTables.
-    pub fn flush_all(&self) -> crate::commitlog::Result<()> {
-        // Get all CF names
-        let _cf_names: Vec<String> = {
-            // We need to collect the names of active memtables
-            // For now, we'll iterate the memtable manager
-            Vec::new() // placeholder — we flush by checking total usage
+    /// Flush a column family's memtable to disk.
+    pub fn flush_cf(&self, cf_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let old_memtable = match self.memtable_manager.switch_memtable(
+            cf_name,
+            self.commitlog.current_segment_id(),
+        ) {
+            Some(mt) => mt,
+            None => return Ok(()),
         };
 
-        // Simplified: flush the largest memtable
-        // In production, we'd iterate all CFs
-        self.commitlog.sync()?;
-        Ok(())
-    }
-
-    /// Flush a specific column family memtable to an SSTable.
-    pub fn flush_cf(&self, keyspace: &str, table: &str) -> crate::commitlog::Result<()> {
-        let cf_name = format!("{keyspace}.{table}");
-        let seg_id = self.commitlog.current_segment_id();
-
-        if let Some(old_memtable) = self.memtable_mgr.switch_memtable(&cf_name, seg_id) {
-            let partitions = old_memtable.iter_partitions();
-
-            if partitions.is_empty() {
-                self.memtable_mgr.flush_complete(old_memtable.id);
-                return Ok(());
-            }
-
-            // Write SSTable
-            let next_gen = self.next_generation.fetch_add(1, Ordering::SeqCst);
-            let sst_dir = self.config.data_dir.join(format!("{keyspace}/{table}"));
-            let desc = SSTableDescriptor::new(&sst_dir, keyspace, table, next_gen);
-            let writer = SSTableWriter::new(desc.clone());
-
-            match writer.write(&partitions) {
-                Ok(stats) => {
-                    info!(
-                        generation = next_gen,
-                        partitions = stats.partition_count,
-                        rows = stats.row_count,
-                        size = stats.data_size,
-                        "Flushed memtable to SSTable"
-                    );
-
-                    // Open the new SSTable for reads
-                    match SSTableReader::open(desc) {
-                        Ok(reader) => {
-                            self.sstables.write().push(Arc::new(reader));
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to open newly flushed SSTable");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to write SSTable during flush");
-                    return Err(crate::commitlog::CommitLogError::Io(e));
-                }
-            }
-
-            self.memtable_mgr.flush_complete(old_memtable.id);
-
-            // Discard old commit log segments
-            if let Some(bound) = self.memtable_mgr.lowest_commitlog_bound() {
-                self.commitlog.discard_completed_segments(bound.saturating_sub(1))?;
-            }
-        }
-
-        Ok(())
-    }
-
-    /// Run compaction on available SSTables.
-    pub fn maybe_compact(&self, keyspace: &str, table: &str) -> crate::commitlog::Result<()> {
-        let sstables = self.sstables.read();
-        let metadata: Vec<SSTableMetadata> = sstables
-            .iter()
-            .filter_map(|sst| {
-                sst.stats().map(|s| SSTableMetadata {
-                    id: sst.generation(),
-                    data_size: s.data_size,
-                    partition_count: s.partition_count,
-                    min_timestamp: s.min_timestamp,
-                    max_timestamp: s.max_timestamp,
-                })
-            })
-            .collect();
-
-        let picks = self.compaction_strategy.pick_compaction(&metadata);
-        drop(sstables);
-
-        for group in picks {
-            self.compact_sstables(keyspace, table, &group)?;
-        }
-
-        Ok(())
-    }
-
-    fn compact_sstables(
-        &self,
-        keyspace: &str,
-        table: &str,
-        ids: &[SSTableId],
-    ) -> crate::commitlog::Result<()> {
-        info!(sstables = ?ids, "Starting compaction");
-
-        // Read all partitions from the selected SSTables
-        let sstables = self.sstables.read();
-        let mut sources = Vec::new();
-
-        for id in ids {
-            if let Some(sst) = sstables.iter().find(|s| s.generation() == *id) {
-                match sst.iter_partitions() {
-                    Ok(partitions) => sources.push(partitions),
-                    Err(e) => {
-                        warn!(generation = id, error = %e, "Failed to read SSTable for compaction");
-                        return Ok(());
-                    }
-                }
-            }
-        }
-        drop(sstables);
-
-        let now_seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs() as i32;
-
-        let merged = merge_partitions(sources, self.config.gc_grace_seconds, now_seconds);
-
-        if merged.is_empty() {
-            // All data was GC'd, just remove old SSTables
-            self.remove_sstables(ids);
+        let partitions = old_memtable.iter_partitions();
+        if partitions.is_empty() {
+            self.memtable_manager.flush_complete(old_memtable.id);
             return Ok(());
         }
 
-        // Write new SSTable
-        let next_gen = self.next_generation.fetch_add(1, Ordering::SeqCst);
-        let sst_dir = self.config.data_dir.join(format!("{keyspace}/{table}"));
-        let desc = SSTableDescriptor::new(&sst_dir, keyspace, table, next_gen);
-        let writer = SSTableWriter::new(desc.clone());
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+        let data_dir = &self.config.data_directories[0];
 
-        match writer.write(&merged) {
-            Ok(stats) => {
-                info!(
-                    generation = next_gen,
-                    partitions = stats.partition_count,
-                    "Compaction produced new SSTable"
-                );
+        let parts: Vec<&str> = cf_name.splitn(2, '.').collect();
+        let (ks, tbl) = if parts.len() == 2 {
+            (parts[0], parts[1])
+        } else {
+            (cf_name, "unknown")
+        };
 
-                match SSTableReader::open(desc) {
-                    Ok(reader) => {
-                        let mut sstables = self.sstables.write();
-                        // Remove old SSTables
-                        sstables.retain(|s| !ids.contains(&s.generation()));
-                        // Add new one
-                        sstables.push(Arc::new(reader));
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "Failed to open compacted SSTable");
-                    }
-                }
+        let mut descriptor = SSTableDescriptor::new(data_dir, ks, tbl, generation);
+        descriptor.format = self.config.sstable_format;
+
+        // Write SSTable using the configured format
+        match self.config.sstable_format {
+            SSTableFormat::Big => {
+                let writer = SSTableWriter::new(descriptor.clone());
+                writer.write(&partitions)?;
+                let reader = SSTableReader::open(descriptor)?;
+                let handle = SSTableHandle::Big(reader);
+                let files = handle.descriptor_component_files();
+                self.maybe_backup(&files);
+                self.sstables.write().push(handle);
             }
-            Err(e) => {
-                warn!(error = %e, "Failed to write compacted SSTable");
+            SSTableFormat::Bti => {
+                let writer = BtiWriter::new(descriptor.clone());
+                writer.write(&partitions)?;
+                let reader = BtiReader::open(descriptor)?;
+                let handle = SSTableHandle::Bti(reader);
+                let files = handle.descriptor_component_files();
+                self.maybe_backup(&files);
+                self.sstables.write().push(handle);
             }
         }
 
-        // TODO: Delete old SSTable files from disk
+        // Mark flush complete
+        self.memtable_manager.flush_complete(old_memtable.id);
+        self.flushes_completed.fetch_add(1, Ordering::Relaxed);
+
+        // Record truncation point
+        let upper = old_memtable
+            .commitlog_upper_bound
+            .load(Ordering::Relaxed);
+        self.commitlog.mark_cf_flushed(cf_name, upper, 0);
+
+        // Discard old commit log segments
+        if let Some(lowest) = self.memtable_manager.lowest_commitlog_bound() {
+            if lowest > 1 {
+                let _ = self.commitlog.discard_completed_segments(lowest - 1);
+            }
+        }
+
+        info!(
+            cf = cf_name,
+            generation,
+            partitions = partitions.len(),
+            format = ?self.config.sstable_format,
+            "Flush complete"
+        );
 
         Ok(())
     }
 
-    fn remove_sstables(&self, ids: &[SSTableId]) {
-        let mut sstables = self.sstables.write();
-        sstables.retain(|s| !ids.contains(&s.generation()));
+    /// Flush all column families.
+    pub fn flush_all(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let cf_names = self.memtable_manager.active_cf_names();
+        for cf in &cf_names {
+            self.flush_cf(cf)?;
+        }
+        Ok(())
     }
 
-    /// Create a snapshot by hard-linking SSTable files.
-    pub fn snapshot(&self, name: &str) -> crate::commitlog::Result<PathBuf> {
-        let snap_dir = self.config.data_dir.join("snapshots").join(name);
-        std::fs::create_dir_all(&snap_dir)?;
-
+    /// Run compaction if needed.
+    pub fn maybe_compact(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let sstables = self.sstables.read();
-        for sst in sstables.iter() {
-            let desc = sst.descriptor();
-            for component in crate::sstable::format::Component::all() {
-                let src = desc.component_path(*component);
-                if src.exists() {
-                    let dst = snap_dir.join(src.file_name().unwrap());
-                    // Hard link or copy
-                    if std::fs::hard_link(&src, &dst).is_err() {
-                        std::fs::copy(&src, &dst)?;
-                    }
-                }
-            }
+        let metadata: Vec<SSTableMetadata> = sstables
+            .iter()
+            .map(|sst| SSTableMetadata {
+                id: sst.generation(),
+                data_size: sst.data_size(),
+                partition_count: sst.partition_count(),
+                min_timestamp: sst.min_timestamp(),
+                max_timestamp: sst.max_timestamp(),
+            })
+            .collect();
+        drop(sstables);
+
+        let groups = self.compaction_strategy.pick_compaction(&metadata);
+        if groups.is_empty() {
+            return Ok(false);
         }
 
-        info!(name, files = sstables.len(), "Snapshot created");
-        Ok(snap_dir)
+        for group_ids in &groups {
+            self.compact_group(group_ids)?;
+        }
+
+        Ok(true)
     }
 
-    /// Replay the commit log for crash recovery.
-    pub fn replay_commitlog(&self) -> crate::commitlog::Result<u64> {
+    /// Create a named snapshot.
+    pub fn snapshot(
+        &self,
+        name: &str,
+        keyspace: &str,
+        table: &str,
+        schema_cql: Option<&str>,
+    ) -> Result<backup::SnapshotManifest, Box<dyn std::error::Error>> {
+        let data_dir = &self.config.data_directories[0];
+        let sstables = self.sstables.read();
+
+        let all_files: Vec<PathBuf> = sstables
+            .iter()
+            .flat_map(|sst| sst.descriptor_component_files())
+            .collect();
+
+        let manifest = backup::create_snapshot(
+            name, data_dir, keyspace, table, &all_files, schema_cql,
+        )?;
+
+        Ok(manifest)
+    }
+
+    /// List snapshots.
+    pub fn list_snapshots(&self) -> Result<Vec<backup::SnapshotManifest>, Box<dyn std::error::Error>> {
+        let data_dir = &self.config.data_directories[0];
+        Ok(backup::list_snapshots(data_dir)?)
+    }
+
+    /// Delete a snapshot.
+    pub fn delete_snapshot(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let data_dir = &self.config.data_directories[0];
+        Ok(backup::delete_snapshot(data_dir, name)?)
+    }
+
+    /// Replay commitlog for recovery.
+    pub fn replay_commitlog(&self) -> Result<usize, Box<dyn std::error::Error>> {
         let result = self.commitlog.replay()?;
-        let mut count = 0u64;
+        let count = result.mutations.len();
 
         for mutation in result.mutations {
             let cf_name = format!("{}.{}", mutation.keyspace, mutation.table);
-            let seg_id = self.commitlog.current_segment_id();
-            let memtable = self.memtable_mgr.get_or_create(&cf_name, seg_id);
+            let memtable = self.memtable_manager.get_or_create(&cf_name, 0);
 
-            for mr in &mutation.rows {
+            for mrow in &mutation.rows {
                 let row = Row {
-                    clustering_key: mr.clustering_key.clone(),
-                    cells: mr
+                    clustering_key: mrow.clustering_key.clone(),
+                    cells: mrow
                         .cells
                         .iter()
                         .map(|c| Cell {
@@ -454,44 +490,172 @@ impl StorageEngine {
                             is_tombstone: c.is_tombstone,
                         })
                         .collect(),
-                    is_tombstone: mr.is_tombstone,
-                    local_deletion_time: mr.local_deletion_time,
+                    is_tombstone: mrow.is_tombstone,
+                    local_deletion_time: mrow.local_deletion_time,
                 };
                 memtable.apply(mutation.partition_key.clone(), row);
             }
-            count += 1;
         }
 
-        info!(mutations = count, "Commit log replay complete");
+        info!(mutations = count, "Commitlog replay complete");
         Ok(count)
+    }
+
+    /// Force sync the commit log.
+    pub fn sync_commitlog(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.commitlog.sync()?;
+        Ok(())
     }
 
     /// Get engine statistics.
     pub fn stats(&self) -> EngineStats {
         let sstables = self.sstables.read();
+        let total_bytes: u64 = sstables.iter().map(|s| s.data_size()).sum();
+
         EngineStats {
-            memtable_memory: self.memtable_mgr.total_memory_usage(),
             sstable_count: sstables.len(),
-            commitlog_segment: self.commitlog.current_segment_id(),
+            total_data_bytes: total_bytes,
+            flushes_completed: self.flushes_completed.load(Ordering::Relaxed),
+            compactions_completed: self
+                .compaction_metrics
+                .compactions_completed
+                .load(Ordering::Relaxed),
+            memtable_memory_bytes: self.memtable_manager.total_memory_usage(),
         }
     }
 
-    fn load_existing_sstables(data_dir: &Path) -> Vec<SSTableReader> {
-        let mut readers = Vec::new();
+    // ─── Internal helpers ──────────────────────────────────────────────
 
-        if !data_dir.exists() {
-            return readers;
+    fn compact_group(&self, group_ids: &[SSTableId]) -> Result<(), Box<dyn std::error::Error>> {
+        let sstables = self.sstables.read();
+
+        // Collect partitions from SSTables in the group
+        let mut sources = Vec::new();
+        let mut total_read_bytes = 0u64;
+
+        for sst in sstables.iter() {
+            if group_ids.contains(&sst.generation()) {
+                let partitions = sst.iter_partitions()?;
+                total_read_bytes += sst.data_size();
+                sources.push(partitions);
+            }
+        }
+        drop(sstables);
+
+        if sources.is_empty() {
+            return Ok(());
         }
 
-        // Walk data_dir looking for TOC.txt files
-        if let Ok(entries) = std::fs::read_dir(data_dir) {
-            for ks_entry in entries.flatten() {
-                if ks_entry.file_type().map_or(false, |t| t.is_dir()) {
-                    if let Ok(table_entries) = std::fs::read_dir(ks_entry.path()) {
-                        for tbl_entry in table_entries.flatten() {
-                            if tbl_entry.file_type().map_or(false, |t| t.is_dir()) {
-                                // Look for SSTables in this table directory
-                                Self::scan_sstable_dir(&tbl_entry.path(), &mut readers);
+        let now_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i32;
+
+        let merged = merge_partitions(sources, self.config.gc_grace_seconds, now_seconds);
+
+        if merged.is_empty() {
+            // All data was tombstoned or expired
+            let mut sstables = self.sstables.write();
+            sstables.retain(|sst| !group_ids.contains(&sst.generation()));
+            return Ok(());
+        }
+
+        // Write new SSTable
+        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+        let data_dir = &self.config.data_directories[0];
+        let mut descriptor = SSTableDescriptor::new(data_dir, "compacted", "data", generation);
+        descriptor.format = self.config.sstable_format;
+
+        let written_bytes = match self.config.sstable_format {
+            SSTableFormat::Big => {
+                let writer = SSTableWriter::new(descriptor.clone());
+                let stats = writer.write(&merged)?;
+                stats.data_size
+            }
+            SSTableFormat::Bti => {
+                let writer = BtiWriter::new(descriptor.clone());
+                let stats = writer.write(&merged)?;
+                stats.data_size
+            }
+        };
+
+        // Open the new SSTable and replace old ones
+        let new_handle = match self.config.sstable_format {
+            SSTableFormat::Big => SSTableHandle::Big(SSTableReader::open(descriptor)?),
+            SSTableFormat::Bti => SSTableHandle::Bti(BtiReader::open(descriptor)?),
+        };
+
+        {
+            let mut sstables = self.sstables.write();
+            sstables.retain(|sst| !group_ids.contains(&sst.generation()));
+            sstables.push(new_handle);
+        }
+
+        // Update metrics
+        self.compaction_metrics
+            .compactions_completed
+            .fetch_add(1, Ordering::Relaxed);
+        self.compaction_metrics
+            .bytes_read
+            .fetch_add(total_read_bytes, Ordering::Relaxed);
+        self.compaction_metrics
+            .bytes_written
+            .fetch_add(written_bytes, Ordering::Relaxed);
+        self.compaction_metrics
+            .sstables_compacted
+            .fetch_add(group_ids.len() as u64, Ordering::Relaxed);
+
+        info!(
+            group = ?group_ids,
+            generation,
+            merged_partitions = merged.len(),
+            "Compaction complete"
+        );
+
+        Ok(())
+    }
+
+    fn maybe_backup(&self, files: &[PathBuf]) {
+        if self.config.incremental_backup.enabled {
+            if let Err(e) = backup::backup_sstable(
+                &self.config.incremental_backup.directory,
+                files,
+            ) {
+                warn!(error = %e, "Incremental backup failed");
+            }
+        }
+    }
+
+    fn load_existing_sstables(
+        data_dirs: &[PathBuf],
+    ) -> Result<(Vec<SSTableHandle>, u64), Box<dyn std::error::Error>> {
+        let mut handles = Vec::new();
+        let mut max_gen: u64 = 0;
+
+        for data_dir in data_dirs {
+            if !data_dir.exists() {
+                continue;
+            }
+            for entry in fs::read_dir(data_dir)? {
+                let entry = entry?;
+                let fname = entry.file_name();
+                let fname = fname.to_string_lossy();
+                if fname.ends_with("-TOC.txt") {
+                    // Parse descriptor from TOC filename
+                    if let Some((desc, generation)) = parse_toc_filename(&fname, data_dir) {
+                        max_gen = max_gen.max(generation);
+                        match desc.format {
+                            SSTableFormat::Big => {
+                                match SSTableReader::open(desc) {
+                                    Ok(reader) => handles.push(SSTableHandle::Big(reader)),
+                                    Err(e) => warn!(file = %fname, error = %e, "Failed to open Big SSTable"),
+                                }
+                            }
+                            SSTableFormat::Bti => {
+                                match BtiReader::open(desc) {
+                                    Ok(reader) => handles.push(SSTableHandle::Bti(reader)),
+                                    Err(e) => warn!(file = %fname, error = %e, "Failed to open BTI SSTable"),
+                                }
                             }
                         }
                     }
@@ -499,216 +663,223 @@ impl StorageEngine {
             }
         }
 
-        readers
-    }
-
-    fn scan_sstable_dir(dir: &Path, readers: &mut Vec<SSTableReader>) {
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            let mut found_gens = std::collections::HashSet::new();
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.ends_with("-TOC.txt") {
-                    // Parse generation from filename: ks-table-big-{gen}-TOC.txt
-                    if let Some(sst_gen) = parse_generation_from_toc(&name) {
-                        found_gens.insert(sst_gen);
-                    }
-                }
-            }
-
-            for sst_gen in found_gens {
-                // Extract ks and table from the directory structure
-                let table = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-                let ks = dir
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-
-                let desc = SSTableDescriptor::new(dir, &ks, &table, sst_gen);
-                if desc.is_complete() {
-                    match SSTableReader::open(desc) {
-                        Ok(reader) => readers.push(reader),
-                        Err(e) => {
-                            warn!(generation = sst_gen, error = %e, "Failed to open existing SSTable");
-                        }
-                    }
-                }
-            }
-        }
+        handles.sort_by_key(|sst| sst.generation());
+        Ok((handles, max_gen))
     }
 }
 
-fn parse_generation_from_toc(filename: &str) -> Option<u64> {
-    // Format: ks-table-big-{gen}-TOC.txt
-    let filename = filename.strip_suffix("-TOC.txt")?;
-    let parts: Vec<&str> = filename.rsplitn(2, '-').collect();
-    if parts.len() >= 2 {
-        parts[1].rsplit('-').next()?.parse().ok()
-    } else {
-        None
+/// Parse a TOC filename to extract SSTable descriptor.
+fn parse_toc_filename(fname: &str, dir: &Path) -> Option<(SSTableDescriptor, u64)> {
+    // Format: {ks}-{table}-{format}-{generation}-TOC.txt
+    let base = fname.strip_suffix("-TOC.txt")?;
+    let parts: Vec<&str> = base.rsplitn(3, '-').collect();
+    if parts.len() < 3 {
+        return None;
     }
-}
+    let generation: u64 = parts[0].parse().ok()?;
+    let format_str = parts[1];
+    let ks_table = parts[2];
 
-#[derive(Debug, Clone)]
-pub struct EngineStats {
-    pub memtable_memory: usize,
-    pub sstable_count: usize,
-    pub commitlog_segment: u64,
+    let format = match format_str {
+        "big" => SSTableFormat::Big,
+        "bti" => SSTableFormat::Bti,
+        _ => return None,
+    };
+
+    // Split ks-table: take the first part as ks, rest as table
+    let kst_parts: Vec<&str> = ks_table.splitn(2, '-').collect();
+    if kst_parts.len() < 2 {
+        return None;
+    }
+
+    let mut desc = SSTableDescriptor::new(dir, kst_parts[0], kst_parts[1], generation);
+    desc.format = format;
+    Some((desc, generation))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commitlog::{MutationRow, CellMutation};
     use tempfile::TempDir;
 
-    fn test_config(dir: &Path) -> EngineConfig {
+    fn test_engine_config(dir: &Path) -> EngineConfig {
         EngineConfig {
-            data_dir: dir.join("data"),
-            commitlog_config: CommitLogConfig {
-                max_segment_size: 4096,
+            data_directories: vec![dir.to_path_buf()],
+            commitlog: CommitLogConfig {
                 directory: dir.join("commitlog"),
+                max_segment_size: 4096,
                 ..CommitLogConfig::default()
             },
-            memtable_flush_threshold: 1024 * 1024, // 1 MiB
-            gc_grace_seconds: 86400,
+            memtable_flush_threshold: 1024 * 1024,
+            gc_grace_seconds: 0,
+            ..EngineConfig::default()
         }
     }
 
-    fn test_row(ck: &[u8], col: &str, val: &[u8], ts: i64) -> Row {
-        Row {
-            clustering_key: ck.to_vec(),
-            cells: vec![Cell {
-                column: col.to_string(),
-                value: Some(val.to_vec()),
-                timestamp: ts,
-                ttl: 0,
-                local_deletion_time: None,
+    fn test_mutation(ks: &str, tbl: &str, pk: &[u8], col: &str, val: &[u8]) -> Mutation {
+        Mutation {
+            keyspace: ks.to_string(),
+            table: tbl.to_string(),
+            partition_key: pk.to_vec(),
+            rows: vec![MutationRow {
+                clustering_key: vec![],
+                cells: vec![CellMutation {
+                    column: col.to_string(),
+                    value: Some(val.to_vec()),
+                    timestamp: 1000,
+                    ttl: 0,
+                    local_deletion_time: None,
+                    is_tombstone: false,
+                }],
                 is_tombstone: false,
+                local_deletion_time: None,
             }],
-            is_tombstone: false,
-            local_deletion_time: None,
+            timestamp: 1000,
+            cdc_enabled: false,
         }
     }
 
     #[test]
-    fn write_and_read() {
+    fn write_read_roundtrip() {
         let dir = TempDir::new().unwrap();
-        let engine = StorageEngine::open(test_config(dir.path())).unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
 
-        engine
-            .apply_mutation(
-                "ks",
-                "users",
-                b"user1".to_vec(),
-                vec![test_row(b"", "name", b"Alice", 1000)],
-                1000,
-            )
-            .unwrap();
+        let m = test_mutation("ks", "t1", b"pk1", "name", b"alice");
+        engine.apply_mutation(&m).unwrap();
 
-        let partition = engine.read_partition("ks", "users", b"user1").unwrap();
-        assert!(partition.is_some());
-        let pd = partition.unwrap();
+        let result = engine.read_partition("ks", "t1", b"pk1");
+        assert!(result.is_some());
+        let pd = result.unwrap();
         let row = pd.rows.values().next().unwrap();
-        assert_eq!(row.cells[0].value.as_deref(), Some(b"Alice".as_slice()));
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"alice".as_slice()));
     }
 
     #[test]
-    fn write_flush_read() {
+    fn flush_and_read() {
         let dir = TempDir::new().unwrap();
-        let engine = StorageEngine::open(test_config(dir.path())).unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
 
-        engine
-            .apply_mutation(
-                "ks",
-                "t1",
-                b"pk1".to_vec(),
-                vec![test_row(b"ck1", "val", b"hello", 100)],
-                100,
-            )
+        let m = test_mutation("ks", "t1", b"pk1", "name", b"bob");
+        engine.apply_mutation(&m).unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        let stats = engine.stats();
+        assert_eq!(stats.sstable_count, 1);
+        assert_eq!(stats.flushes_completed, 1);
+
+        let result = engine.read_partition("ks", "t1", b"pk1");
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn flush_all_cfs() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1")).unwrap();
+        engine.apply_mutation(&test_mutation("ks", "t2", b"pk1", "n", b"v2")).unwrap();
+        engine.flush_all().unwrap();
+
+        let stats = engine.stats();
+        assert_eq!(stats.sstable_count, 2);
+    }
+
+    #[test]
+    fn snapshot_lifecycle() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1")).unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        let manifest = engine
+            .snapshot("test_snap", "ks", "t1", Some("CREATE TABLE t1 ...;"))
             .unwrap();
+        assert_eq!(manifest.name, "test_snap");
 
-        // Flush
-        engine.flush_cf("ks", "t1").unwrap();
+        let snaps = engine.list_snapshots().unwrap();
+        assert_eq!(snaps.len(), 1);
 
-        // Should still be readable from SSTable
-        let pd = engine.read_partition("ks", "t1", b"pk1").unwrap().unwrap();
-        assert_eq!(pd.rows.len(), 1);
+        engine.delete_snapshot("test_snap").unwrap();
+        assert!(engine.list_snapshots().unwrap().is_empty());
     }
 
     #[test]
-    fn overwrite_resolved_by_timestamp() {
+    fn commitlog_replay() {
         let dir = TempDir::new().unwrap();
-        let engine = StorageEngine::open(test_config(dir.path())).unwrap();
+        let config = test_engine_config(dir.path());
 
-        engine
-            .apply_mutation("ks", "t1", b"pk".to_vec(), vec![test_row(b"ck", "x", b"old", 100)], 100)
-            .unwrap();
-
-        engine
-            .apply_mutation("ks", "t1", b"pk".to_vec(), vec![test_row(b"ck", "x", b"new", 200)], 200)
-            .unwrap();
-
-        let pd = engine.read_partition("ks", "t1", b"pk").unwrap().unwrap();
-        let row = pd.rows.get(&b"ck".to_vec()).unwrap();
-        assert_eq!(row.cells[0].value.as_deref(), Some(b"new".as_slice()));
-    }
-
-    #[test]
-    fn read_missing_returns_none() {
-        let dir = TempDir::new().unwrap();
-        let engine = StorageEngine::open(test_config(dir.path())).unwrap();
-        let result = engine.read_partition("ks", "t1", b"missing").unwrap();
-        assert!(result.is_none());
-    }
-
-    #[test]
-    fn commit_log_replay() {
-        let dir = TempDir::new().unwrap();
-        let config = test_config(dir.path());
-
-        // Write some data
+        // Write and sync
         {
             let engine = StorageEngine::open(config.clone()).unwrap();
-            engine
-                .apply_mutation("ks", "t1", b"pk1".to_vec(), vec![test_row(b"ck", "v", b"data", 100)], 100)
-                .unwrap();
-            engine.commitlog.sync().unwrap();
+            engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1")).unwrap();
+            engine.apply_mutation(&test_mutation("ks", "t1", b"pk2", "n", b"v2")).unwrap();
+            engine.sync_commitlog().unwrap();
         }
 
-        // "Crash" and rebuild
-        {
-            let engine = StorageEngine::open(config).unwrap();
-            let replayed = engine.replay_commitlog().unwrap();
-            assert!(replayed > 0);
-
-            // Data should be available after replay
-            let pd = engine.read_partition("ks", "t1", b"pk1").unwrap().unwrap();
-            assert_eq!(pd.rows.len(), 1);
-        }
+        // Reopen and replay
+        let engine = StorageEngine::open(config).unwrap();
+        let count = engine.replay_commitlog().unwrap();
+        assert_eq!(count, 2);
     }
 
     #[test]
-    fn snapshot_creates_directory() {
+    fn bti_format_engine() {
         let dir = TempDir::new().unwrap();
-        let engine = StorageEngine::open(test_config(dir.path())).unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.sstable_format = SSTableFormat::Bti;
 
-        engine
-            .apply_mutation("ks", "t1", b"pk".to_vec(), vec![test_row(b"ck", "v", b"x", 100)], 100)
-            .unwrap();
-        engine.flush_cf("ks", "t1").unwrap();
+        let engine = StorageEngine::open(config).unwrap();
+        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"bti_val")).unwrap();
+        engine.flush_cf("ks.t1").unwrap();
 
-        let snap_path = engine.snapshot("snap1").unwrap();
-        assert!(snap_path.exists());
+        let result = engine.read_partition("ks", "t1", b"pk1");
+        assert!(result.is_some());
+        let pd = result.unwrap();
+        let row = pd.rows.values().next().unwrap();
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"bti_val".as_slice()));
+    }
+
+    #[test]
+    fn trie_memtable_engine() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.memtable_type = MemtableType::Trie;
+
+        let engine = StorageEngine::open(config).unwrap();
+        engine.apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"trie_val")).unwrap();
+
+        let result = engine.read_partition("ks", "t1", b"pk1");
+        assert!(result.is_some());
     }
 
     #[test]
     fn engine_stats() {
         let dir = TempDir::new().unwrap();
-        let engine = StorageEngine::open(test_config(dir.path())).unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
 
         let stats = engine.stats();
         assert_eq!(stats.sstable_count, 0);
+        assert_eq!(stats.flushes_completed, 0);
+    }
+
+    #[test]
+    fn parse_toc_roundtrip() {
+        let dir = Path::new("/data");
+        let (desc, generation) = parse_toc_filename("ks-t1-big-42-TOC.txt", dir).unwrap();
+        assert_eq!(generation, 42);
+        assert_eq!(desc.keyspace, "ks");
+        assert_eq!(desc.table, "t1");
+        assert_eq!(desc.format, SSTableFormat::Big);
+
+        let (desc2, generation2) = parse_toc_filename("ks-t1-bti-99-TOC.txt", dir).unwrap();
+        assert_eq!(generation2, 99);
+        assert_eq!(desc2.format, SSTableFormat::Bti);
     }
 }

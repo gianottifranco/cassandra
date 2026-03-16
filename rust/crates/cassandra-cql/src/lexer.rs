@@ -119,6 +119,12 @@ pub enum Keyword {
     Index, On, Type, Add, Rename, Column, Static,
     Materialized, View, As, Is, Like, Per, Partition,
     Group, Replication, DurableWrites,
+    // Phase 12: DCL, UDF/UDA, triggers, long tail
+    Role, Roles, Grant, Revoke, Permission, Permissions,
+    Function, Aggregate, Trigger, Returns, Language,
+    Called, Input, Sfunc, Stype, Finalfunc, Initcond,
+    Custom, Replace, Login, Superuser, Password,
+    Norecursive, Of, All, Cast, Vector,
 }
 
 impl Keyword {
@@ -196,6 +202,34 @@ impl Keyword {
             "GROUP" => Some(Keyword::Group),
             "REPLICATION" => Some(Keyword::Replication),
             "DURABLE_WRITES" => Some(Keyword::DurableWrites),
+            // Phase 12: new keywords
+            "ROLE" => Some(Keyword::Role),
+            "ROLES" => Some(Keyword::Roles),
+            "GRANT" => Some(Keyword::Grant),
+            "REVOKE" => Some(Keyword::Revoke),
+            "PERMISSION" => Some(Keyword::Permission),
+            "PERMISSIONS" => Some(Keyword::Permissions),
+            "FUNCTION" => Some(Keyword::Function),
+            "AGGREGATE" => Some(Keyword::Aggregate),
+            "TRIGGER" => Some(Keyword::Trigger),
+            "RETURNS" => Some(Keyword::Returns),
+            "LANGUAGE" => Some(Keyword::Language),
+            "CALLED" | "CALLS" => Some(Keyword::Called),
+            "SFUNC" => Some(Keyword::Sfunc),
+            "STYPE" => Some(Keyword::Stype),
+            "FINALFUNC" => Some(Keyword::Finalfunc),
+            "INITCOND" => Some(Keyword::Initcond),
+            "CUSTOM" => Some(Keyword::Custom),
+            "REPLACE" => Some(Keyword::Replace),
+            "LOGIN" => Some(Keyword::Login),
+            "SUPERUSER" => Some(Keyword::Superuser),
+            "NOSUPERUSER" => Some(Keyword::Superuser), // handled at parser level
+            "PASSWORD" => Some(Keyword::Password),
+            "NORECURSIVE" => Some(Keyword::Norecursive),
+            "OF" => Some(Keyword::Of),
+            "ALL" => Some(Keyword::All),
+            "CAST" => Some(Keyword::Cast),
+            "VECTOR" => Some(Keyword::Vector),
             _ => None,
         }
     }

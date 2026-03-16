@@ -30,6 +30,7 @@ default = []
 materialized-views = []
 triggers = []
 udfs = []
+ucs = []
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -4,19 +4,67 @@
 //!
 //! ## Java Oracle
 //! - `org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy`
+//! - `org.apache.cassandra.db.compaction.LeveledCompactionStrategy`
+//! - `org.apache.cassandra.db.compaction.TimeWindowCompactionStrategy`
+//! - `org.apache.cassandra.db.compaction.UnifiedCompactionStrategy`
 //! - `org.apache.cassandra.db.compaction.CompactionManager`
 //! - `org.apache.cassandra.db.compaction.CompactionIterator`
 //!
-//! ## Strategy: Size-Tiered (STCS)
+//! ## Strategies
 //!
-//! Groups SSTables by similar size into buckets. When a bucket reaches
-//! a threshold (default 4), all SSTables in that bucket are compacted
-//! together into a single new SSTable.
+//! | Strategy | Module  | Status       | Description                          |
+//! |----------|---------|-------------|--------------------------------------|
+//! | STCS     | (here)  | Functional  | Size-tiered: groups by similar size  |
+//! | LCS      | lcs     | Functional  | Leveled: non-overlapping levels      |
+//! | TWCS     | twcs    | Functional  | Time-window: groups by time window   |
+//! | UCS      | ucs     | Experimental| Unified: adaptive tiered/leveled     |
+
+pub mod lcs;
+pub mod twcs;
+pub mod ucs;
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::memtable::partition::{PartitionData, Row};
 use crate::sstable::format::SSTableId;
+
+// ─── Strategy type enum ────────────────────────────────────────────────────
+
+/// Compaction strategy selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CompactionStrategyType {
+    SizeTiered,
+    Leveled,
+    TimeWindow,
+    #[cfg(feature = "ucs")]
+    Unified,
+}
+
+impl Default for CompactionStrategyType {
+    fn default() -> Self {
+        Self::SizeTiered
+    }
+}
+
+/// Create a compaction strategy from the type enum.
+pub fn create_strategy(strategy_type: CompactionStrategyType) -> Box<dyn CompactionStrategy> {
+    match strategy_type {
+        CompactionStrategyType::SizeTiered => {
+            Box::new(SizeTieredCompactionStrategy::default())
+        }
+        CompactionStrategyType::Leveled => {
+            Box::new(lcs::LeveledCompactionStrategy::default())
+        }
+        CompactionStrategyType::TimeWindow => {
+            Box::new(twcs::TimeWindowCompactionStrategy::default())
+        }
+        #[cfg(feature = "ucs")]
+        CompactionStrategyType::Unified => {
+            Box::new(ucs::UnifiedCompactionStrategy::default())
+        }
+    }
+}
 
 // ─── Compaction Strategy trait ─────────────────────────────────────────────
 
@@ -68,11 +116,9 @@ impl CompactionStrategy for SizeTieredCompactionStrategy {
             return vec![];
         }
 
-        // Sort by size
         let mut sorted: Vec<_> = sstables.to_vec();
         sorted.sort_by_key(|s| s.data_size);
 
-        // Group into size buckets
         let mut buckets: Vec<Vec<&SSTableMetadata>> = Vec::new();
 
         for sst in &sorted {
@@ -92,7 +138,6 @@ impl CompactionStrategy for SizeTieredCompactionStrategy {
             }
         }
 
-        // Return buckets that meet the threshold
         buckets
             .into_iter()
             .filter(|b| b.len() >= self.min_threshold)
@@ -102,6 +147,91 @@ impl CompactionStrategy for SizeTieredCompactionStrategy {
             })
             .collect()
     }
+}
+
+// ─── Expired SSTable Detection ─────────────────────────────────────────────
+
+/// Check if an SSTable can be dropped entirely because all its data
+/// has exceeded gc_grace (all timestamps + gc_grace < now).
+pub fn is_fully_expired(sst: &SSTableMetadata, gc_grace_seconds: i32, now_seconds: i64) -> bool {
+    let gc_grace_micros = gc_grace_seconds as i64 * 1_000_000;
+    sst.max_timestamp + gc_grace_micros < now_seconds * 1_000_000
+}
+
+/// Detect SSTables composed entirely of tombstones that are past gc_grace.
+/// Returns IDs of SSTables that can be dropped without compaction.
+pub fn find_fully_expired(
+    sstables: &[SSTableMetadata],
+    gc_grace_seconds: i32,
+    now_seconds: i64,
+) -> Vec<SSTableId> {
+    sstables
+        .iter()
+        .filter(|sst| is_fully_expired(sst, gc_grace_seconds, now_seconds))
+        .map(|sst| sst.id)
+        .collect()
+}
+
+// ─── Anticompaction ────────────────────────────────────────────────────────
+
+/// Token-range based split for anticompaction (repair).
+/// Splits a set of partitions into two groups based on a range predicate.
+pub fn anticompact_partitions<F>(
+    partitions: Vec<(Vec<u8>, PartitionData)>,
+    in_range: F,
+) -> (
+    Vec<(Vec<u8>, PartitionData)>,
+    Vec<(Vec<u8>, PartitionData)>,
+)
+where
+    F: Fn(&[u8]) -> bool,
+{
+    let mut inside = Vec::new();
+    let mut outside = Vec::new();
+    for (pk, pd) in partitions {
+        if in_range(&pk) {
+            inside.push((pk, pd));
+        } else {
+            outside.push((pk, pd));
+        }
+    }
+    (inside, outside)
+}
+
+// ─── Compaction Metrics ────────────────────────────────────────────────────
+
+/// Operational metrics for compaction.
+#[derive(Debug, Default)]
+pub struct CompactionMetrics {
+    pub compactions_completed: AtomicU64,
+    pub bytes_read: AtomicU64,
+    pub bytes_written: AtomicU64,
+    pub sstables_compacted: AtomicU64,
+    pub tombstones_dropped: AtomicU64,
+    pub expired_sstables_dropped: AtomicU64,
+}
+
+impl CompactionMetrics {
+    pub fn snapshot(&self) -> CompactionMetricsSnapshot {
+        CompactionMetricsSnapshot {
+            compactions_completed: self.compactions_completed.load(Ordering::Relaxed),
+            bytes_read: self.bytes_read.load(Ordering::Relaxed),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            sstables_compacted: self.sstables_compacted.load(Ordering::Relaxed),
+            tombstones_dropped: self.tombstones_dropped.load(Ordering::Relaxed),
+            expired_sstables_dropped: self.expired_sstables_dropped.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CompactionMetricsSnapshot {
+    pub compactions_completed: u64,
+    pub bytes_read: u64,
+    pub bytes_written: u64,
+    pub sstables_compacted: u64,
+    pub tombstones_dropped: u64,
+    pub expired_sstables_dropped: u64,
 }
 
 // ─── Merge logic ───────────────────────────────────────────────────────────
@@ -114,34 +244,29 @@ pub fn merge_partitions(
     gc_grace_seconds: i32,
     now_seconds: i32,
 ) -> Vec<(Vec<u8>, PartitionData)> {
-    // Collect all partitions into a merged map
     let mut merged: BTreeMap<Vec<u8>, PartitionData> = BTreeMap::new();
 
     for source in sources {
         for (pk, partition) in source {
             let entry = merged.entry(pk).or_insert_with(PartitionData::new);
 
-            // Merge partition-level tombstones
             if let Some(ts) = partition.tombstone_timestamp {
                 if let Some(ldt) = partition.tombstone_local_deletion_time {
                     entry.set_tombstone(ts, ldt);
                 }
             }
 
-            // Merge rows
             for (_ck, row) in partition.rows {
                 entry.apply_row(row);
             }
         }
     }
 
-    // Purge expired tombstones and TTLed cells
     let gc_cutoff = now_seconds - gc_grace_seconds;
 
     let mut result: Vec<(Vec<u8>, PartitionData)> = Vec::new();
 
     for (pk, mut partition) in merged {
-        // Check if partition tombstone can be GC'd
         if let Some(ldt) = partition.tombstone_local_deletion_time {
             if ldt <= gc_cutoff {
                 partition.tombstone_timestamp = None;
@@ -149,20 +274,17 @@ pub fn merge_partitions(
             }
         }
 
-        // Filter rows
         let mut purged_rows: BTreeMap<Vec<u8>, Row> = BTreeMap::new();
 
         for (ck, mut row) in partition.rows {
-            // GC row tombstones
             if row.is_tombstone {
                 if let Some(ldt) = row.local_deletion_time {
                     if ldt <= gc_cutoff {
-                        continue; // Drop this row entirely
+                        continue;
                     }
                 }
             }
 
-            // Filter cells: remove GC'd tombstones and expired TTL cells
             row.cells.retain(|cell| {
                 if cell.is_tombstone {
                     if let Some(ldt) = cell.local_deletion_time {
@@ -171,7 +293,6 @@ pub fn merge_partitions(
                 }
                 if cell.ttl > 0 {
                     if let Some(ldt) = cell.local_deletion_time {
-                        // If TTL expired AND past gc_grace, drop it
                         if now_seconds >= ldt && ldt <= gc_cutoff {
                             return false;
                         }
@@ -180,7 +301,6 @@ pub fn merge_partitions(
                 true
             });
 
-            // Keep the row if it still has cells or is a live tombstone
             if !row.cells.is_empty() || row.is_tombstone {
                 purged_rows.insert(ck, row);
             }
@@ -188,10 +308,7 @@ pub fn merge_partitions(
 
         partition.rows = purged_rows;
 
-        // Keep partition if it has any content
-        if !partition.rows.is_empty()
-            || partition.tombstone_timestamp.is_some()
-        {
+        if !partition.rows.is_empty() || partition.tombstone_timestamp.is_some() {
             result.push((pk, partition));
         }
     }
@@ -259,7 +376,6 @@ mod tests {
 
         let picks = stcs.pick_compaction(&sstables);
         assert!(!picks.is_empty());
-        // The first 3 should be grouped (similar size), the 4th is alone
         let first_group = &picks[0];
         assert!(first_group.len() >= 2);
         assert!(!first_group.contains(&4));
@@ -304,9 +420,7 @@ mod tests {
             }]),
         )];
 
-        // GC grace = 1000s, now = 2000 → tombstone at ldt=100 is well past gc_grace
         let merged = merge_partitions(vec![source], 1000, 2000);
-        // Tombstone should be GC'd, row should be empty → partition dropped
         assert!(merged.is_empty());
     }
 
@@ -322,7 +436,6 @@ mod tests {
             }]),
         )];
 
-        // GC grace = 1000s, now = 1000 → tombstone at ldt=900 is NOT past gc_cutoff (1000-1000=0)
         let merged = merge_partitions(vec![source], 1000, 1000);
         assert_eq!(merged.len(), 1);
     }
@@ -342,5 +455,46 @@ mod tests {
         assert_eq!(merged[0].0, b"a");
         assert_eq!(merged[1].0, b"b");
         assert_eq!(merged[2].0, b"c");
+    }
+
+    #[test]
+    fn strategy_factory() {
+        let stcs = create_strategy(CompactionStrategyType::SizeTiered);
+        let lcs = create_strategy(CompactionStrategyType::Leveled);
+        let twcs = create_strategy(CompactionStrategyType::TimeWindow);
+
+        // Smoke test: all should handle empty input
+        assert!(stcs.pick_compaction(&[]).is_empty());
+        assert!(lcs.pick_compaction(&[]).is_empty());
+        assert!(twcs.pick_compaction(&[]).is_empty());
+    }
+
+    #[test]
+    fn anticompaction_splits() {
+        let partitions = vec![
+            (b"a".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"1", 100)])])),
+            (b"b".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"2", 100)])])),
+            (b"c".to_vec(), make_partition(vec![make_row(b"ck", vec![make_cell("x", b"3", 100)])])),
+        ];
+
+        let (inside, outside) = anticompact_partitions(partitions, |pk| pk == b"b");
+        assert_eq!(inside.len(), 1);
+        assert_eq!(inside[0].0, b"b");
+        assert_eq!(outside.len(), 2);
+    }
+
+    #[test]
+    fn expired_sstable_detection() {
+        let sst = SSTableMetadata {
+            id: 1,
+            data_size: 100,
+            partition_count: 10,
+            min_timestamp: 0,
+            max_timestamp: 100_000_000, // 100 seconds in micros
+        };
+        // gc_grace = 86400, now = 200_000 seconds
+        assert!(is_fully_expired(&sst, 86400, 200_000));
+        // gc_grace = 86400, now = 100 seconds
+        assert!(!is_fully_expired(&sst, 86400, 100));
     }
 }

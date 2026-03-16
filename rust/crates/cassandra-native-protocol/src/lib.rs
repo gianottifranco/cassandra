@@ -42,6 +42,8 @@ pub mod request;
 pub mod response;
 pub mod error_codes;
 pub mod auth;
+pub mod connection;
+pub mod event_dispatcher;
 
 #[cfg(any(feature = "compression-lz4", feature = "compression-snappy"))]
 pub mod compress;

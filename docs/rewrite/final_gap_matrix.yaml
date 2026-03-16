@@ -1,0 +1,1149 @@
+# Cassandra Rust Rewrite — Final Gap Matrix
+#
+# Exhaustive classification of every Java subsystem against Rust coverage.
+# Auto-validated by: cargo xtask coverage-audit / python3 scripts/coverage_audit.py --check-matrix
+#
+# Status values:
+#   done             — Rust at parity, evidence exists
+#   partial          — Core logic, known gaps documented
+#   missing          — Not yet started
+#   blocked          — Depends on incomplete subsystem
+#   stub             — API surface only, minimal logic
+#   trunk-only       — Present only in trunk, gated behind feature flag
+#   experimental     — Flagged experimental upstream
+#   tooling-only     — Operational tool, not data-path
+#   ops-only         — Operational concern (metrics, JMX)
+#   baseline-excluded — Excluded with justification
+
+baseline:
+  primary:
+    branch: trunk
+    commit: "076c6f11364645bbb43360f013bee6f50a099185"
+    date: "2026-03-15"
+  stable_reference:
+    branch: cassandra-5.0
+    tag: "latest cassandra-5.0.x"
+    purpose: "Distinguish stable vs trunk-only features"
+
+features:
+
+  # ═══════════════════════════════════════════════════════════════
+  # CORE DATA PATH
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: type-system
+    name: CQL Type System
+    subsystem: types
+    java_packages:
+      - org.apache.cassandra.db.marshal
+      - org.apache.cassandra.serializers
+    rust_crate: cassandra-types
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-02
+    notes: >
+      Native types, collections, UDT, vector, tuple implemented. Missing:
+      frozen deep-nesting edge cases, composite types, DynamicCompositeType.
+
+  - id: cql-parser
+    name: CQL Parser
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit, golden]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: >
+      Recursive-descent parser. SELECT, INSERT, UPDATE, DELETE, CREATE/ALTER/DROP
+      KEYSPACE/TABLE, USE covered. Missing: GRANT, REVOKE, roles, custom payloads,
+      JSON syntax, UDF/UDA CREATE/DROP.
+
+  - id: cql-conditions
+    name: CQL Conditions (LWT IF)
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.conditions
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-07
+    notes: "IF conditions parsed and used by Paxos. Collection element conditions missing."
+
+  - id: cql-constraints
+    name: CQL Constraints
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.constraints
+    rust_crate: cassandra-cql
+    status: missing
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "CHECK constraints. Trunk-only feature."
+
+  - id: cql-functions
+    name: CQL Functions (builtins, UDF, UDA)
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.functions
+    rust_crate: cassandra-cql
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: >
+      Builtin functions (token, now, uuid, cast, etc.), aggregate functions
+      (count, sum, avg, min, max), UDFs (Java/JavaScript), UDAs. UDF needs
+      sandbox/WASM strategy.
+
+  - id: cql-restrictions
+    name: CQL Restrictions
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.restrictions
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: "Basic restrictions. Missing: multi-column, token(), CONTAINS, LIKE."
+
+  - id: cql-selection
+    name: CQL Selection & Projection
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.selection
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: "Basic column selection. Missing: function calls in SELECT, aliases, writetime/ttl."
+
+  - id: cql-statements
+    name: CQL Statements
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.statements
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: >
+      DDL+DML statements. Missing: permission statements, role statements,
+      index management, aggregate management, function management, DESCRIBE.
+
+  - id: cql-terms
+    name: CQL Terms & Literals
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.terms
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: "Literals, bind markers. Missing: function call terms, type casts, collection constructors."
+
+  - id: cql-transactions
+    name: CQL Accord Transactions
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3.transactions
+    rust_crate: null
+    status: experimental
+    evidence_type: []
+    criticality: P3
+    config_condition: "experimental"
+    closure_phase: deferred
+    notes: "Accord-based interactive transactions. Experimental, trunk-only."
+
+  - id: prepared-statements
+    name: Prepared Statement Cache
+    subsystem: cql
+    java_packages:
+      - org.apache.cassandra.cql3
+    rust_crate: cassandra-cql
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: "Cache with schema-generation invalidation. Not wired to protocol layer."
+
+  # ═══════════════════════════════════════════════════════════════
+  # STORAGE ENGINE
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: memtable
+    name: Memtable
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.memtable
+      - org.apache.cassandra.db
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit, integration]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "BTreeMap-based. Missing: TrieMemtable, off-heap allocation, concurrent writes."
+
+  - id: commitlog
+    name: CommitLog
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.commitlog
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "Segment-based with CRC. Missing: compression, encryption, archive, CDC."
+
+  - id: sstable-read
+    name: SSTable Read Path
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.io
+      - org.apache.cassandra.db
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit, integration]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: >
+      Custom format reads. NOT binary-compatible with Java big-format.
+      Missing: reading Java SSTables, trie index, bloom filter interop.
+
+  - id: sstable-write
+    name: SSTable Write Path
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.io
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "Writes custom format. Not Java-compatible."
+
+  - id: compaction
+    name: Compaction
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.compaction
+    rust_crate: cassandra-storage
+    status: stub
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-07
+    notes: "STCS, LCS, TWCS, UCS strategy stubs. Missing: actual compaction execution, task management."
+
+  - id: compression
+    name: Compression
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.compression
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "LZ4 and Snappy. Missing: Zstd, compression dictionaries, decompression of Java SSTables."
+
+  - id: db-context
+    name: Counter Context
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.context
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-07
+    notes: "CRDT counter context with merge. Missing: cleanup of old shards."
+
+  - id: db-filter
+    name: Row/Partition Filters
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.filter
+    rust_crate: cassandra-storage
+    status: stub
+    evidence_type: []
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "ClusteringIndexFilter, ColumnFilter, RowFilter not yet implemented."
+
+  - id: db-guardrails
+    name: Guardrails
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.guardrails
+    rust_crate: cassandra-config
+    status: missing
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: >
+      Table/column count limits, partition size warnings, query complexity
+      limits. Config-driven safety rails.
+
+  - id: db-lifecycle
+    name: SSTable Lifecycle
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.lifecycle
+    rust_crate: cassandra-storage
+    status: stub
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Tracker, LogTransaction for atomicity. Stub only."
+
+  - id: db-partitions
+    name: Partition Iterators
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.partitions
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "Basic partition read. Missing: UnfilteredPartitionIterator, merge iterators."
+
+  - id: db-rows
+    name: Row Representation
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.rows
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "Row, Cell, Tombstone. Missing: ComplexColumnData, range tombstone processing."
+
+  - id: db-streaming
+    name: DB-level Streaming
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.streaming
+    rust_crate: cassandra-streaming
+    status: stub
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-06
+    notes: "SSTable streaming integration. Stub only."
+
+  - id: db-transform
+    name: Row Transformations
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.transform
+    rust_crate: cassandra-storage
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Filter, DuplicateRowChecker, Transformation pipeline."
+
+  - id: db-tries
+    name: Trie Index
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.tries
+    rust_crate: cassandra-storage
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "InMemoryTrie, trie-based partition index used in latest SSTable format."
+
+  - id: db-monitoring
+    name: Query Monitoring
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.monitoring
+    rust_crate: cassandra-admin
+    status: missing
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Slow query log, operation timeouts, abort mechanism."
+
+  - id: db-repair
+    name: DB Repair Metadata
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.repair
+    rust_crate: cassandra-repair
+    status: stub
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-06
+    notes: "Pending anti-compaction, repair tracking."
+
+  - id: db-aggregation
+    name: Query Aggregation
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.aggregation
+    rust_crate: cassandra-coordinator
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "GROUP BY aggregation, aggregate functions."
+
+  - id: db-view
+    name: Materialized Views
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.view
+    rust_crate: null
+    status: baseline-excluded
+    evidence_type: []
+    criticality: deferred
+    config_condition: null
+    closure_phase: deferred
+    notes: "Deprecated upstream. Stub with error message."
+
+  - id: db-virtual
+    name: Virtual Tables Framework
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.db.virtual
+    rust_crate: cassandra-admin
+    status: partial
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "5 built-in tables. ~60 more virtual table types exist in Java."
+
+  - id: cache
+    name: Caching (Key, Row, Counter)
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.cache
+    rust_crate: cassandra-storage
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "KeyCache, RowCache, CounterCache, SerializingCache."
+
+  - id: io
+    name: I/O Layer (SSTable I/O)
+    subsystem: storage
+    java_packages:
+      - org.apache.cassandra.io
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-04
+    notes: "Custom SSTable reader/writer. Missing: Java format compat, RandomAccessReader, CompressedSequentialWriter."
+
+  # ═══════════════════════════════════════════════════════════════
+  # NATIVE PROTOCOL
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: native-protocol
+    name: CQL Native Protocol v4/v5
+    subsystem: transport
+    java_packages:
+      - org.apache.cassandra.transport
+    rust_crate: cassandra-native-protocol
+    status: stub
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-02
+    notes: >
+      Frame codec, all opcodes, column types. No TCP listener, no actual
+      query execution over wire. Missing: protocol negotiation, event push,
+      payload size limits, backpressure.
+
+  # ═══════════════════════════════════════════════════════════════
+  # SCHEMA
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: schema
+    name: Schema Catalog
+    subsystem: schema
+    java_packages:
+      - org.apache.cassandra.schema
+    rust_crate: cassandra-schema
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-03
+    notes: >
+      Keyspace, table, column metadata with immutable catalog and persistence.
+      Missing: UDT/UDA/UDF metadata, index metadata, schema agreement, schema
+      migration coordination, system keyspaces.
+
+  # ═══════════════════════════════════════════════════════════════
+  # CONFIGURATION
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: config
+    name: Configuration (cassandra.yaml)
+    subsystem: config
+    java_packages:
+      - org.apache.cassandra.config
+    rust_crate: cassandra-config
+    status: stub
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-02
+    notes: >
+      Figment-based YAML parser. Must parse existing cassandra.yaml without error.
+      Missing: most config keys, guardrails config, audit config.
+
+  # ═══════════════════════════════════════════════════════════════
+  # DISTRIBUTED OPERATIONS
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: cluster-metadata
+    name: Gossip & Failure Detection
+    subsystem: cluster
+    java_packages:
+      - org.apache.cassandra.gms
+    rust_crate: cassandra-cluster-metadata
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Phi-accrual FD, gossip messages. Wire format not binary-compatible."
+
+  - id: snitches
+    name: Snitches & Topology
+    subsystem: cluster
+    java_packages:
+      - org.apache.cassandra.locator
+    rust_crate: cassandra-cluster-metadata
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Simple, Rack, Ec2, GCE snitches. Missing: dynamic snitch, PropertyFileSnitch."
+
+  - id: partitioner
+    name: Partitioner & Token Ring
+    subsystem: cluster
+    java_packages:
+      - org.apache.cassandra.dht
+    rust_crate: cassandra-cluster-metadata
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Murmur3 partitioner, token ranges. Missing: ByteOrdered, Random partitioners."
+
+  - id: messaging
+    name: Internode Messaging
+    subsystem: net
+    java_packages:
+      - org.apache.cassandra.net
+    rust_crate: cassandra-messaging
+    status: stub
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Verb enum, frame codec, stub service. No wire compatibility, no connection pool."
+
+  - id: coordinator-read
+    name: Read Coordinator
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.reads
+    rust_crate: cassandra-coordinator
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Basic read coordination. Missing: speculative retry, digest mismatch, read repair."
+
+  - id: coordinator-write
+    name: Write Coordinator
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.writes
+    rust_crate: cassandra-coordinator
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Basic write coordination. Missing: counter writes, batch log writes, view updates."
+
+  - id: coordinator-pager
+    name: Paging
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.pager
+    rust_crate: cassandra-coordinator
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "QueryPager, paging state serialization."
+
+  - id: coordinator-thresholds
+    name: Coordinator Thresholds
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.thresholds
+    rust_crate: cassandra-coordinator
+    status: missing
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Coordinator-level local read/write time tracking."
+
+  - id: service-core
+    name: Service Layer (StorageProxy, StorageService)
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service
+    rust_crate: cassandra-coordinator
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-05
+    notes: "Read/write paths. Missing: bootstrap, token migration, snapshot, disk management."
+
+  - id: service-disk
+    name: Disk Management
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.disk
+    rust_crate: cassandra-admin
+    status: missing
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Disk boundary management."
+
+  - id: service-snapshot
+    name: Snapshot Management
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.snapshot
+    rust_crate: cassandra-admin
+    status: stub
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Snapshot management service."
+
+  - id: paxos
+    name: Paxos / LWT
+    subsystem: coordinator
+    java_packages:
+      - org.apache.cassandra.service.paxos
+    rust_crate: cassandra-coordinator
+    status: partial
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-07
+    notes: >
+      Ballot, PaxosState, PaxosCoordinator, recovery, contention backoff.
+      ADR-011. Missing: system.paxos persistence, PaxosV2.
+
+  - id: repair
+    name: Repair & Anti-Entropy
+    subsystem: repair
+    java_packages:
+      - org.apache.cassandra.repair
+    rust_crate: cassandra-repair
+    status: stub
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-06
+    notes: "MerkleTree, RepairCoordinator stubs. No actual data exchange."
+
+  - id: streaming
+    name: Streaming
+    subsystem: streaming
+    java_packages:
+      - org.apache.cassandra.streaming
+    rust_crate: cassandra-streaming
+    status: stub
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-06
+    notes: "StreamSession, plan, transfer stubs. No actual data transfer."
+
+  # ═══════════════════════════════════════════════════════════════
+  # INDEXES
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: index-framework
+    name: Secondary Index Framework
+    subsystem: indexes
+    java_packages:
+      - org.apache.cassandra.index
+      - org.apache.cassandra.index.transactions
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-07
+    notes: "Index trait, legacy index, write-path hooks. Missing: lifecycle management."
+
+  - id: index-internal
+    name: Built-in (Internal) Indexes
+    subsystem: indexes
+    java_packages:
+      - org.apache.cassandra.index.internal
+      - org.apache.cassandra.index.internal.composites
+      - org.apache.cassandra.index.internal.keys
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-07
+    notes: "BTreeMap-based legacy index. Missing: composites, keys, values sub-types."
+
+  - id: index-sai
+    name: Storage Attached Indexes (SAI)
+    subsystem: indexes
+    java_packages:
+      - org.apache.cassandra.index.sai
+      - org.apache.cassandra.index.sai.analyzer
+      - org.apache.cassandra.index.sai.disk
+      - org.apache.cassandra.index.sai.iterators
+      - org.apache.cassandra.index.sai.memory
+      - org.apache.cassandra.index.sai.metrics
+      - org.apache.cassandra.index.sai.plan
+      - org.apache.cassandra.index.sai.postings
+      - org.apache.cassandra.index.sai.utils
+      - org.apache.cassandra.index.sai.view
+      - org.apache.cassandra.index.sai.virtual
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-07
+    notes: >
+      Posting lists, range search, segment build/merge, query execution,
+      vector kNN. Missing: on-disk persistence, HNSW/IVF ANN, analyzers.
+
+  - id: index-sasi
+    name: SASI Indexes
+    subsystem: indexes
+    java_packages:
+      - org.apache.cassandra.index.sasi
+      - org.apache.cassandra.index.sasi.analyzer
+      - org.apache.cassandra.index.sasi.conf
+      - org.apache.cassandra.index.sasi.disk
+      - org.apache.cassandra.index.sasi.exceptions
+      - org.apache.cassandra.index.sasi.memory
+      - org.apache.cassandra.index.sasi.plan
+      - org.apache.cassandra.index.sasi.sa
+      - org.apache.cassandra.index.sasi.utils
+    rust_crate: null
+    status: baseline-excluded
+    evidence_type: []
+    criticality: deferred
+    config_condition: null
+    closure_phase: deferred
+    notes: "SASI is deprecated in favor of SAI. Excluded from rewrite."
+
+  - id: index-accord
+    name: Accord Index Integration
+    subsystem: indexes
+    java_packages:
+      - org.apache.cassandra.index.accord
+    rust_crate: null
+    status: experimental
+    evidence_type: []
+    criticality: P3
+    config_condition: "experimental"
+    closure_phase: deferred
+    notes: "Accord transaction index hooks. Experimental."
+
+  # ═══════════════════════════════════════════════════════════════
+  # HINTS & BATCHLOG
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: hints
+    name: Hinted Handoff
+    subsystem: hints
+    java_packages:
+      - org.apache.cassandra.hints
+    rust_crate: cassandra-coordinator
+    status: stub
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-06
+    notes: "HintStore stub with insert/retrieve. Missing: file persistence, delivery."
+
+  - id: batchlog
+    name: Batchlog
+    subsystem: batchlog
+    java_packages:
+      - org.apache.cassandra.batchlog
+    rust_crate: cassandra-coordinator
+    status: stub
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Batch coordinator stub. Missing: actual batchlog write/replay."
+
+  # ═══════════════════════════════════════════════════════════════
+  # SECURITY
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: auth
+    name: Authentication
+    subsystem: security
+    java_packages:
+      - org.apache.cassandra.auth
+    rust_crate: cassandra-security
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "Password + AllowAll authenticators. Missing: LDAP, Kerberos, persistent stores."
+
+  - id: authz
+    name: Authorization
+    subsystem: security
+    java_packages:
+      - org.apache.cassandra.auth
+    rust_crate: cassandra-security
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "Role-based with hierarchy. Missing: persistent permission store."
+
+  - id: security-tls
+    name: TLS/SSL
+    subsystem: security
+    java_packages:
+      - org.apache.cassandra.security
+    rust_crate: cassandra-security
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "rustls + cert file watcher. Not wired to listeners."
+
+  - id: audit
+    name: Audit Logging
+    subsystem: security
+    java_packages:
+      - org.apache.cassandra.audit
+    rust_crate: cassandra-security
+    status: partial
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "AuditLogger with serde output. Missing: syslog sink, BinAuditLogger."
+
+  - id: fql
+    name: Full Query Logging
+    subsystem: diagnostics
+    java_packages:
+      - org.apache.cassandra.fql
+    rust_crate: cassandra-security
+    status: missing
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Chronicle-queue based. Rust needs equivalent file-based FQL."
+
+  # ═══════════════════════════════════════════════════════════════
+  # OBSERVABILITY & DIAGNOSTICS
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: metrics
+    name: Metrics
+    subsystem: observability
+    java_packages:
+      - org.apache.cassandra.metrics
+    rust_crate: cassandra-admin
+    status: partial
+    evidence_type: [unit]
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "Prometheus-native registry. Missing: full JMX metric coverage (~85 metric families)."
+
+  - id: tracing
+    name: Distributed Tracing
+    subsystem: observability
+    java_packages:
+      - org.apache.cassandra.tracing
+    rust_crate: cassandra-coordinator
+    status: stub
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "Trace context propagation. Missing: storage to system_traces, session management."
+
+  - id: diag
+    name: Diagnostics Events
+    subsystem: observability
+    java_packages:
+      - org.apache.cassandra.diag
+    rust_crate: cassandra-admin
+    status: missing
+    evidence_type: []
+    criticality: P3
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "DiagnosticEventService, event broadcasting."
+
+  - id: notifications
+    name: Notifications
+    subsystem: observability
+    java_packages:
+      - org.apache.cassandra.notifications
+    rust_crate: cassandra-common
+    status: missing
+    evidence_type: []
+    criticality: P3
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "INotification, SSTableListChangedNotification, etc."
+
+  # ═══════════════════════════════════════════════════════════════
+  # TOOLING & ADMIN
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: nodetool
+    name: nodetool CLI
+    subsystem: tooling
+    java_packages:
+      - org.apache.cassandra.tools
+      - org.apache.cassandra.tools.nodetool
+    rust_crate: cassandra-tools
+    status: stub
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "17 subcommands (clap). ~140 additional nodetool commands missing."
+
+  - id: sstable-tools
+    name: SSTable Offline Tools
+    subsystem: tooling
+    java_packages:
+      - org.apache.cassandra.tools
+    rust_crate: cassandra-tools
+    status: stub
+    evidence_type: []
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-12
+    notes: >
+      SSTableExport, Scrubber, Splitter, Upgrader, Verifier, MetadataViewer,
+      LevelResetter, RepairSetSetter — all stubs.
+
+  - id: admin-http
+    name: HTTP Admin API
+    subsystem: tooling
+    java_packages: []
+    rust_crate: cassandra-admin
+    status: partial
+    evidence_type: [unit]
+    criticality: P2
+    config_condition: null
+    closure_phase: prompt-08
+    notes: "Rust-only HTTP admin API. Not in Java baseline."
+
+  # ═══════════════════════════════════════════════════════════════
+  # COMMON / UTILITIES
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: utils
+    name: Utilities
+    subsystem: common
+    java_packages:
+      - org.apache.cassandra.utils
+    rust_crate: cassandra-common
+    status: stub
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-02
+    notes: >
+      Murmur3, timestamps, tokens, tombstones, TTL. Missing: BloomFilter,
+      MerkleTree (in repair crate), ByteBufferUtil, FBUtilities, UUIDGen,
+      many utility classes.
+
+  - id: concurrent
+    name: Concurrency Primitives
+    subsystem: common
+    java_packages:
+      - org.apache.cassandra.concurrent
+    rust_crate: cassandra-common
+    status: missing
+    evidence_type: []
+    criticality: P1
+    config_condition: null
+    closure_phase: prompt-12
+    notes: "SEPExecutor, SharedExecutorPool, Stage. Rust uses tokio, but stage model missing."
+
+  - id: exceptions
+    name: Exception Types
+    subsystem: common
+    java_packages:
+      - org.apache.cassandra.exceptions
+    rust_crate: cassandra-common
+    status: partial
+    evidence_type: [unit]
+    criticality: P0
+    config_condition: null
+    closure_phase: prompt-02
+    notes: "Core error types. Missing: full exception hierarchy mapping."
+
+  # ═══════════════════════════════════════════════════════════════
+  # TRUNK-ONLY / EXPERIMENTAL
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: tcm
+    name: Transactional Cluster Metadata
+    subsystem: tcm
+    java_packages:
+      - org.apache.cassandra.tcm
+    rust_crate: null
+    status: trunk-only
+    evidence_type: []
+    criticality: P3
+    config_condition: "trunk_only"
+    closure_phase: deferred
+    notes: "TCM log, epoch management. Under active iteration in trunk."
+
+  - id: accord
+    name: Accord Distributed Transactions
+    subsystem: accord
+    java_packages:
+      - org.apache.cassandra.service.accord
+    rust_crate: null
+    status: experimental
+    evidence_type: []
+    criticality: P3
+    config_condition: "experimental"
+    closure_phase: deferred
+    notes: "Next-gen distributed transaction engine. API still fluid."
+
+  - id: consensus
+    name: Consensus Service
+    subsystem: consensus
+    java_packages:
+      - org.apache.cassandra.service.consensus
+    rust_crate: null
+    status: experimental
+    evidence_type: []
+    criticality: P3
+    config_condition: "experimental"
+    closure_phase: deferred
+    notes: "Experimental consensus subsystem."
+
+  - id: journal
+    name: Journal
+    subsystem: journal
+    java_packages:
+      - org.apache.cassandra.journal
+    rust_crate: null
+    status: trunk-only
+    evidence_type: []
+    criticality: P3
+    config_condition: "trunk_only"
+    closure_phase: deferred
+    notes: "New journaling subsystem, still evolving."
+
+  - id: profiler
+    name: Profiler
+    subsystem: profiler
+    java_packages:
+      - org.apache.cassandra.profiler
+    rust_crate: null
+    status: baseline-excluded
+    evidence_type: []
+    criticality: deferred
+    config_condition: null
+    closure_phase: deferred
+    notes: "Dev-time profiling tool. Not a runtime feature."
+
+  - id: triggers
+    name: Triggers
+    subsystem: triggers
+    java_packages:
+      - org.apache.cassandra.triggers
+    rust_crate: cassandra-storage
+    status: stub
+    evidence_type: []
+    criticality: P3
+    config_condition: "triggers"
+    closure_phase: deferred
+    notes: "TriggerDefinition stub behind feature flag. Needs WASM/scripting for execution."

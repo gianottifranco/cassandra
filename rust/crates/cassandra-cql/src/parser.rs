@@ -144,6 +144,9 @@ impl Parser {
             TokenKind::Keyword(Keyword::Use) => self.parse_use(),
             TokenKind::Keyword(Keyword::Truncate) => self.parse_truncate(),
             TokenKind::Keyword(Keyword::Begin) => self.parse_batch(),
+            TokenKind::Keyword(Keyword::Grant) => self.parse_grant(),
+            TokenKind::Keyword(Keyword::Revoke) => self.parse_revoke(),
+            TokenKind::Keyword(Keyword::List) => self.parse_list(),
             _ => Err(self.error(format!("unexpected token: {}", self.peek_kind()))),
         }
     }
@@ -172,10 +175,25 @@ impl Parser {
 
     fn parse_create(&mut self) -> Result<Statement, ParseError> {
         self.expect_keyword(Keyword::Create)?;
+        // Handle CREATE OR REPLACE for functions/aggregates
+        let or_replace = self.eat_keyword(Keyword::Or) && {
+            self.expect_keyword(Keyword::Replace)?;
+            true
+        };
         match self.peek_kind().clone() {
             TokenKind::Keyword(Keyword::Keyspace) => self.parse_create_keyspace(),
             TokenKind::Keyword(Keyword::Table) => self.parse_create_table(),
-            _ => Err(self.error(format!("expected KEYSPACE or TABLE after CREATE, got {}", self.peek_kind()))),
+            TokenKind::Keyword(Keyword::Index) | TokenKind::Keyword(Keyword::Custom) => self.parse_create_index(),
+            TokenKind::Keyword(Keyword::Type) => self.parse_create_type(),
+            TokenKind::Keyword(Keyword::Function) => self.parse_create_function(or_replace),
+            TokenKind::Keyword(Keyword::Aggregate) => self.parse_create_aggregate(or_replace),
+            TokenKind::Keyword(Keyword::Trigger) => self.parse_create_trigger(),
+            TokenKind::Keyword(Keyword::Role) => self.parse_create_role(),
+            TokenKind::Keyword(Keyword::Materialized) => self.parse_create_materialized_view(),
+            _ => Err(self.error(format!(
+                "expected KEYSPACE, TABLE, INDEX, TYPE, FUNCTION, AGGREGATE, TRIGGER, ROLE, or MATERIALIZED after CREATE, got {}",
+                self.peek_kind()
+            ))),
         }
     }
 
@@ -393,7 +411,33 @@ impl Parser {
                 };
                 Ok(Statement::AlterTable(AlterTable { keyspace: ks, name, operation }))
             }
-            _ => Err(self.error("expected KEYSPACE or TABLE after ALTER".into())),
+            TokenKind::Keyword(Keyword::Role) => {
+                self.expect_keyword(Keyword::Role)?;
+                let name = self.expect_ident()?;
+                let mut password = None;
+                let mut superuser = None;
+                let mut login = None;
+                let options = HashMap::new();
+                if self.eat_keyword(Keyword::With) {
+                    loop {
+                        if self.eat_keyword(Keyword::Password) {
+                            self.expect(TokenKind::Eq)?;
+                            password = Some(self.parse_string_literal()?);
+                        } else if self.eat_keyword(Keyword::Superuser) {
+                            self.expect(TokenKind::Eq)?;
+                            superuser = Some(self.parse_boolean()?);
+                        } else if self.eat_keyword(Keyword::Login) {
+                            self.expect(TokenKind::Eq)?;
+                            login = Some(self.parse_boolean()?);
+                        } else {
+                            break;
+                        }
+                        if !self.eat_keyword(Keyword::And) { break; }
+                    }
+                }
+                Ok(Statement::AlterRole(AlterRole { name, password, superuser, login, options }))
+            }
+            _ => Err(self.error("expected KEYSPACE, TABLE, or ROLE after ALTER".into())),
         }
     }
 
@@ -414,7 +458,74 @@ impl Parser {
                 let (ks, name) = self.parse_table_name()?;
                 Ok(Statement::DropTable(DropTable { keyspace: ks, name, if_exists }))
             }
-            _ => Err(self.error("expected KEYSPACE or TABLE after DROP".into())),
+            TokenKind::Keyword(Keyword::Index) => {
+                self.expect_keyword(Keyword::Index)?;
+                let if_exists = self.parse_if_exists();
+                let (ks, name) = self.parse_table_name()?;
+                Ok(Statement::DropIndex(DropIndex { keyspace: ks, name, if_exists }))
+            }
+            TokenKind::Keyword(Keyword::Type) => {
+                self.expect_keyword(Keyword::Type)?;
+                let if_exists = self.parse_if_exists();
+                let (ks, name) = self.parse_table_name()?;
+                Ok(Statement::DropType(DropType { keyspace: ks, name, if_exists }))
+            }
+            TokenKind::Keyword(Keyword::Function) => {
+                self.expect_keyword(Keyword::Function)?;
+                let if_exists = self.parse_if_exists();
+                let (ks, name) = self.parse_table_name()?;
+                let arg_types = if self.eat_if(TokenKind::LParen) {
+                    let mut types = Vec::new();
+                    if *self.peek_kind() != TokenKind::RParen {
+                        loop {
+                            types.push(self.parse_cql_type()?);
+                            if !self.eat_if(TokenKind::Comma) { break; }
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    types
+                } else { Vec::new() };
+                Ok(Statement::DropFunction(DropFunction { keyspace: ks, name, if_exists, arg_types }))
+            }
+            TokenKind::Keyword(Keyword::Aggregate) => {
+                self.expect_keyword(Keyword::Aggregate)?;
+                let if_exists = self.parse_if_exists();
+                let (ks, name) = self.parse_table_name()?;
+                let arg_types = if self.eat_if(TokenKind::LParen) {
+                    let mut types = Vec::new();
+                    if *self.peek_kind() != TokenKind::RParen {
+                        loop {
+                            types.push(self.parse_cql_type()?);
+                            if !self.eat_if(TokenKind::Comma) { break; }
+                        }
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    types
+                } else { Vec::new() };
+                Ok(Statement::DropAggregate(DropAggregate { keyspace: ks, name, if_exists, arg_types }))
+            }
+            TokenKind::Keyword(Keyword::Trigger) => {
+                self.expect_keyword(Keyword::Trigger)?;
+                let if_exists = self.parse_if_exists();
+                let name = self.expect_ident()?;
+                self.expect_keyword(Keyword::On)?;
+                let (ks, table) = self.parse_table_name()?;
+                Ok(Statement::DropTrigger(DropTrigger { name, if_exists, keyspace: ks, table }))
+            }
+            TokenKind::Keyword(Keyword::Role) => {
+                self.expect_keyword(Keyword::Role)?;
+                let if_exists = self.parse_if_exists();
+                let name = self.expect_ident()?;
+                Ok(Statement::DropRole(DropRole { name, if_exists }))
+            }
+            TokenKind::Keyword(Keyword::Materialized) => {
+                self.expect_keyword(Keyword::Materialized)?;
+                self.expect_keyword(Keyword::View)?;
+                let if_exists = self.parse_if_exists();
+                let (ks, name) = self.parse_table_name()?;
+                Ok(Statement::DropMaterializedView(DropMaterializedView { keyspace: ks, name, if_exists }))
+            }
+            _ => Err(self.error("expected KEYSPACE, TABLE, INDEX, TYPE, FUNCTION, AGGREGATE, TRIGGER, ROLE, or MATERIALIZED after DROP".into())),
         }
     }
 
@@ -1014,6 +1125,348 @@ impl Parser {
         }
         Ok(clauses)
     }
+
+    // ─── CREATE INDEX ────────────────────────────────────────────────────
+
+    fn parse_create_index(&mut self) -> Result<Statement, ParseError> {
+        let custom = self.eat_keyword(Keyword::Custom);
+        self.expect_keyword(Keyword::Index)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let name = if *self.peek_kind() != TokenKind::Keyword(Keyword::On) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        self.expect_keyword(Keyword::On)?;
+        let (ks, table) = self.parse_table_name()?;
+        self.expect(TokenKind::LParen)?;
+        let column = self.expect_ident()?;
+        self.expect(TokenKind::RParen)?;
+        let custom_class = if custom {
+            if self.eat_keyword(Keyword::Using) {
+                Some(self.parse_string_literal()?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(Statement::CreateIndex(CreateIndex {
+            name, if_not_exists, keyspace: ks, table, column,
+            index_target: None, custom_class, options: HashMap::new(),
+        }))
+    }
+
+    // ─── CREATE TYPE ────────────────────────────────────────────────────
+
+    fn parse_create_type(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Type)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let (ks, name) = self.parse_table_name()?;
+        self.expect(TokenKind::LParen)?;
+        let mut fields = Vec::new();
+        loop {
+            let fname = self.expect_ident()?;
+            let ftype = self.parse_cql_type()?;
+            fields.push((fname, ftype));
+            if !self.eat_if(TokenKind::Comma) { break; }
+        }
+        self.expect(TokenKind::RParen)?;
+        Ok(Statement::CreateType(CreateType { keyspace: ks, name, if_not_exists, fields }))
+    }
+
+    // ─── CREATE FUNCTION ────────────────────────────────────────────────
+
+    fn parse_create_function(&mut self, or_replace: bool) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Function)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let (ks, name) = self.parse_table_name()?;
+        self.expect(TokenKind::LParen)?;
+        let mut args = Vec::new();
+        if *self.peek_kind() != TokenKind::RParen {
+            loop {
+                let arg_name = self.expect_ident()?;
+                let arg_type = self.parse_cql_type()?;
+                args.push((arg_name, arg_type));
+                if !self.eat_if(TokenKind::Comma) { break; }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        // CALLED ON NULL INPUT or RETURNS NULL ON NULL INPUT
+        let called_on_null_input = if self.eat_keyword(Keyword::Called) {
+            self.expect_keyword(Keyword::On)?;
+            // skip NULL INPUT
+            self.advance(); // NULL
+            self.advance(); // INPUT
+            true
+        } else if self.eat_keyword(Keyword::Returns) {
+            // RETURNS NULL ON NULL INPUT
+            if self.eat_keyword(Keyword::Null) {
+                self.expect_keyword(Keyword::On)?;
+                self.advance(); // NULL
+                self.advance(); // INPUT
+                // Now parse the real RETURNS
+                self.expect_keyword(Keyword::Returns)?;
+                false
+            } else {
+                // Just RETURNS <type>
+                false
+            }
+        } else {
+            false
+        };
+        // If we haven't parsed RETURNS yet:
+        if !called_on_null_input && *self.peek_kind() != TokenKind::Keyword(Keyword::Returns) {
+            // already consumed RETURNS above
+        } else if called_on_null_input {
+            self.expect_keyword(Keyword::Returns)?;
+        }
+        let return_type = self.parse_cql_type()?;
+        self.expect_keyword(Keyword::Language)?;
+        let language = self.expect_ident()?;
+        self.expect_keyword(Keyword::As)?;
+        let body = self.parse_string_literal()?;
+        Ok(Statement::CreateFunction(CreateFunction {
+            keyspace: ks, name, or_replace, if_not_exists,
+            args, called_on_null_input, return_type, language, body,
+        }))
+    }
+
+    // ─── CREATE AGGREGATE ───────────────────────────────────────────────
+
+    fn parse_create_aggregate(&mut self, or_replace: bool) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Aggregate)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let (ks, name) = self.parse_table_name()?;
+        self.expect(TokenKind::LParen)?;
+        let mut arg_types = Vec::new();
+        if *self.peek_kind() != TokenKind::RParen {
+            loop {
+                arg_types.push(self.parse_cql_type()?);
+                if !self.eat_if(TokenKind::Comma) { break; }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        self.expect_keyword(Keyword::Sfunc)?;
+        let sfunc = self.expect_ident()?;
+        self.expect_keyword(Keyword::Stype)?;
+        let stype = self.parse_cql_type()?;
+        let finalfunc = if self.eat_keyword(Keyword::Finalfunc) {
+            Some(self.expect_ident()?)
+        } else {
+            None
+        };
+        let initcond = if self.eat_keyword(Keyword::Initcond) {
+            Some(self.parse_term()?)
+        } else {
+            None
+        };
+        Ok(Statement::CreateAggregate(CreateAggregate {
+            keyspace: ks, name, or_replace, if_not_exists,
+            arg_types, sfunc, stype, finalfunc, initcond,
+        }))
+    }
+
+    // ─── CREATE TRIGGER ─────────────────────────────────────────────────
+
+    fn parse_create_trigger(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Trigger)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let name = self.expect_ident()?;
+        self.expect_keyword(Keyword::On)?;
+        let (ks, table) = self.parse_table_name()?;
+        self.expect_keyword(Keyword::Using)?;
+        let trigger_class = self.parse_string_literal()?;
+        Ok(Statement::CreateTrigger(CreateTrigger {
+            name, if_not_exists, keyspace: ks, table, trigger_class,
+        }))
+    }
+
+    // ─── CREATE ROLE ────────────────────────────────────────────────────
+
+    fn parse_create_role(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Role)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let name = self.expect_ident()?;
+        let mut password = None;
+        let mut superuser = None;
+        let mut login = None;
+        let options = HashMap::new();
+        if self.eat_keyword(Keyword::With) {
+            loop {
+                if self.eat_keyword(Keyword::Password) {
+                    self.expect(TokenKind::Eq)?;
+                    password = Some(self.parse_string_literal()?);
+                } else if self.eat_keyword(Keyword::Superuser) {
+                    self.expect(TokenKind::Eq)?;
+                    superuser = Some(self.parse_boolean()?);
+                } else if self.eat_keyword(Keyword::Login) {
+                    self.expect(TokenKind::Eq)?;
+                    login = Some(self.parse_boolean()?);
+                } else {
+                    break;
+                }
+                if !self.eat_keyword(Keyword::And) { break; }
+            }
+        }
+        Ok(Statement::CreateRole(CreateRole {
+            name, if_not_exists, password, superuser, login, options,
+        }))
+    }
+
+    // ─── CREATE MATERIALIZED VIEW ───────────────────────────────────────
+
+    fn parse_create_materialized_view(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Materialized)?;
+        self.expect_keyword(Keyword::View)?;
+        let if_not_exists = self.parse_if_not_exists();
+        let (ks, name) = self.parse_table_name()?;
+        self.expect_keyword(Keyword::As)?;
+        let select = match self.parse_select()? {
+            Statement::Select(s) => s,
+            _ => return Err(self.error("expected SELECT after AS".into())),
+        };
+        self.expect_keyword(Keyword::Primary)?;
+        self.expect_keyword(Keyword::Key)?;
+        self.expect(TokenKind::LParen)?;
+        let mut partition_key = Vec::new();
+        let mut clustering_key = Vec::new();
+        if self.eat_if(TokenKind::LParen) {
+            partition_key = self.parse_ident_list()?;
+            self.expect(TokenKind::RParen)?;
+        } else {
+            partition_key.push(self.expect_ident()?);
+        }
+        while self.eat_if(TokenKind::Comma) {
+            clustering_key.push(self.expect_ident()?);
+        }
+        self.expect(TokenKind::RParen)?;
+        let options = HashMap::new();
+        let clustering_order = Vec::new();
+        Ok(Statement::CreateMaterializedView(CreateMaterializedView {
+            keyspace: ks, name, if_not_exists, select,
+            partition_key, clustering_key, clustering_order, options,
+        }))
+    }
+
+    // ─── GRANT / REVOKE ─────────────────────────────────────────────────
+
+    fn parse_grant(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Grant)?;
+        let permissions = self.parse_permission_list()?;
+        self.expect_keyword(Keyword::On)?;
+        let resource = self.parse_resource()?;
+        // TO role
+        // "TO" is not a keyword, so we match ident
+        let to = self.expect_ident()?;
+        if to != "to" {
+            return Err(self.error(format!("expected TO, got {}", to)));
+        }
+        let role = self.expect_ident()?;
+        Ok(Statement::Grant(GrantStatement { permissions, resource, role }))
+    }
+
+    fn parse_revoke(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Revoke)?;
+        let permissions = self.parse_permission_list()?;
+        self.expect_keyword(Keyword::On)?;
+        let resource = self.parse_resource()?;
+        let from = self.expect_ident()?;
+        if from != "from" {
+            return Err(self.error(format!("expected FROM, got {}", from)));
+        }
+        let role = self.expect_ident()?;
+        Ok(Statement::Revoke(RevokeStatement { permissions, resource, role }))
+    }
+
+    fn parse_permission_list(&mut self) -> Result<Vec<String>, ParseError> {
+        if self.eat_keyword(Keyword::All) {
+            self.eat_keyword(Keyword::Permissions);
+            return Ok(vec!["ALL".to_string()]);
+        }
+        let perm = self.expect_ident()?;
+        self.eat_keyword(Keyword::Permission);
+        Ok(vec![perm.to_uppercase()])
+    }
+
+    fn parse_resource(&mut self) -> Result<Resource, ParseError> {
+        if self.eat_keyword(Keyword::All) {
+            if self.eat_keyword(Keyword::Keyspace) {
+                // ALL KEYSPACES
+                return Ok(Resource::AllKeyspaces);
+            }
+            if self.eat_keyword(Keyword::Roles) {
+                return Ok(Resource::AllRoles);
+            }
+            if self.eat_keyword(Keyword::Function) {
+                return Ok(Resource::AllFunctions);
+            }
+            return Ok(Resource::AllKeyspaces);
+        }
+        if self.eat_keyword(Keyword::Keyspace) {
+            let name = self.expect_ident()?;
+            return Ok(Resource::Keyspace(name));
+        }
+        if self.eat_keyword(Keyword::Table) {
+            let (ks, table) = self.parse_table_name()?;
+            return Ok(Resource::Table { keyspace: ks, table });
+        }
+        if self.eat_keyword(Keyword::Role) {
+            let name = self.expect_ident()?;
+            return Ok(Resource::Role(name));
+        }
+        // Default: try as table reference
+        let (ks, table) = self.parse_table_name()?;
+        Ok(Resource::Table { keyspace: ks, table })
+    }
+
+    // ─── LIST ───────────────────────────────────────────────────────────
+
+    fn parse_list(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::List)?;
+        if self.eat_keyword(Keyword::Roles) {
+            let of_role = if self.eat_keyword(Keyword::Of) {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            let no_recursive = self.eat_keyword(Keyword::Norecursive);
+            Ok(Statement::ListRoles(ListRolesStatement { of_role, no_recursive }))
+        } else if self.eat_keyword(Keyword::Permissions) || self.eat_keyword(Keyword::Permission) {
+            let permissions = vec!["ALL".to_string()];
+            let resource = if self.eat_keyword(Keyword::On) {
+                Some(self.parse_resource()?)
+            } else {
+                None
+            };
+            let of_role = if self.eat_keyword(Keyword::Of) {
+                Some(self.expect_ident()?)
+            } else {
+                None
+            };
+            Ok(Statement::ListPermissions(ListPermissionsStatement {
+                permissions, resource, of_role,
+            }))
+        } else {
+            Err(self.error("expected ROLES or PERMISSIONS after LIST".into()))
+        }
+    }
+
+    // ─── Extra helpers ──────────────────────────────────────────────────
+
+    fn parse_string_literal(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::StringLiteral(s) => { self.advance(); Ok(s) }
+            _ => Err(self.error(format!("expected string literal, got {}", self.peek_kind()))),
+        }
+    }
+
+    fn parse_boolean(&mut self) -> Result<bool, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::BooleanLiteral(b) => { self.advance(); Ok(b) }
+            _ => Err(self.error(format!("expected boolean, got {}", self.peek_kind()))),
+        }
+    }
 }
 
 fn is_unreserved_keyword(kw: Keyword) -> bool {
@@ -1048,6 +1501,31 @@ fn is_unreserved_keyword(kw: Keyword) -> bool {
             | Keyword::Replication
             | Keyword::Counter
             | Keyword::DurableWrites
+            | Keyword::Role
+            | Keyword::Roles
+            | Keyword::Permission
+            | Keyword::Permissions
+            | Keyword::Function
+            | Keyword::Aggregate
+            | Keyword::Trigger
+            | Keyword::Returns
+            | Keyword::Language
+            | Keyword::Called
+            | Keyword::Input
+            | Keyword::Sfunc
+            | Keyword::Stype
+            | Keyword::Finalfunc
+            | Keyword::Initcond
+            | Keyword::Custom
+            | Keyword::Replace
+            | Keyword::Login
+            | Keyword::Superuser
+            | Keyword::Password
+            | Keyword::Norecursive
+            | Keyword::Of
+            | Keyword::All
+            | Keyword::Cast
+            | Keyword::Vector
     )
 }
 
@@ -1320,5 +1798,107 @@ mod tests {
             }
             _ => panic!("expected Select"),
         }
+    }
+
+    // ── Phase 12 tests ──
+
+    #[test]
+    fn parse_create_index() {
+        let stmt = parse("CREATE INDEX idx_name ON ks.t (col)").unwrap();
+        match stmt {
+            Statement::CreateIndex(ci) => {
+                assert_eq!(ci.name, Some("idx_name".into()));
+                assert_eq!(ci.table, "t");
+                assert_eq!(ci.column, "col");
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_index() {
+        let stmt = parse("DROP INDEX IF EXISTS ks.my_idx").unwrap();
+        match stmt {
+            Statement::DropIndex(di) => {
+                assert!(di.if_exists);
+                assert_eq!(di.name, "my_idx");
+            }
+            _ => panic!("expected DropIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_create_type() {
+        let stmt = parse("CREATE TYPE ks.address (street text, city text, zip int)").unwrap();
+        match stmt {
+            Statement::CreateType(ct) => {
+                assert_eq!(ct.name, "address");
+                assert_eq!(ct.fields.len(), 3);
+            }
+            _ => panic!("expected CreateType"),
+        }
+    }
+
+    #[test]
+    fn parse_create_role() {
+        let stmt = parse("CREATE ROLE admin WITH PASSWORD = 'secret' AND SUPERUSER = true AND LOGIN = true").unwrap();
+        match stmt {
+            Statement::CreateRole(cr) => {
+                assert_eq!(cr.name, "admin");
+                assert_eq!(cr.password, Some("secret".into()));
+                assert_eq!(cr.superuser, Some(true));
+                assert_eq!(cr.login, Some(true));
+            }
+            _ => panic!("expected CreateRole"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_role() {
+        let stmt = parse("DROP ROLE IF EXISTS test_role").unwrap();
+        match stmt {
+            Statement::DropRole(dr) => {
+                assert!(dr.if_exists);
+                assert_eq!(dr.name, "test_role");
+            }
+            _ => panic!("expected DropRole"),
+        }
+    }
+
+    #[test]
+    fn parse_create_trigger() {
+        let stmt = parse("CREATE TRIGGER my_trigger ON ks.t USING 'org.example.MyTrigger'").unwrap();
+        match stmt {
+            Statement::CreateTrigger(ct) => {
+                assert_eq!(ct.name, "my_trigger");
+                assert_eq!(ct.table, "t");
+                assert_eq!(ct.trigger_class, "org.example.MyTrigger");
+            }
+            _ => panic!("expected CreateTrigger"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_trigger() {
+        let stmt = parse("DROP TRIGGER my_trigger ON ks.t").unwrap();
+        match stmt {
+            Statement::DropTrigger(dt) => {
+                assert_eq!(dt.name, "my_trigger");
+                assert_eq!(dt.table, "t");
+            }
+            _ => panic!("expected DropTrigger"),
+        }
+    }
+
+    #[test]
+    fn parse_drop_type() {
+        let stmt = parse("DROP TYPE IF EXISTS ks.address").unwrap();
+        assert!(matches!(stmt, Statement::DropType(_)));
+    }
+
+    #[test]
+    fn parse_drop_materialized_view() {
+        let stmt = parse("DROP MATERIALIZED VIEW IF EXISTS ks.my_view").unwrap();
+        assert!(matches!(stmt, Statement::DropMaterializedView(_)));
     }
 }

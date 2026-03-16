@@ -350,6 +350,11 @@ pub fn plan(
                 plans,
             }))
         }
+
+        // Phase 12: new statement types not yet fully plannable
+        _ => Err(PlanError::InvalidQuery(
+            "statement type not yet supported by the planner".into(),
+        )),
     }
 }
 

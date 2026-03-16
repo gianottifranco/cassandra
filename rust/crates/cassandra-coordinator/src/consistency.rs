@@ -92,6 +92,31 @@ impl ConsistencyLevel {
         matches!(self, Self::LocalOne | Self::LocalQuorum | Self::LocalSerial)
     }
 
+    /// Returns `true` if this CL is usable for writes (not serial-only).
+    ///
+    /// Serial CLs are only valid as the serial component of a CAS operation,
+    /// not as standalone write CLs.
+    pub fn requires_write(&self) -> bool {
+        !self.is_serial()
+    }
+
+    /// Returns `true` if this CL scopes to a single datacenter.
+    pub fn is_datacenter_local(&self) -> bool {
+        matches!(self, Self::LocalOne | Self::LocalQuorum | Self::LocalSerial)
+    }
+
+    /// Compute `block_for` for EACH_QUORUM across multiple DCs.
+    ///
+    /// Takes a map of datacenter name → RF for that DC.
+    /// Returns the total number of acks required (quorum per DC, summed).
+    ///
+    /// ## Java Oracle
+    ///
+    /// `ConsistencyLevel.blockForEachQuorum()`
+    pub fn block_for_each_quorum(dc_rf_map: &std::collections::HashMap<String, usize>) -> usize {
+        dc_rf_map.values().map(|rf| rf / 2 + 1).sum()
+    }
+
     /// Returns the CQL protocol encoding for this consistency level.
     pub fn protocol_code(&self) -> u16 {
         match self {
@@ -221,5 +246,29 @@ mod tests {
         assert!(ConsistencyLevel::LocalOne.is_local());
         assert!(ConsistencyLevel::LocalQuorum.is_local());
         assert!(!ConsistencyLevel::Quorum.is_local());
+    }
+
+    #[test]
+    fn requires_write() {
+        assert!(ConsistencyLevel::One.requires_write());
+        assert!(ConsistencyLevel::Quorum.requires_write());
+        assert!(ConsistencyLevel::Any.requires_write());
+        assert!(!ConsistencyLevel::Serial.requires_write());
+        assert!(!ConsistencyLevel::LocalSerial.requires_write());
+    }
+
+    #[test]
+    fn block_for_each_quorum_multi_dc() {
+        use std::collections::HashMap;
+        let mut dc_map = HashMap::new();
+        dc_map.insert("dc1".to_string(), 3);
+        dc_map.insert("dc2".to_string(), 3);
+        // quorum(3) = 2 per DC, total = 4
+        assert_eq!(ConsistencyLevel::block_for_each_quorum(&dc_map), 4);
+
+        let mut single = HashMap::new();
+        single.insert("dc1".to_string(), 5);
+        // quorum(5) = 3
+        assert_eq!(ConsistencyLevel::block_for_each_quorum(&single), 3);
     }
 }

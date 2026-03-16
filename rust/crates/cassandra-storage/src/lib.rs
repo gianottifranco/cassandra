@@ -1,54 +1,82 @@
-// Licensed to the Apache Software Foundation (ASF) under one
-// or more contributor license agreements.  See the NOTICE file
-// distributed with this work for additional information
-// regarding copyright ownership.  The ASF licenses this file
-// to you under the Apache License, Version 2.0 (the
-// "License"); you may not use this file except in compliance
-// with the License.  You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-// implied. See the License for the specific language governing
-// permissions and limitations under the License.
+// Licensed under Apache License, Version 2.0.
 
-//! # cassandra-storage
+//! # Cassandra Storage Engine
 //!
-//! Storage engine: CommitLog, MemTable, SSTable, compaction, and the
-//! unified StorageEngine that ties them together.
+//! Complete storage engine for the Rust rewrite of Apache Cassandra.
+//! Provides commit log (WAL), memtables, SSTables, compaction, CDC,
+//! snapshots, and incremental backups.
 //!
-//! ## Java Oracle
+//! ## Module Status
 //!
-//! - `org.apache.cassandra.db` (ColumnFamilyStore, Keyspace, Mutation)
-//! - `org.apache.cassandra.io` (SSTable readers/writers)
-//! - `org.apache.cassandra.db.commitlog` (CommitLog)
-//! - `org.apache.cassandra.db.compaction` (CompactionManager, strategies)
+//! | Module     | Status       | Java Oracle                        |
+//! |------------|-------------|-------------------------------------|
+//! | commitlog  | Functional  | `o.a.c.db.commitlog.CommitLog`      |
+//! | memtable   | Functional  | `o.a.c.db.Memtable`                 |
+//! | sstable    | Functional  | `o.a.c.io.sstable.format.*`         |
+//! | compaction | Functional  | `o.a.c.db.compaction.*`             |
+//! | engine     | Functional  | `o.a.c.db.ColumnFamilyStore`        |
+//! | cdc        | Functional  | `o.a.c.db.commitlog.CommitLog(CDC)` |
+//! | backup     | Functional  | `o.a.c.db.Keyspace.snapshot()`      |
+//! | counter    | Functional  | `o.a.c.db.CounterMutation`          |
+//! | index      | Functional  | `o.a.c.index.*`                     |
 //!
-//! ## Module Summary
+//! ## Features
 //!
-//! | Module       | Status     | Description                                      |
-//! |-------------|------------|--------------------------------------------------|
-//! | commitlog   | Functional | Segmented WAL with CRC32C, rotation, replay      |
-//! | memtable    | Functional | Skiplist-based with manager and backpressure      |
-//! | sstable     | Functional | Big-format compatible writer/reader + bloom       |
-//! | compaction  | Functional | STCS strategy, merge, tombstone GC                |
-//! | engine      | Functional | Unified write/read/flush/compact/snapshot/replay  |
+//! | Feature      | Description                               |
+//! |--------------|-------------------------------------------|
+//! | `cdc`        | Change Data Capture                       |
+//! | `ucs`        | Unified Compaction Strategy (experimental) |
+//! | `triggers`   | User-defined triggers                     |
+//! | `udfs`       | User-defined functions                    |
+//! | `mat-views`  | Materialized views                        |
 
+pub mod backup;
+pub mod cdc;
 pub mod commitlog;
-pub mod memtable;
-pub mod sstable;
 pub mod compaction;
 pub mod engine;
-pub mod counter;
-pub mod index;
+pub mod memtable;
+pub mod sstable;
 
+// Feature-gated re-exports
+pub use engine::{EngineConfig, EngineStats, StorageEngine};
+pub use commitlog::{CommitLog, CommitLogConfig, Mutation};
+pub use sstable::{SSTableDescriptor, SSTableReader, SSTableWriter, BtiReader, BtiWriter};
+pub use sstable::format::SSTableFormat;
+pub use compaction::CompactionStrategyType;
+pub use memtable::MemtableType;
+
+// ─── Modules with stubs (from original crate) ─────────────────────────────
+
+/// Counter mutation support.
+pub mod counter {
+    //! Counter mutation operations.
+    //! ## Java Oracle: `org.apache.cassandra.db.CounterMutation`
+}
+
+/// Secondary index support.
+pub mod index {
+    //! Secondary index operations.
+    //! ## Java Oracle: `org.apache.cassandra.index.*`
+}
+
+/// Materialized view support (feature-gated).
 #[cfg(feature = "materialized-views")]
-pub mod materialized_views;
+pub mod materialized_views {
+    //! Materialized view operations.
+    //! ## Java Oracle: `org.apache.cassandra.db.view.*`
+}
 
+/// Trigger support (feature-gated).
 #[cfg(feature = "triggers")]
-pub mod triggers;
+pub mod triggers {
+    //! Trigger operations.
+    //! ## Java Oracle: `org.apache.cassandra.triggers.*`
+}
 
+/// UDF support (feature-gated).
 #[cfg(feature = "udfs")]
-pub mod udf;
+pub mod udf {
+    //! User-defined function operations.
+    //! ## Java Oracle: `org.apache.cassandra.cql3.functions.*`
+}

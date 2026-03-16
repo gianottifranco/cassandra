@@ -11,13 +11,18 @@
 //!
 //! The memtable stores partitions keyed by partition key bytes.
 //! Within each partition, rows are sorted by clustering key bytes.
-//! A `MemtableEntry` trait allows swapping implementations (skiplist → trie).
+//! A `MemtableBackend` trait allows swapping implementations.
+//!
+//! Supported backends:
+//! - `SkipListMemtable` (default): BTreeMap-based, simple and correct
+//! - `TrieMemtable`: prefix-trie, memory-efficient for shared-prefix keys
 //!
 //! The `MemtableManager` manages the lifecycle of memtables:
 //! active → flushing → flushed. It enforces backpressure based on
 //! memory thresholds.
 
 pub mod partition;
+pub mod trie;
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -27,9 +32,34 @@ use parking_lot::RwLock;
 
 use partition::{PartitionData, Row};
 
+// ─── Memtable type configuration ──────────────────────────────────────────
+
+/// Which memtable backend to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum MemtableType {
+    /// BTreeMap-based skiplist (default, matches Java SkipListMemtable).
+    SkipList,
+    /// Prefix-trie based (matches Java TrieMemtable, experimental).
+    Trie,
+}
+
+impl Default for MemtableType {
+    fn default() -> Self {
+        Self::SkipList
+    }
+}
+
+/// Create a memtable backend by type.
+pub fn create_backend(memtable_type: MemtableType) -> Box<dyn MemtableBackend> {
+    match memtable_type {
+        MemtableType::SkipList => Box::new(SkipListMemtable::new()),
+        MemtableType::Trie => Box::new(trie::TrieMemtable::new()),
+    }
+}
+
 // ─── Trait for pluggable memtable implementations ──────────────────────────
 
-/// Trait for memtable backends. Enables swapping skiplist for trie in the future.
+/// Trait for memtable backends. Enables swapping skiplist for trie.
 pub trait MemtableBackend: Send + Sync {
     /// Insert or merge a row into the given partition.
     fn apply(&self, partition_key: Vec<u8>, row: Row);
@@ -50,13 +80,6 @@ pub trait MemtableBackend: Send + Sync {
 // ─── SkipListMemtable (default implementation) ─────────────────────────────
 
 /// Default memtable backed by a BTreeMap protected by RwLock.
-///
-/// This provides correct concurrent behavior. For higher concurrency,
-/// a sharded or lock-free skiplist can replace this.
-///
-/// ## Future: TrieMemtable
-/// When ready, implement `MemtableBackend` for a trie-based structure
-/// and swap via feature flag or config.
 pub struct SkipListMemtable {
     data: RwLock<BTreeMap<Vec<u8>, PartitionData>>,
     approx_size: AtomicUsize,
@@ -114,7 +137,7 @@ impl MemtableBackend for SkipListMemtable {
     }
 }
 
-fn estimate_row_size(row: &Row) -> usize {
+pub(crate) fn estimate_row_size(row: &Row) -> usize {
     let mut size = row.clustering_key.len() + 32; // overhead
     for cell in &row.cells {
         size += cell.column.len() + cell.value.as_ref().map_or(0, |v| v.len()) + 24;
@@ -136,9 +159,13 @@ pub struct Memtable {
 
 impl Memtable {
     pub fn new(id: u64, commitlog_segment_id: u64) -> Self {
+        Self::with_type(id, commitlog_segment_id, MemtableType::SkipList)
+    }
+
+    pub fn with_type(id: u64, commitlog_segment_id: u64, memtable_type: MemtableType) -> Self {
         Self {
             id,
-            backend: Box::new(SkipListMemtable::new()),
+            backend: create_backend(memtable_type),
             commitlog_lower_bound: commitlog_segment_id,
             commitlog_upper_bound: AtomicU64::new(commitlog_segment_id),
         }
@@ -181,15 +208,22 @@ pub struct MemtableManager {
     next_id: AtomicU64,
     /// Memory threshold that triggers flush (bytes).
     pub flush_threshold: usize,
+    /// Which memtable type to create.
+    pub memtable_type: MemtableType,
 }
 
 impl MemtableManager {
     pub fn new(flush_threshold: usize) -> Self {
+        Self::with_type(flush_threshold, MemtableType::SkipList)
+    }
+
+    pub fn with_type(flush_threshold: usize, memtable_type: MemtableType) -> Self {
         Self {
             active: RwLock::new(BTreeMap::new()),
             flushing: RwLock::new(Vec::new()),
             next_id: AtomicU64::new(1),
             flush_threshold,
+            memtable_type,
         }
     }
 
@@ -209,7 +243,7 @@ impl MemtableManager {
             .entry(cf_name.to_string())
             .or_insert_with(|| {
                 let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-                Arc::new(Memtable::new(id, commitlog_segment_id))
+                Arc::new(Memtable::with_type(id, commitlog_segment_id, self.memtable_type))
             })
             .clone()
     }
@@ -236,7 +270,7 @@ impl MemtableManager {
     ) -> Option<Arc<Memtable>> {
         let mut active = self.active.write();
         let new_id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let new_mt = Arc::new(Memtable::new(new_id, commitlog_segment_id));
+        let new_mt = Arc::new(Memtable::with_type(new_id, commitlog_segment_id, self.memtable_type));
 
         let old = active.insert(cf_name.to_string(), new_mt);
 
@@ -267,6 +301,33 @@ impl MemtableManager {
             (Some(a), None) => Some(a),
             (None, Some(b)) => Some(b),
             (None, None) => None,
+        }
+    }
+
+    /// List all active CF names.
+    pub fn active_cf_names(&self) -> Vec<String> {
+        self.active.read().keys().cloned().collect()
+    }
+}
+
+// ─── Metrics ───────────────────────────────────────────────────────────────
+
+/// Snapshot of memtable manager metrics.
+#[derive(Debug, Clone)]
+pub struct MemtableMetrics {
+    pub total_memory_bytes: usize,
+    pub active_memtable_count: usize,
+    pub flushing_memtable_count: usize,
+    pub memtable_type: MemtableType,
+}
+
+impl MemtableManager {
+    pub fn metrics(&self) -> MemtableMetrics {
+        MemtableMetrics {
+            total_memory_bytes: self.total_memory_usage(),
+            active_memtable_count: self.active.read().len(),
+            flushing_memtable_count: self.flushing.read().len(),
+            memtable_type: self.memtable_type,
         }
     }
 }
@@ -309,18 +370,11 @@ mod tests {
     #[test]
     fn skiplist_merge_rows() {
         let mt = SkipListMemtable::new();
-
-        // First write
-        let row1 = test_row(b"ck1", "name", b"alice", 1000);
-        mt.apply(b"pk1".to_vec(), row1);
-
-        // Second write to same partition, same clustering key, newer timestamp
-        let row2 = test_row(b"ck1", "name", b"bob", 2000);
-        mt.apply(b"pk1".to_vec(), row2);
+        mt.apply(b"pk1".to_vec(), test_row(b"ck1", "name", b"alice", 1000));
+        mt.apply(b"pk1".to_vec(), test_row(b"ck1", "name", b"bob", 2000));
 
         let partition = mt.get_partition(b"pk1").unwrap();
         assert_eq!(partition.rows.len(), 1);
-        // Should have the newer value
         let cells = &partition.rows[&b"ck1".to_vec()].cells;
         assert_eq!(cells.len(), 1);
         assert_eq!(cells[0].value.as_deref(), Some(b"bob".as_slice()));
@@ -344,11 +398,9 @@ mod tests {
         let mt1 = mgr.get_or_create("ks.table1", 1);
         assert_eq!(mt1.id, 1);
 
-        // Getting again returns the same one
         let mt1b = mgr.get_or_create("ks.table1", 1);
         assert_eq!(mt1.id, mt1b.id);
 
-        // Different CF gets different memtable
         let mt2 = mgr.get_or_create("ks.table2", 1);
         assert_ne!(mt1.id, mt2.id);
     }
@@ -359,29 +411,24 @@ mod tests {
         let mt1 = mgr.get_or_create("ks.t1", 1);
         mt1.apply(b"pk".to_vec(), test_row(b"ck", "c", b"v", 100));
 
-        // Switch memtable
         let old = mgr.switch_memtable("ks.t1", 2).unwrap();
         assert_eq!(old.id, mt1.id);
         assert_eq!(old.partition_count(), 1);
 
-        // New memtable is empty
         let new = mgr.get_or_create("ks.t1", 2);
         assert_eq!(new.partition_count(), 0);
         assert_ne!(new.id, old.id);
 
-        // Complete flush
         mgr.flush_complete(old.id);
     }
 
     #[test]
     fn backpressure_detection() {
-        let mgr = MemtableManager::new(100); // very small threshold
+        let mgr = MemtableManager::new(100);
         let mt = mgr.get_or_create("ks.t1", 1);
 
-        // Should not trigger initially
         assert!(!mgr.should_flush());
 
-        // Write enough data
         for i in 0..20 {
             mt.apply(
                 format!("pk{i}").into_bytes(),
@@ -400,9 +447,7 @@ mod tests {
 
         assert_eq!(mgr.lowest_commitlog_bound(), Some(5));
 
-        // Switch t1, now flushing mt with bound 5
         mgr.switch_memtable("ks.t1", 15);
-        // Still 5 because it's flushing
         assert_eq!(mgr.lowest_commitlog_bound(), Some(5));
     }
 
@@ -416,5 +461,31 @@ mod tests {
         let partitions = mt.iter_partitions();
         let keys: Vec<_> = partitions.iter().map(|(k, _)| k.clone()).collect();
         assert_eq!(keys, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]);
+    }
+
+    #[test]
+    fn trie_memtable_via_factory() {
+        let backend = create_backend(MemtableType::Trie);
+        backend.apply(b"pk1".to_vec(), test_row(b"ck", "n", b"v", 100));
+        assert_eq!(backend.partition_count(), 1);
+        assert!(backend.get_partition(b"pk1").is_some());
+    }
+
+    #[test]
+    fn manager_with_trie_type() {
+        let mgr = MemtableManager::with_type(1024, MemtableType::Trie);
+        let mt = mgr.get_or_create("ks.t1", 1);
+        mt.apply(b"pk".to_vec(), test_row(b"ck", "n", b"v", 100));
+        assert_eq!(mt.partition_count(), 1);
+    }
+
+    #[test]
+    fn memtable_metrics() {
+        let mgr = MemtableManager::new(1024);
+        let _mt = mgr.get_or_create("ks.t1", 1);
+        let metrics = mgr.metrics();
+        assert_eq!(metrics.active_memtable_count, 1);
+        assert_eq!(metrics.flushing_memtable_count, 0);
+        assert_eq!(metrics.memtable_type, MemtableType::SkipList);
     }
 }

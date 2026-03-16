@@ -62,6 +62,9 @@ pub mod golden;
 pub mod shadow_traffic;
 
 #[cfg(test)]
+mod gap_guards;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 

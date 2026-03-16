@@ -5,6 +5,13 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.io.sstable.Descriptor`
 //! - `org.apache.cassandra.io.sstable.Component`
+//!
+//! ## Formats
+//!
+//! | Format | Module  | Status       | Description                        |
+//! |--------|---------|-------------|------------------------------------|
+//! | Big    | writer  | Functional  | Classic partition index + data     |
+//! | BTI    | bti     | Functional  | Trie-based partition index + data  |
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +27,14 @@ pub enum Component {
     Summary,
     Statistics,
     Toc,
+    /// BTI format: trie-based partition index.
+    Partitions,
+    /// BTI format: row-level index.
+    Rows,
+    /// Digest of the data file (MD5/CRC).
+    Digest,
+    /// Compression info (chunk offsets).
+    CompressionInfo,
 }
 
 impl Component {
@@ -31,9 +46,37 @@ impl Component {
             Component::Summary => "Summary.db",
             Component::Statistics => "Statistics.db",
             Component::Toc => "TOC.txt",
+            Component::Partitions => "Partitions.db",
+            Component::Rows => "Rows.db",
+            Component::Digest => "Digest.crc32",
+            Component::CompressionInfo => "CompressionInfo.db",
         }
     }
 
+    /// Components for the Big format.
+    pub fn big_components() -> &'static [Component] {
+        &[
+            Component::Data,
+            Component::Index,
+            Component::Filter,
+            Component::Summary,
+            Component::Statistics,
+            Component::Toc,
+        ]
+    }
+
+    /// Components for the BTI format.
+    pub fn bti_components() -> &'static [Component] {
+        &[
+            Component::Data,
+            Component::Partitions,
+            Component::Filter,
+            Component::Statistics,
+            Component::Toc,
+        ]
+    }
+
+    /// All possible component types.
     pub fn all() -> &'static [Component] {
         &[
             Component::Data,
@@ -42,6 +85,10 @@ impl Component {
             Component::Summary,
             Component::Statistics,
             Component::Toc,
+            Component::Partitions,
+            Component::Rows,
+            Component::Digest,
+            Component::CompressionInfo,
         ]
     }
 }
@@ -63,8 +110,16 @@ pub struct SSTableDescriptor {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SSTableFormat {
-    /// Simplified big-format compatible.
+    /// Classic big-format with binary-search partition index.
     Big,
+    /// Block-based trie index format.
+    Bti,
+}
+
+impl Default for SSTableFormat {
+    fn default() -> Self {
+        Self::Big
+    }
 }
 
 impl SSTableDescriptor {
@@ -78,12 +133,15 @@ impl SSTableDescriptor {
         }
     }
 
-    /// File prefix: `{keyspace}-{table}-big-{generation}`
+    /// File prefix, varies by format.
+    /// Big:  `{keyspace}-{table}-big-{generation}`
+    /// BTI:  `{keyspace}-{table}-bti-{generation}`
     pub fn file_prefix(&self) -> String {
-        format!(
-            "{}-{}-big-{}",
-            self.keyspace, self.table, self.generation
-        )
+        let fmt_tag = match self.format {
+            SSTableFormat::Big => "big",
+            SSTableFormat::Bti => "bti",
+        };
+        format!("{}-{}-{fmt_tag}-{}", self.keyspace, self.table, self.generation)
     }
 
     /// Complete path for a component file.
@@ -92,9 +150,17 @@ impl SSTableDescriptor {
             .join(format!("{}-{}", self.file_prefix(), component.extension()))
     }
 
-    /// Check if all component files exist.
+    /// Components expected for this format.
+    pub fn expected_components(&self) -> &'static [Component] {
+        match self.format {
+            SSTableFormat::Big => Component::big_components(),
+            SSTableFormat::Bti => Component::bti_components(),
+        }
+    }
+
+    /// Check if all expected component files exist.
     pub fn is_complete(&self) -> bool {
-        Component::all()
+        self.expected_components()
             .iter()
             .all(|c| self.component_path(*c).exists())
     }
@@ -121,10 +187,9 @@ pub const ROW_MARKER: u8 = 0x01;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
-    fn descriptor_paths() {
+    fn descriptor_paths_big() {
         let desc = SSTableDescriptor::new(Path::new("/data"), "ks", "t1", 42);
         assert_eq!(
             desc.component_path(Component::Data),
@@ -138,7 +203,28 @@ mod tests {
     }
 
     #[test]
-    fn all_components() {
-        assert_eq!(Component::all().len(), 6);
+    fn descriptor_paths_bti() {
+        let mut desc = SSTableDescriptor::new(Path::new("/data"), "ks", "t1", 42);
+        desc.format = SSTableFormat::Bti;
+        assert_eq!(desc.file_prefix(), "ks-t1-bti-42");
+        assert_eq!(
+            desc.component_path(Component::Partitions),
+            PathBuf::from("/data/ks-t1-bti-42-Partitions.db")
+        );
+    }
+
+    #[test]
+    fn big_components_list() {
+        assert_eq!(Component::big_components().len(), 6);
+    }
+
+    #[test]
+    fn bti_components_list() {
+        assert_eq!(Component::bti_components().len(), 5);
+    }
+
+    #[test]
+    fn format_default_is_big() {
+        assert_eq!(SSTableFormat::default(), SSTableFormat::Big);
     }
 }

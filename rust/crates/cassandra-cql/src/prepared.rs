@@ -25,6 +25,10 @@ pub struct PreparedStatement {
     pub schema_version: u64,
     /// Bind variable count (positional).
     pub bind_count: usize,
+    /// MD5 of the result column metadata, for detecting METADATA_CHANGED.
+    pub result_metadata_id: Option<[u8; 16]>,
+    /// Keyspace context at preparation time.
+    pub keyspace: Option<String>,
 }
 
 /// Concurrent prepared statement cache.
@@ -92,6 +96,8 @@ impl PreparedCache {
             statement,
             schema_version,
             bind_count,
+            result_metadata_id: None,
+            keyspace: None,
         };
 
         self.cache.insert(id, prepared.clone());

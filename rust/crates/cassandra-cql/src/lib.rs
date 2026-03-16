@@ -36,3 +36,6 @@ pub mod ast;
 pub mod parser;
 pub mod planner;
 pub mod prepared;
+pub mod udf;
+pub mod uda;
+pub mod triggers;

@@ -249,6 +249,11 @@ fn read_bytes<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
+/// Public helper: read a row from a Data.db reader (used by both Big and BTI readers).
+pub fn read_row_from_reader<R: Read>(reader: &mut R) -> io::Result<Row> {
+    read_row(reader)
+}
+
 fn read_row<R: Read>(reader: &mut R) -> io::Result<Row> {
     // Clustering key
     let ck = read_bytes(reader)?;

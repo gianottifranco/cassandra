@@ -4,6 +4,9 @@
 //!
 //! ## Java Oracle
 //! - `org.apache.cassandra.cql3.statements.*`
+//! - `org.apache.cassandra.cql3.functions.*`
+//! - `org.apache.cassandra.triggers.*`
+//! - `org.apache.cassandra.auth.*`
 
 use std::collections::HashMap;
 
@@ -17,11 +20,31 @@ pub enum Statement {
     CreateTable(CreateTable),
     AlterTable(AlterTable),
     DropTable(DropTable),
+    CreateIndex(CreateIndex),
+    DropIndex(DropIndex),
+    CreateMaterializedView(CreateMaterializedView),
+    DropMaterializedView(DropMaterializedView),
+    CreateType(CreateType),
+    DropType(DropType),
+    CreateFunction(CreateFunction),
+    DropFunction(DropFunction),
+    CreateAggregate(CreateAggregate),
+    DropAggregate(DropAggregate),
+    CreateTrigger(CreateTrigger),
+    DropTrigger(DropTrigger),
     // ── DML ──
     Select(Select),
     Insert(Insert),
     Update(Update),
     Delete(Delete),
+    // ── DCL ──
+    CreateRole(CreateRole),
+    AlterRole(AlterRole),
+    DropRole(DropRole),
+    Grant(GrantStatement),
+    Revoke(RevokeStatement),
+    ListRoles(ListRolesStatement),
+    ListPermissions(ListPermissionsStatement),
     // ── Utility ──
     Use(UseStatement),
     Truncate(TruncateStatement),
@@ -39,6 +62,30 @@ impl Statement {
                 | Statement::CreateTable(_)
                 | Statement::AlterTable(_)
                 | Statement::DropTable(_)
+                | Statement::CreateIndex(_)
+                | Statement::DropIndex(_)
+                | Statement::CreateMaterializedView(_)
+                | Statement::DropMaterializedView(_)
+                | Statement::CreateType(_)
+                | Statement::DropType(_)
+                | Statement::CreateFunction(_)
+                | Statement::DropFunction(_)
+                | Statement::CreateAggregate(_)
+                | Statement::DropAggregate(_)
+                | Statement::CreateTrigger(_)
+                | Statement::DropTrigger(_)
+        )
+    }
+
+    /// Returns true if this is a DCL statement that modifies auth state.
+    pub fn is_auth_altering(&self) -> bool {
+        matches!(
+            self,
+            Statement::CreateRole(_)
+                | Statement::AlterRole(_)
+                | Statement::DropRole(_)
+                | Statement::Grant(_)
+                | Statement::Revoke(_)
         )
     }
 }
@@ -307,6 +354,201 @@ pub enum BatchType {
     Logged,
     Unlogged,
     Counter,
+}
+
+// ─── Index Statements ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateIndex {
+    pub name: Option<String>,
+    pub if_not_exists: bool,
+    pub keyspace: Option<String>,
+    pub table: String,
+    pub column: String,
+    /// E.g. "keys(col)", "values(col)", "entries(col)", "full(col)".
+    pub index_target: Option<String>,
+    pub custom_class: Option<String>,
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropIndex {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_exists: bool,
+}
+
+// ─── Materialized View Statements ───────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateMaterializedView {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_not_exists: bool,
+    pub select: Select,
+    pub partition_key: Vec<String>,
+    pub clustering_key: Vec<String>,
+    pub clustering_order: Vec<(String, ClusteringOrder)>,
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropMaterializedView {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_exists: bool,
+}
+
+// ─── UDT Statements ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateType {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_not_exists: bool,
+    pub fields: Vec<(String, CqlTypeName)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropType {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_exists: bool,
+}
+
+// ─── UDF Statements ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateFunction {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub or_replace: bool,
+    pub if_not_exists: bool,
+    pub args: Vec<(String, CqlTypeName)>,
+    pub called_on_null_input: bool,
+    pub return_type: CqlTypeName,
+    pub language: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropFunction {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_exists: bool,
+    pub arg_types: Vec<CqlTypeName>,
+}
+
+// ─── UDA Statements ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateAggregate {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub or_replace: bool,
+    pub if_not_exists: bool,
+    pub arg_types: Vec<CqlTypeName>,
+    pub sfunc: String,
+    pub stype: CqlTypeName,
+    pub finalfunc: Option<String>,
+    pub initcond: Option<Term>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropAggregate {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub if_exists: bool,
+    pub arg_types: Vec<CqlTypeName>,
+}
+
+// ─── Trigger Statements ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateTrigger {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub keyspace: Option<String>,
+    pub table: String,
+    pub trigger_class: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropTrigger {
+    pub name: String,
+    pub if_exists: bool,
+    pub keyspace: Option<String>,
+    pub table: String,
+}
+
+// ─── DCL Statements ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CreateRole {
+    pub name: String,
+    pub if_not_exists: bool,
+    pub password: Option<String>,
+    pub superuser: Option<bool>,
+    pub login: Option<bool>,
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterRole {
+    pub name: String,
+    pub password: Option<String>,
+    pub superuser: Option<bool>,
+    pub login: Option<bool>,
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DropRole {
+    pub name: String,
+    pub if_exists: bool,
+}
+
+/// Permission resource target.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Resource {
+    AllKeyspaces,
+    Keyspace(String),
+    Table { keyspace: Option<String>, table: String },
+    AllRoles,
+    Role(String),
+    AllFunctions,
+    FunctionInKeyspace(String),
+    Function { keyspace: Option<String>, name: String, arg_types: Vec<CqlTypeName> },
+    AllMBeans,
+    MBean(String),
+    MBeanPattern(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct GrantStatement {
+    pub permissions: Vec<String>,
+    pub resource: Resource,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct RevokeStatement {
+    pub permissions: Vec<String>,
+    pub resource: Resource,
+    pub role: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListRolesStatement {
+    pub of_role: Option<String>,
+    pub no_recursive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListPermissionsStatement {
+    pub permissions: Vec<String>,
+    pub resource: Option<Resource>,
+    pub of_role: Option<String>,
 }
 
 #[cfg(test)]

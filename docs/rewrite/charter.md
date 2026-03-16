@@ -10,6 +10,8 @@ on-disk data compatibility, and operational tooling within each phase's scope.
 
 ## 2. Baseline
 
+### Primary Baseline (Oracle)
+
 | Field              | Value                                                  |
 |--------------------|--------------------------------------------------------|
 | **Branch**         | `trunk`                                                |
@@ -18,22 +20,46 @@ on-disk data compatibility, and operational tooling within each phase's scope.
 | **Cassandra ver.** | trunk (post-5.0, pre-6.0)                              |
 | **Accord module**  | included (`modules/accord` submodule)                  |
 
-### Trunk-only / Unstable Components (excluded from v1 parity target)
+### Stable Reference Baseline
 
-These subsystems exist in trunk but are experimental, incomplete, or are
-known to change significantly before a stable release. They should **not**
-be used as parity targets for the initial Rust reimplementation.
+| Field              | Value                                                  |
+|--------------------|--------------------------------------------------------|
+| **Branch**         | `cassandra-5.0`                                        |
+| **Purpose**        | Distinguish stable vs trunk-only features              |
 
-| Component                     | Reason for exclusion                           |
-|-------------------------------|------------------------------------------------|
-| `modules/accord`              | New consensus engine, API still fluid          |
-| `service/consensus`           | Experimental consensus subsystem               |
-| `db/virtual`                  | Virtual tables — auxiliary, low priority        |
-| `tcm` (Transactional Cluster Metadata) | Trunk-only, under active iteration    |
-| `fql` (Full Query Logging)    | Diagnostic feature, not core data path         |
-| `journal`                     | New journaling subsystem, still evolving        |
-| `profiler`                    | Dev-time profiling, non-critical               |
-| `triggers`                    | Plugin system, rarely used in production       |
+See [ADR-016](adrs/016-baseline-freeze-policy.md) for re-freeze policy.
+
+### Trunk-only / Unstable Components
+
+Features present only in trunk are classified `trunk-only` in the
+[gap matrix](final_gap_matrix.yaml) and gated behind feature flags.
+See [ADR-017](adrs/017-experimental-features-policy.md).
+
+| Component                     | Status            | Feature Flag        |
+|-------------------------------|--------------------|---------------------|
+| `modules/accord`              | experimental       | `experimental`      |
+| `service/consensus`           | experimental       | `experimental`      |
+| `tcm` (Transactional Cluster) | trunk-only         | `trunk_only`        |
+| `journal`                     | trunk-only         | `trunk_only`        |
+| `fql` (Full Query Logging)    | missing            | —                   |
+| `profiler`                    | baseline-excluded  | —                   |
+| `triggers`                    | stub               | `triggers`          |
+| `db/virtual`                  | partial            | —                   |
+
+### Mixed-Cluster Posture
+
+Mixed Java+Rust clusters are **NOT feasible** in the current phase.
+Gossip wire format and internode messaging are not binary-compatible.
+Migration strategy: dual-cluster with shadow traffic validation.
+See [ADR-014](adrs/014-migration-strategy.md).
+
+### JMX / Management Plane Strategy
+
+Java Cassandra uses JMX for all admin operations. The Rust implementation
+replaces JMX with:
+- **HTTP Admin API** (Prometheus-compatible metrics endpoint)
+- **CLI tool** (`cassandra-tools`) using HTTP to the admin API
+- No JMX dependency; existing JMX-based tools will not work directly.
 
 ## 3. Scope & Principles
 
