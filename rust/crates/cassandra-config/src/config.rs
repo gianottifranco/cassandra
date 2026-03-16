@@ -64,6 +64,35 @@ pub struct CassandraConfig {
     #[serde(default = "defaults::native_transport_port")]
     pub native_transport_port: u16,
 
+    // ── Native transport limits ──
+    /// Maximum number of concurrent client connections (global).
+    #[serde(default = "defaults::native_transport_max_concurrent_connections")]
+    pub native_transport_max_concurrent_connections: i32,
+
+    /// Maximum number of concurrent client connections per source IP.
+    #[serde(default = "defaults::native_transport_max_concurrent_connections_per_ip")]
+    pub native_transport_max_concurrent_connections_per_ip: i32,
+
+    /// Maximum allowed frame size in bytes.
+    #[serde(default = "defaults::native_transport_max_frame_size")]
+    pub native_transport_max_frame_size: u64,
+
+    /// Maximum bytes of request data allowed in-flight across all connections.
+    #[serde(default = "defaults::native_transport_max_request_data_in_flight")]
+    pub native_transport_max_request_data_in_flight: u64,
+
+    /// Whether to enable native transport rate limiting.
+    #[serde(default)]
+    pub native_transport_rate_limiting_enabled: bool,
+
+    /// Maximum requests per second when rate limiting is enabled.
+    #[serde(default = "defaults::native_transport_max_requests_per_second")]
+    pub native_transport_max_requests_per_second: u32,
+
+    /// Idle timeout in seconds for native transport connections. 0 = disabled.
+    #[serde(default)]
+    pub native_transport_idle_timeout_seconds: u64,
+
     // ── Thread pools ──
     #[serde(default = "defaults::concurrent_reads")]
     pub concurrent_reads: u32,
@@ -312,6 +341,25 @@ pub mod defaults {
     pub fn audit_logger() -> String {
         "FileAuditLogger".to_string()
     }
+    /// -1 means unlimited (Java default).
+    pub fn native_transport_max_concurrent_connections() -> i32 {
+        -1
+    }
+    /// -1 means unlimited (Java default).
+    pub fn native_transport_max_concurrent_connections_per_ip() -> i32 {
+        -1
+    }
+    /// 256 MiB (Java default).
+    pub fn native_transport_max_frame_size() -> u64 {
+        256 * 1024 * 1024
+    }
+    /// ~1/2 of heap; we use a fixed 512 MiB default.
+    pub fn native_transport_max_request_data_in_flight() -> u64 {
+        512 * 1024 * 1024
+    }
+    pub fn native_transport_max_requests_per_second() -> u32 {
+        25_000
+    }
 }
 
 impl Default for CassandraConfig {
@@ -398,6 +446,39 @@ audit_logging_options:
         let audit = cfg.audit_logging_options.unwrap();
         assert!(audit.enabled);
         assert_eq!(audit.audit_logs_dir.unwrap(), "/var/log/cassandra/audit");
+    }
+
+    #[test]
+    fn native_transport_defaults() {
+        let cfg = CassandraConfig::default();
+        assert_eq!(cfg.native_transport_max_concurrent_connections, -1);
+        assert_eq!(cfg.native_transport_max_concurrent_connections_per_ip, -1);
+        assert_eq!(cfg.native_transport_max_frame_size, 256 * 1024 * 1024);
+        assert_eq!(cfg.native_transport_max_request_data_in_flight, 512 * 1024 * 1024);
+        assert!(!cfg.native_transport_rate_limiting_enabled);
+        assert_eq!(cfg.native_transport_max_requests_per_second, 25_000);
+        assert_eq!(cfg.native_transport_idle_timeout_seconds, 0);
+    }
+
+    #[test]
+    fn deserialize_native_transport_fields() {
+        let yaml = r#"
+native_transport_max_concurrent_connections: 1024
+native_transport_max_concurrent_connections_per_ip: 64
+native_transport_max_frame_size: 16777216
+native_transport_max_request_data_in_flight: 268435456
+native_transport_rate_limiting_enabled: true
+native_transport_max_requests_per_second: 10000
+native_transport_idle_timeout_seconds: 300
+"#;
+        let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.native_transport_max_concurrent_connections, 1024);
+        assert_eq!(cfg.native_transport_max_concurrent_connections_per_ip, 64);
+        assert_eq!(cfg.native_transport_max_frame_size, 16_777_216);
+        assert_eq!(cfg.native_transport_max_request_data_in_flight, 268_435_456);
+        assert!(cfg.native_transport_rate_limiting_enabled);
+        assert_eq!(cfg.native_transport_max_requests_per_second, 10_000);
+        assert_eq!(cfg.native_transport_idle_timeout_seconds, 300);
     }
 
     #[test]

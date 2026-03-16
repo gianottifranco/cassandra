@@ -3,12 +3,15 @@
 //! Native Protocol TCP Server.
 //!
 //! Listens for incoming CQL client connections (typically port 9042).
+//! Integrates connection resource limits, backpressure, metrics, and
+//! graceful shutdown via `tokio::select!` + `CancellationToken`.
 
 use bytes::BytesMut;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use cassandra_native_protocol::auth::{AuthResult, Authenticator as NativeAuthenticator};
 use cassandra_native_protocol::connection::ConnectionContext;
@@ -19,12 +22,15 @@ use cassandra_security::fql::{FqlLogger, FqlRecord};
 use cassandra_security::tls::ReloadableTlsAcceptor;
 use tokio_util::codec::{Decoder, Encoder};
 
+use crate::client_state::ClientState;
 use crate::executor::{QueryExecutor, QueryResult};
+use crate::resource_limits::ResourceLimits;
+use crate::shutdown::ShutdownCoordinator;
+use crate::transport_metrics::TransportMetrics;
 
 pub struct ServerConfig {
     pub listen_address: String,
     pub client_encryption_enabled: bool,
-    // TODO: load client_encryption_options from config
 }
 
 pub struct NativeServer {
@@ -34,6 +40,9 @@ pub struct NativeServer {
     tls_acceptor: Option<ReloadableTlsAcceptor>,
     fql_logger: Arc<FqlLogger>,
     audit_logger: Arc<dyn AuditLogger>,
+    resource_limits: Arc<ResourceLimits>,
+    metrics: Arc<TransportMetrics>,
+    shutdown: Arc<ShutdownCoordinator>,
 }
 
 impl NativeServer {
@@ -44,6 +53,9 @@ impl NativeServer {
         tls_acceptor: Option<ReloadableTlsAcceptor>,
         fql_logger: Arc<FqlLogger>,
         audit_logger: Arc<dyn AuditLogger>,
+        resource_limits: Arc<ResourceLimits>,
+        metrics: Arc<TransportMetrics>,
+        shutdown: Arc<ShutdownCoordinator>,
     ) -> Self {
         Self {
             config,
@@ -52,7 +64,15 @@ impl NativeServer {
             tls_acceptor,
             fql_logger,
             audit_logger,
+            resource_limits,
+            metrics,
+            shutdown,
         }
+    }
+
+    /// Returns a reference to the transport metrics.
+    pub fn metrics(&self) -> &TransportMetrics {
+        &self.metrics
     }
 
     pub async fn run(self: Arc<Self>) -> anyhow::Result<()> {
@@ -63,73 +83,113 @@ impl NativeServer {
         );
 
         if self.config.client_encryption_enabled && self.tls_acceptor.is_none() {
-            tracing::warn!("Client encryption is enabled but no TLS acceptor was provided!");
+            warn!("Client encryption is enabled but no TLS acceptor was provided!");
         }
 
+        let cancel = self.shutdown.token();
+
         loop {
-            let (stream, addr) = match listener.accept().await {
-                Ok(res) => res,
-                Err(e) => {
-                    error!("Error accepting connection: {}", e);
-                    continue;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    info!("Accept loop shutting down");
+                    return Ok(());
                 }
-            };
-
-            debug!("Accepted connection from {}", addr);
-            let server = Arc::clone(&self);
-
-            tokio::spawn(async move {
-                if let Some(ref tls_acceptor) = server.tls_acceptor {
-                    let acceptor = tls_acceptor.acceptor();
-                    match acceptor.accept(stream).await {
-                        Ok(tls_stream) => {
-                            if let Err(e) = server.handle_connection(tls_stream).await {
-                                debug!("Connection {} error: {}", addr, e);
-                            }
-                        }
+                result = listener.accept() => {
+                    let (stream, addr) = match result {
+                        Ok(res) => res,
                         Err(e) => {
-                            error!("TLS handshake failed for {}: {}", addr, e);
+                            error!("Error accepting connection: {}", e);
+                            continue;
                         }
-                    }
-                } else if let Err(e) = server.handle_connection(stream).await {
-                    debug!("Connection {} error: {}", addr, e);
+                    };
+
+                    // Acquire connection permit
+                    let permit = match self.resource_limits.try_acquire_connection(addr.ip()) {
+                        Some(p) => p,
+                        None => {
+                            self.metrics.connection_rejected();
+                            warn!(%addr, "Connection rejected — resource limit reached");
+                            drop(stream);
+                            continue;
+                        }
+                    };
+
+                    self.metrics.connection_accepted(addr.ip());
+                    debug!("Accepted connection from {}", addr);
+                    let server = Arc::clone(&self);
+
+                    tokio::spawn(async move {
+                        let _permit = permit; // RAII — released on drop
+                        if let Some(ref tls_acceptor) = server.tls_acceptor {
+                            let acceptor = tls_acceptor.acceptor();
+                            match acceptor.accept(stream).await {
+                                Ok(tls_stream) => {
+                                    if let Err(e) = server.handle_connection(tls_stream, addr).await {
+                                        debug!("Connection {} error: {}", addr, e);
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("TLS handshake failed for {}: {}", addr, e);
+                                }
+                            }
+                        } else if let Err(e) = server.handle_connection(stream, addr).await {
+                            debug!("Connection {} error: {}", addr, e);
+                        }
+                        server.metrics.connection_closed(addr.ip());
+                    });
                 }
-            });
+            }
         }
     }
 
-    async fn handle_connection<S>(&self, mut stream: S) -> anyhow::Result<()>
+    async fn handle_connection<S>(&self, mut stream: S, addr: SocketAddr) -> anyhow::Result<()>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
     {
         let mut ctx = ConnectionContext::new();
+        let mut client_state = ClientState::new(addr);
         let mut buffer = BytesMut::with_capacity(8192);
+        let cancel = self.shutdown.token();
 
         loop {
-            let n = stream.read_buf(&mut buffer).await?;
-            if n == 0 {
-                return Ok(()); // Client closed connection
-            }
-
-            // Parse as many frames as we can from the buffer
-            while let Some(frame) = self.decode_frame(&mut buffer)? {
-                let response_frame = {
-                    let mut resp_opt =
-                        ctx.process_lifecycle(&frame, self.authenticator.as_ref())?;
-                    if resp_opt.is_none() {
-                        // Protocol lifecycle didn't handle it, must be a query.
-                        resp_opt = self.handle_query(&mut ctx, &frame).await?;
+            tokio::select! {
+                _ = cancel.cancelled() => {
+                    debug!(%addr, "Connection closing due to shutdown");
+                    return Ok(());
+                }
+                result = stream.read_buf(&mut buffer) => {
+                    let n = result?;
+                    if n == 0 {
+                        return Ok(()); // Client closed connection
                     }
-                    resp_opt
-                };
+                    self.metrics.record_bytes_in(n as u64);
 
-                if let Some(mut r_frame) = response_frame {
-                    r_frame = ctx.wrap_response(r_frame, None, &[], None);
+                    // Parse as many frames as we can from the buffer
+                    while let Some(frame) = self.decode_frame(&mut buffer)? {
+                        let _guard = self.shutdown.track_request();
+                        client_state.increment_request_count();
+                        self.metrics.request_processed(Some(&addr.ip()));
 
-                    let mut out_buf = bytes::BytesMut::new();
-                    let mut codec = FrameCodec;
-                    codec.encode(r_frame, &mut out_buf)?;
-                    stream.write_all(&out_buf).await?;
+                        let response_frame = {
+                            let mut resp_opt =
+                                ctx.process_lifecycle(&frame, self.authenticator.as_ref())?;
+                            if resp_opt.is_none() {
+                                // Protocol lifecycle didn't handle it, must be a query.
+                                resp_opt = self.handle_query(&mut ctx, &mut client_state, &frame).await?;
+                            }
+                            resp_opt
+                        };
+
+                        if let Some(mut r_frame) = response_frame {
+                            r_frame = ctx.wrap_response(r_frame, None, &[], None);
+
+                            let mut out_buf = bytes::BytesMut::new();
+                            let mut codec = FrameCodec;
+                            codec.encode(r_frame, &mut out_buf)?;
+                            self.metrics.record_bytes_out(out_buf.len() as u64);
+                            stream.write_all(&out_buf).await?;
+                        }
+                    }
                 }
             }
         }
@@ -143,6 +203,7 @@ impl NativeServer {
     async fn handle_query(
         &self,
         ctx: &mut ConnectionContext,
+        client_state: &mut ClientState,
         frame: &Frame,
     ) -> anyhow::Result<Option<Frame>> {
         use cassandra_native_protocol::message::*;
@@ -190,9 +251,6 @@ impl NativeServer {
                     }
                 };
 
-                // Plan the query (requires schema snapshot)
-                // TODO: For now, executor reads schema directly, but we should pass it.
-                // We'll parse assuming active keyspace.
                 let schema_catalog = self.executor.catalog();
                 let schema = schema_catalog.read().snapshot();
 
@@ -221,7 +279,8 @@ impl NativeServer {
                     } else {
                         AuditStatus::Failure
                     };
-                    let mut event = AuditEvent::now(AuditEventType::Query, &user_str, "127.0.0.1");
+                    let source = client_state.remote_address().to_string();
+                    let mut event = AuditEvent::now(AuditEventType::Query, &user_str, &source);
                     event.query = Some(cql.clone());
                     event.keyspace = ctx.keyspace.clone();
                     event.status = status;
@@ -236,6 +295,7 @@ impl NativeServer {
                     ))),
                     Ok(QueryResult::SetKeyspace(ks)) => {
                         ctx.keyspace = Some(ks.clone());
+                        client_state.set_keyspace(ks.clone());
                         Ok(Some(response::encode_response(
                             &Message::Result(
                                 cassandra_native_protocol::message::ResultMessage::SetKeyspace(ks),
@@ -258,7 +318,7 @@ impl NativeServer {
                                         target,
                                         keyspace,
                                         name,
-                                        arg_types: None, // Used for functions/aggregates, omit for now
+                                        arg_types: None,
                                     },
                                 ),
                             ),
@@ -271,7 +331,6 @@ impl NativeServer {
                         rows: _,
                     }) => {
                         // TODO: Map to actual Row results
-                        // For now we just return a stub result because `Rows` isn't fully mapped to Message::ResultRows yet.
                         Ok(Some(response::encode_response(
                             &Message::Result(
                                 cassandra_native_protocol::message::ResultMessage::Void,

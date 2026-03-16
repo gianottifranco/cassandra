@@ -493,7 +493,9 @@ dependencies = [
  "cassandra-security",
  "cassandra-storage",
  "cassandra-types",
+ "dashmap",
  "parking_lot",
+ "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
@@ -2789,6 +2791,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

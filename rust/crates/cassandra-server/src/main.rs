@@ -12,8 +12,15 @@
 //! 6. Log ready status
 
 mod auth;
+mod backpressure;
+mod client_state;
+mod dispatcher;
 mod executor;
+mod resource_limits;
 mod server;
+mod shutdown;
+mod transport_metrics;
+mod transport_service;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,7 +35,11 @@ use cassandra_storage::engine::{EngineConfig, StorageEngine};
 use cassandra_security::auth::PasswordAuthenticator;
 
 use crate::executor::QueryExecutor;
+use crate::resource_limits::ResourceLimits;
 use crate::server::{NativeServer, ServerConfig};
+use crate::shutdown::ShutdownCoordinator;
+use crate::transport_metrics::TransportMetrics;
+use crate::transport_service::{NativeTransportConfig, NativeTransportService};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -174,16 +185,30 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&authorizer) as Arc<dyn cassandra_security::Authorizer>,
     ));
 
-    // 10. Start Native Protocol Server
+    // 10. Native Transport Service lifecycle
+    let nt_config = NativeTransportConfig::from_cassandra_config(&cassandra_config);
+    let transport_service = Arc::new(NativeTransportService::new(nt_config.clone()));
+    transport_service.initialize().map_err(|e| anyhow::anyhow!(e))?;
+
+    // 11. Resource limits, metrics, shutdown coordinator
+    let resource_limits = Arc::new(ResourceLimits::new(
+        nt_config.max_concurrent_connections,
+        nt_config.max_concurrent_connections_per_ip,
+        nt_config.max_request_data_in_flight,
+    ));
+    let transport_metrics = Arc::new(TransportMetrics::new());
+    let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(
+        std::time::Duration::from_secs(30),
+    ));
+
+    // 12. Build NativeServer
     let native_auth = Arc::new(crate::server::NativeAuthWrapper::new(Arc::new(
         PasswordAuthenticator::new(Arc::clone(&role_manager)),
     )
         as Arc<dyn cassandra_security::auth::Authenticator>));
 
     let server_config = ServerConfig {
-        listen_address: cassandra_config
-            .listen_address
-            .unwrap_or_else(|| "127.0.0.1:9042".to_string()),
+        listen_address: nt_config.bind_address(),
         client_encryption_enabled,
     };
 
@@ -194,12 +219,28 @@ async fn main() -> anyhow::Result<()> {
         tls_acceptor,
         Arc::clone(&fql_logger),
         Arc::clone(&audit_logger),
+        Arc::clone(&resource_limits),
+        Arc::clone(&transport_metrics),
+        Arc::clone(&shutdown_coordinator),
     ));
 
+    transport_service.start().map_err(|e| anyhow::anyhow!(e))?;
     info!("cassandra-server v{VERSION} ready");
+
+    // 13. Install signal handler for graceful shutdown
+    let shutdown_for_signal = Arc::clone(&shutdown_coordinator);
+    tokio::spawn(async move {
+        shutdown::signal_handler(shutdown_for_signal).await;
+    });
 
     // Block on the server
     server.run().await?;
+
+    // Drain and stop
+    transport_service.begin_stop().ok();
+    shutdown_coordinator.drain().await;
+    transport_service.finish_stop().ok();
+    info!("cassandra-server v{VERSION} shut down");
 
     Ok(())
 }
