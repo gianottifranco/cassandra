@@ -6,6 +6,7 @@
 //! - `org.apache.cassandra.db.marshal.AbstractType.compare(ByteBuffer, ByteBuffer)`
 
 use crate::native::CqlType;
+use crate::vint::decode_vint;
 use byteorder::{BigEndian, ByteOrder};
 use std::cmp::Ordering;
 
@@ -51,6 +52,32 @@ pub fn compare_bytes(cql_type: &CqlType, left: &[u8], right: &[u8]) -> Ordering 
 
         // Reversed: flip the comparison
         CqlType::Reversed(inner) => compare_bytes(inner, left, right).reverse(),
+
+        // Decimal: compare as (scale, unscaled_varint).
+        // Java oracle: DecimalType.compare
+        CqlType::Decimal => cmp_decimal(left, right),
+
+        // Duration: compare months, then days, then nanoseconds.
+        // Java oracle: DurationType.compare
+        CqlType::Duration => cmp_duration(left, right),
+
+        // List/Set: element-wise comparison using inner type.
+        // Java oracle: ListType.compare / SetType.compare
+        CqlType::List(inner, _) | CqlType::Set(inner, _) => {
+            cmp_collection_seq(inner, left, right)
+        }
+
+        // Map: compare key-value pairs in order.
+        // Java oracle: MapType.compare
+        CqlType::Map(key_type, value_type, _) => cmp_map(key_type, value_type, left, right),
+
+        // Tuple: positional comparison by field type.
+        // Java oracle: TupleType.compare
+        CqlType::Tuple(types) => cmp_tuple(types, left, right),
+
+        // UDT: same wire format as Tuple.
+        // Java oracle: UserType.compare
+        CqlType::Udt { field_types, .. } => cmp_tuple(field_types, left, right),
 
         // Default: unsigned byte-by-byte (safe fallback)
         _ => left.cmp(right),
@@ -110,6 +137,138 @@ fn timeuuid_timestamp(uuid: &[u8]) -> u64 {
     let time_mid = BigEndian::read_u16(&uuid[4..6]) as u64;
     let time_hi = (BigEndian::read_u16(&uuid[6..8]) & 0x0FFF) as u64;
     (time_hi << 48) | (time_mid << 32) | time_low
+}
+
+/// Decimal comparison: scale first (i32), then unscaled varint.
+fn cmp_decimal(left: &[u8], right: &[u8]) -> Ordering {
+    if left.len() < 4 || right.len() < 4 {
+        return left.len().cmp(&right.len());
+    }
+    let scale_l = BigEndian::read_i32(&left[0..4]);
+    let scale_r = BigEndian::read_i32(&right[0..4]);
+    scale_l
+        .cmp(&scale_r)
+        .then_with(|| cmp_varint(&left[4..], &right[4..]))
+}
+
+/// Duration comparison: months, then days, then nanoseconds.
+fn cmp_duration(left: &[u8], right: &[u8]) -> Ordering {
+    let (ml, n1l) = decode_vint(left).unwrap_or((0, 1));
+    let (dl, n2l) = decode_vint(&left[n1l..]).unwrap_or((0, 1));
+    let (nl, _) = decode_vint(&left[n1l + n2l..]).unwrap_or((0, 1));
+
+    let (mr, n1r) = decode_vint(right).unwrap_or((0, 1));
+    let (dr, n2r) = decode_vint(&right[n1r..]).unwrap_or((0, 1));
+    let (nr, _) = decode_vint(&right[n1r + n2r..]).unwrap_or((0, 1));
+
+    ml.cmp(&mr).then(dl.cmp(&dr)).then(nl.cmp(&nr))
+}
+
+/// Read a length-prefixed element; returns (slice, bytes_consumed).
+fn read_elem(data: &[u8], pos: usize) -> (&[u8], usize) {
+    if pos + 4 > data.len() {
+        return (&data[0..0], 0);
+    }
+    let len = BigEndian::read_i32(&data[pos..]);
+    if len < 0 {
+        return (&data[0..0], 4);
+    }
+    let len = len as usize;
+    let end = (pos + 4 + len).min(data.len());
+    (&data[pos + 4..end], 4 + len)
+}
+
+/// Read an optional length-prefixed element (null = -1).
+fn read_optional_elem(data: &[u8], pos: usize) -> (Option<&[u8]>, usize) {
+    if pos + 4 > data.len() {
+        return (None, 0);
+    }
+    let len = BigEndian::read_i32(&data[pos..]);
+    if len < 0 {
+        (None, 4)
+    } else {
+        let len = len as usize;
+        let end = (pos + 4 + len).min(data.len());
+        (Some(&data[pos + 4..end]), 4 + len)
+    }
+}
+
+/// Element-wise comparison for List and Set.
+fn cmp_collection_seq(inner: &CqlType, left: &[u8], right: &[u8]) -> Ordering {
+    if left.len() < 4 || right.len() < 4 {
+        return left.len().cmp(&right.len());
+    }
+    let cnt_l = BigEndian::read_i32(&left[0..4]) as usize;
+    let cnt_r = BigEndian::read_i32(&right[0..4]) as usize;
+    let mut pos_l = 4usize;
+    let mut pos_r = 4usize;
+    let min_count = cnt_l.min(cnt_r);
+    for _ in 0..min_count {
+        let (el_l, n_l) = read_elem(left, pos_l);
+        let (el_r, n_r) = read_elem(right, pos_r);
+        pos_l += n_l;
+        pos_r += n_r;
+        let cmp = compare_bytes(inner, el_l, el_r);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+    cnt_l.cmp(&cnt_r)
+}
+
+/// Key-then-value comparison for Map.
+fn cmp_map(key_type: &CqlType, value_type: &CqlType, left: &[u8], right: &[u8]) -> Ordering {
+    if left.len() < 4 || right.len() < 4 {
+        return left.len().cmp(&right.len());
+    }
+    let cnt_l = BigEndian::read_i32(&left[0..4]) as usize;
+    let cnt_r = BigEndian::read_i32(&right[0..4]) as usize;
+    let mut pos_l = 4usize;
+    let mut pos_r = 4usize;
+    let min_count = cnt_l.min(cnt_r);
+    for _ in 0..min_count {
+        let (kl, nkl) = read_elem(left, pos_l);
+        let (kr, nkr) = read_elem(right, pos_r);
+        pos_l += nkl;
+        pos_r += nkr;
+        let cmp = compare_bytes(key_type, kl, kr);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let (vl, nvl) = read_elem(left, pos_l);
+        let (vr, nvr) = read_elem(right, pos_r);
+        pos_l += nvl;
+        pos_r += nvr;
+        let cmp = compare_bytes(value_type, vl, vr);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+    cnt_l.cmp(&cnt_r)
+}
+
+/// Positional comparison for Tuple and UDT.
+fn cmp_tuple(types: &[CqlType], left: &[u8], right: &[u8]) -> Ordering {
+    let mut pos_l = 0usize;
+    let mut pos_r = 0usize;
+    for ty in types {
+        let (el_l, n_l) = read_optional_elem(left, pos_l);
+        let (el_r, n_r) = read_optional_elem(right, pos_r);
+        pos_l += n_l;
+        pos_r += n_r;
+        match (el_l, el_r) {
+            (None, None) => continue,
+            (None, Some(_)) => return Ordering::Less,
+            (Some(_), None) => return Ordering::Greater,
+            (Some(l), Some(r)) => {
+                let cmp = compare_bytes(ty, l, r);
+                if cmp != Ordering::Equal {
+                    return cmp;
+                }
+            }
+        }
+    }
+    Ordering::Equal
 }
 
 /// Variable-length signed integer comparison.

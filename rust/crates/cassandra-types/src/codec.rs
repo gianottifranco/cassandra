@@ -20,6 +20,7 @@
 //! - `org.apache.cassandra.serializers.*`
 
 use crate::native::CqlType;
+use crate::vint::{decode_vint, encode_vint};
 use byteorder::{BigEndian, ByteOrder};
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -117,20 +118,17 @@ impl CqlValue {
                 b
             }
             CqlValue::Tinyint(v) => vec![*v as u8],
+            // Duration uses vint-encoded months, days, nanoseconds.
+            // Java oracle: DurationType / DurationSerializer.
             CqlValue::Duration {
                 months,
                 days,
                 nanoseconds,
             } => {
-                let mut b = Vec::with_capacity(16);
-                let mut t4 = [0u8; 4];
-                BigEndian::write_i32(&mut t4, *months);
-                b.extend_from_slice(&t4);
-                BigEndian::write_i32(&mut t4, *days);
-                b.extend_from_slice(&t4);
-                let mut t8 = [0u8; 8];
-                BigEndian::write_i64(&mut t8, *nanoseconds);
-                b.extend_from_slice(&t8);
+                let mut b = Vec::with_capacity(6);
+                b.extend_from_slice(&encode_vint(*months as i64));
+                b.extend_from_slice(&encode_vint(*days as i64));
+                b.extend_from_slice(&encode_vint(*nanoseconds));
                 b
             }
             CqlValue::List(items) | CqlValue::Set(items) => {
@@ -262,8 +260,134 @@ impl CqlValue {
             }
             CqlType::Empty => Ok(CqlValue::Empty),
             CqlType::Reversed(inner) => Self::deserialize_value(inner, data),
+            // Duration: vint-encoded months, days, nanoseconds.
+            // Java oracle: DurationType / DurationSerializer.
+            CqlType::Duration => {
+                let (months, n1) = decode_vint(data).map_err(|_| CodecError::TooShort {
+                    minimum: 1,
+                    got: data.len(),
+                })?;
+                let (days, n2) =
+                    decode_vint(&data[n1..]).map_err(|_| CodecError::TooShort {
+                        minimum: 1,
+                        got: data.len().saturating_sub(n1),
+                    })?;
+                let (nanoseconds, _) =
+                    decode_vint(&data[n1 + n2..]).map_err(|_| CodecError::TooShort {
+                        minimum: 1,
+                        got: data.len().saturating_sub(n1 + n2),
+                    })?;
+                Ok(CqlValue::Duration {
+                    months: months as i32,
+                    days: days as i32,
+                    nanoseconds,
+                })
+            }
+            // Collections: i32 count followed by length-prefixed elements.
+            // Java oracle: ListType / SetType / MapType serializers.
+            CqlType::List(inner, _) | CqlType::Set(inner, _) => {
+                if data.len() < 4 {
+                    return Err(CodecError::TooShort { minimum: 4, got: data.len() });
+                }
+                let count = BigEndian::read_i32(&data[0..4]) as usize;
+                let mut pos = 4;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (elem, consumed) = read_length_prefixed(data, pos)?;
+                    items.push(Self::deserialize_value(inner, elem)?);
+                    pos += consumed;
+                }
+                if matches!(cql_type, CqlType::List(..)) {
+                    Ok(CqlValue::List(items))
+                } else {
+                    Ok(CqlValue::Set(items))
+                }
+            }
+            CqlType::Map(key_type, value_type, _) => {
+                if data.len() < 4 {
+                    return Err(CodecError::TooShort { minimum: 4, got: data.len() });
+                }
+                let count = BigEndian::read_i32(&data[0..4]) as usize;
+                let mut pos = 4;
+                let mut entries = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let (k_bytes, k_consumed) = read_length_prefixed(data, pos)?;
+                    pos += k_consumed;
+                    let (v_bytes, v_consumed) = read_length_prefixed(data, pos)?;
+                    pos += v_consumed;
+                    let k = Self::deserialize_value(key_type, k_bytes)?;
+                    let v = Self::deserialize_value(value_type, v_bytes)?;
+                    entries.push((k, v));
+                }
+                Ok(CqlValue::Map(entries))
+            }
+            // Tuple: length-prefixed optional fields (no count prefix).
+            // Java oracle: TupleType serializer.
+            CqlType::Tuple(field_types) => {
+                let mut pos = 0;
+                let mut fields = Vec::with_capacity(field_types.len());
+                for field_type in field_types {
+                    let (opt_bytes, consumed) = read_optional_field(data, pos);
+                    pos += consumed;
+                    let value = opt_bytes
+                        .map(|b| Self::deserialize_value(field_type, b))
+                        .transpose()?;
+                    fields.push(value);
+                }
+                Ok(CqlValue::Tuple(fields))
+            }
+            // UDT: same wire format as Tuple (length-prefixed optional fields).
+            // Java oracle: UserType serializer.
+            CqlType::Udt { field_names, field_types, .. } => {
+                let mut pos = 0;
+                let mut fields = Vec::with_capacity(field_names.len());
+                for (name, field_type) in field_names.iter().zip(field_types.iter()) {
+                    let (opt_bytes, consumed) = read_optional_field(data, pos);
+                    pos += consumed;
+                    let value = opt_bytes
+                        .map(|b| Self::deserialize_value(field_type, b))
+                        .transpose()?;
+                    fields.push((name.clone(), value));
+                }
+                Ok(CqlValue::Udt(fields))
+            }
             _ => Err(CodecError::UnsupportedType(cql_type.cql_name())),
         }
+    }
+}
+
+/// Read a length-prefixed element from `data` starting at `pos`.
+/// Returns `(slice, bytes_consumed)` where bytes_consumed includes the 4-byte length prefix.
+/// Negative length is treated as an empty slice.
+fn read_length_prefixed(data: &[u8], pos: usize) -> Result<(&[u8], usize), CodecError> {
+    if pos + 4 > data.len() {
+        return Err(CodecError::TooShort { minimum: pos + 4, got: data.len() });
+    }
+    let len = BigEndian::read_i32(&data[pos..]);
+    if len < 0 {
+        return Ok((&data[0..0], 4));
+    }
+    let len = len as usize;
+    if pos + 4 + len > data.len() {
+        return Err(CodecError::TooShort { minimum: pos + 4 + len, got: data.len() });
+    }
+    Ok((&data[pos + 4..pos + 4 + len], 4 + len))
+}
+
+/// Read an optional length-prefixed field (used in Tuple/UDT).
+/// Returns `(Option<&[u8]>, bytes_consumed)`.
+/// A length of -1 means null/absent.
+fn read_optional_field(data: &[u8], pos: usize) -> (Option<&[u8]>, usize) {
+    if pos + 4 > data.len() {
+        return (None, 0);
+    }
+    let len = BigEndian::read_i32(&data[pos..]);
+    if len < 0 {
+        (None, 4)
+    } else {
+        let len = len as usize;
+        let end = (pos + 4 + len).min(data.len());
+        (Some(&data[pos + 4..end]), 4 + len)
     }
 }
 

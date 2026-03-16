@@ -49,6 +49,10 @@ pub enum Statement {
     Use(UseStatement),
     Truncate(TruncateStatement),
     Batch(BatchStatement),
+    // ── Phase 3 additions ──
+    AlterType(AlterType),
+    AlterMaterializedView(AlterMaterializedView),
+    Describe(DescribeStatement),
 }
 
 impl Statement {
@@ -74,6 +78,8 @@ impl Statement {
                 | Statement::DropAggregate(_)
                 | Statement::CreateTrigger(_)
                 | Statement::DropTrigger(_)
+                | Statement::AlterType(_)
+                | Statement::AlterMaterializedView(_)
         )
     }
 
@@ -418,6 +424,46 @@ pub struct DropType {
     pub keyspace: Option<String>,
     pub name: String,
     pub if_exists: bool,
+}
+
+// ─── ALTER TYPE / ALTER MV / DESCRIBE ──────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterType {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub operation: AlterTypeOp,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AlterTypeOp {
+    AddField(String, CqlTypeName),
+    RenameField(String, String),
+    AlterFieldType(String, CqlTypeName),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlterMaterializedView {
+    pub keyspace: Option<String>,
+    pub name: String,
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DescribeStatement {
+    pub target: DescribeTarget,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DescribeTarget {
+    Cluster,
+    FullSchema,
+    Keyspace(String),
+    Table(Option<String>, String),
+    Type(Option<String>, String),
+    Function(Option<String>, String),
+    Aggregate(Option<String>, String),
+    Generic(String),
 }
 
 // ─── UDF Statements ────────────────────────────────────────────────────

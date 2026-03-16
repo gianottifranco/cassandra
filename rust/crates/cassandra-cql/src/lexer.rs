@@ -209,6 +209,10 @@ pub enum Keyword {
     Cast,
     Vector,
     Masked,
+    Describe,
+    Schema,
+    Cluster,
+    Full,
 }
 
 impl Keyword {
@@ -314,6 +318,10 @@ impl Keyword {
             "CAST" => Some(Keyword::Cast),
             "VECTOR" => Some(Keyword::Vector),
             "MASKED" => Some(Keyword::Masked),
+            "DESCRIBE" => Some(Keyword::Describe),
+            "SCHEMA" => Some(Keyword::Schema),
+            "CLUSTER" => Some(Keyword::Cluster),
+            "FULL" => Some(Keyword::Full),
             _ => None,
         }
     }

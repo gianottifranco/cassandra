@@ -18,6 +18,7 @@ use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions}
 use cassandra_cql::ast::{
     ClusteringOrder as AstClusteringOrder, Literal, SelectColumns, Selector, Term,
 };
+use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::planner::{
     AlterKeyspacePlan, AlterRolePlan, BatchPlan, CreateKeyspacePlan, CreateRolePlan,
     CreateTablePlan, DeletePlan, DropKeyspacePlan, DropRolePlan, DropTablePlan, GrantPlan,
@@ -358,7 +359,12 @@ impl QueryExecutor {
 
         for (i, col_name) in plan.columns.iter().enumerate() {
             let val_bytes = if i < plan.values.len() {
-                term_to_bytes(&plan.values[i])
+                // Use typed binding when the column type is known from schema.
+                if let Some(col_meta) = table_meta.column(col_name) {
+                    typed_term_to_bytes(&plan.values[i], &col_meta.column_type)
+                } else {
+                    term_to_bytes(&plan.values[i])
+                }
             } else {
                 None
             };

@@ -147,6 +147,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Grant) => self.parse_grant(),
             TokenKind::Keyword(Keyword::Revoke) => self.parse_revoke(),
             TokenKind::Keyword(Keyword::List) => self.parse_list(),
+            TokenKind::Keyword(Keyword::Describe) => self.parse_describe(),
             _ => Err(self.error(format!("unexpected token: {}", self.peek_kind()))),
         }
     }
@@ -507,7 +508,62 @@ impl Parser {
                     options,
                 }))
             }
-            _ => Err(self.error("expected KEYSPACE, TABLE, or ROLE after ALTER".into())),
+            TokenKind::Keyword(Keyword::Type) => {
+                self.expect_keyword(Keyword::Type)?;
+                let (ks, name) = self.parse_table_name()?;
+                let operation = if self.eat_keyword(Keyword::Add) {
+                    let field_name = self.expect_ident()?;
+                    let field_type = self.parse_cql_type()?;
+                    AlterTypeOp::AddField(field_name, field_type)
+                } else if self.eat_keyword(Keyword::Rename) {
+                    let from = self.expect_ident()?;
+                    // Expect "TO" as an identifier since it's not a keyword
+                    let to_kw = self.expect_ident()?;
+                    if !to_kw.eq_ignore_ascii_case("to") {
+                        return Err(self.error("expected TO after RENAME field name".into()));
+                    }
+                    let to = self.expect_ident()?;
+                    AlterTypeOp::RenameField(from, to)
+                } else if self.eat_keyword(Keyword::Alter) {
+                    let field_name = self.expect_ident()?;
+                    self.expect_keyword(Keyword::Type)?;
+                    let field_type = self.parse_cql_type()?;
+                    AlterTypeOp::AlterFieldType(field_name, field_type)
+                } else {
+                    return Err(self.error(
+                        "expected ADD, RENAME, or ALTER after ALTER TYPE <name>".into(),
+                    ));
+                };
+                Ok(Statement::AlterType(AlterType {
+                    keyspace: ks,
+                    name,
+                    operation,
+                }))
+            }
+            TokenKind::Keyword(Keyword::Materialized) => {
+                self.expect_keyword(Keyword::Materialized)?;
+                self.expect_keyword(Keyword::View)?;
+                let (ks, name) = self.parse_table_name()?;
+                self.expect_keyword(Keyword::With)?;
+                let mut opts = HashMap::new();
+                loop {
+                    let key = self.expect_ident()?;
+                    self.expect(TokenKind::Eq)?;
+                    let val = self.parse_option_value()?;
+                    opts.insert(key, val);
+                    if !self.eat_keyword(Keyword::And) {
+                        break;
+                    }
+                }
+                Ok(Statement::AlterMaterializedView(AlterMaterializedView {
+                    keyspace: ks,
+                    name,
+                    options: opts,
+                }))
+            }
+            _ => Err(self.error(
+                "expected KEYSPACE, TABLE, ROLE, TYPE, or MATERIALIZED after ALTER".into(),
+            )),
         }
     }
 
@@ -1660,6 +1716,42 @@ impl Parser {
             }
             _ => Err(self.error(format!("expected boolean, got {}", self.peek_kind()))),
         }
+    }
+
+    // ─── DESCRIBE ───────────────────────────────────────────────────────
+
+    fn parse_describe(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Describe)?;
+
+        let target = if self.eat_keyword(Keyword::Cluster) {
+            DescribeTarget::Cluster
+        } else if self.eat_keyword(Keyword::Full) {
+            self.expect_keyword(Keyword::Schema)?;
+            DescribeTarget::FullSchema
+        } else if self.eat_keyword(Keyword::Schema) {
+            DescribeTarget::FullSchema
+        } else if self.eat_keyword(Keyword::Keyspace) {
+            let name = self.expect_ident()?;
+            DescribeTarget::Keyspace(name)
+        } else if self.eat_keyword(Keyword::Table) {
+            let (ks, name) = self.parse_table_name()?;
+            DescribeTarget::Table(ks, name)
+        } else if self.eat_keyword(Keyword::Type) {
+            let (ks, name) = self.parse_table_name()?;
+            DescribeTarget::Type(ks, name)
+        } else if self.eat_keyword(Keyword::Function) {
+            let (ks, name) = self.parse_table_name()?;
+            DescribeTarget::Function(ks, name)
+        } else if self.eat_keyword(Keyword::Aggregate) {
+            let (ks, name) = self.parse_table_name()?;
+            DescribeTarget::Aggregate(ks, name)
+        } else {
+            // Generic: DESCRIBE <name> — could be keyspace, table, etc.
+            let name = self.expect_ident()?;
+            DescribeTarget::Generic(name)
+        };
+
+        Ok(Statement::Describe(DescribeStatement { target }))
     }
 }
 

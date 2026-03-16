@@ -24,3 +24,4 @@ pub mod protocol;
 pub mod query_result;
 pub mod row_order;
 pub mod tombstone;
+pub mod type_system;

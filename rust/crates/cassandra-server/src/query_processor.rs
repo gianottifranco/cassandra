@@ -78,15 +78,10 @@ impl QueryProcessor {
             .prepare_with_keyspace(cql, schema_version, keyspace)
             .map_err(CassandraError::SyntaxError)?;
 
-        // Build bind metadata from bind marker count
-        let bind_specs: Vec<ColumnSpec> = (0..prepared.bind_count)
-            .map(|i| ColumnSpec {
-                ksname: None,
-                tablename: None,
-                name: format!("column{}", i),
-                col_type: ColumnType::Blob, // Unknown type until execution context
-            })
-            .collect();
+        // Build bind metadata: resolve types from schema where possible.
+        // Falls back to Blob for any bind variable whose target column cannot be determined.
+        let bind_specs =
+            self.resolve_bind_specs(&prepared.statement, keyspace, prepared.bind_count);
 
         // Build result metadata by planning and inspecting the result shape
         let result_specs = self.infer_result_metadata(cql, keyspace);
@@ -169,6 +164,82 @@ impl QueryProcessor {
         cql: &str,
     ) -> Result<QueryResult, CassandraError> {
         self.process_query(cql, &QueryParams::default(), Some("system"), None)
+    }
+
+    /// Resolve bind variable types from the schema for a prepared statement.
+    ///
+    /// For INSERT and UPDATE, each bind marker in a column position is typed using
+    /// the column's declared type. Unknown positions fall back to `Blob`.
+    ///
+    /// ## Java Oracle
+    /// `QueryProcessor.buildBindVariables` / `CQL3Type` resolution
+    fn resolve_bind_specs(
+        &self,
+        statement: &cassandra_cql::ast::Statement,
+        keyspace: Option<&str>,
+        bind_count: usize,
+    ) -> Vec<ColumnSpec> {
+        use cassandra_cql::ast::{Statement, Term};
+
+        // Build a position-indexed map: bind_marker_index → ColumnSpec
+        let mut result: Vec<ColumnSpec> = (0..bind_count)
+            .map(|i| ColumnSpec {
+                ksname: None,
+                tablename: None,
+                name: format!("column{}", i),
+                col_type: ColumnType::Blob,
+            })
+            .collect();
+
+        let schema = self.catalog.read().snapshot();
+
+        match statement {
+            Statement::Insert(ins) => {
+                let ks = ins.keyspace.as_deref().or(keyspace).unwrap_or_default();
+                if let Some(table_meta) = schema.table(ks, &ins.table) {
+                    let mut bind_idx = 0usize;
+                    for (col_name, term) in ins.columns.iter().zip(ins.values.iter()) {
+                        if matches!(term, Term::BindMarker(_)) {
+                            if let Some(col) = table_meta.column(col_name) {
+                                if bind_idx < result.len() {
+                                    result[bind_idx] = ColumnSpec {
+                                        ksname: Some(ks.to_string()),
+                                        tablename: Some(ins.table.clone()),
+                                        name: col_name.clone(),
+                                        col_type: ColumnType::from_cql_type(&col.column_type),
+                                    };
+                                }
+                            }
+                            bind_idx += 1;
+                        }
+                    }
+                }
+            }
+            Statement::Update(upd) => {
+                let ks = upd.keyspace.as_deref().or(keyspace).unwrap_or_default();
+                if let Some(table_meta) = schema.table(ks, &upd.table) {
+                    let mut bind_idx = 0usize;
+                    for assign in &upd.assignments {
+                        if matches!(assign.value, Term::BindMarker(_)) {
+                            if let Some(col) = table_meta.column(&assign.column) {
+                                if bind_idx < result.len() {
+                                    result[bind_idx] = ColumnSpec {
+                                        ksname: Some(ks.to_string()),
+                                        tablename: Some(upd.table.clone()),
+                                        name: assign.column.clone(),
+                                        col_type: ColumnType::from_cql_type(&col.column_type),
+                                    };
+                                }
+                            }
+                            bind_idx += 1;
+                        }
+                    }
+                }
+            }
+            _ => {} // SELECT and other statements keep Blob fallback
+        }
+
+        result
     }
 
     /// Infer result column metadata for a query by parsing and planning.

@@ -8,6 +8,7 @@
 
 use crate::ast::*;
 use crate::parser::ParseError;
+use crate::restrictions::RestrictionSet;
 use cassandra_schema::SchemaSnapshot;
 use std::collections::HashMap;
 
@@ -115,6 +116,8 @@ pub struct SelectPlan {
     pub order_by: Vec<(String, ClusteringOrder)>,
     pub limit: Option<Term>,
     pub allow_filtering: bool,
+    /// Validated restrictions (None if table metadata was not available).
+    pub restrictions: Option<RestrictionSet>,
 }
 
 #[derive(Debug, Clone)]
@@ -357,7 +360,31 @@ pub fn plan(
 
         Statement::Select(s) => {
             let ks = resolve_keyspace(s.keyspace.as_deref(), active_keyspace)?;
-            // TODO(phase-3+): Validate columns against table metadata.
+
+            // Validate against table metadata if available.
+            let restrictions = if let Some(table_meta) = schema.table(&ks, &s.table) {
+                // Validate SELECT column names exist in table metadata.
+                if let SelectColumns::Named(ref selectors) = s.columns {
+                    validate_selectors(selectors, table_meta)?;
+                }
+
+                // Validate WHERE clause restrictions.
+                if !s.where_clause.is_empty() {
+                    let restriction_set =
+                        crate::restrictions::statement_restrictions::build(
+                            &s.where_clause,
+                            table_meta,
+                            s.allow_filtering,
+                        )
+                        .map_err(|e| PlanError::InvalidQuery(e.to_string()))?;
+                    Some(restriction_set)
+                } else {
+                    Some(crate::restrictions::RestrictionSet::default())
+                }
+            } else {
+                None
+            };
+
             Ok(QueryPlan::Select(SelectPlan {
                 keyspace: ks,
                 table: s.table.clone(),
@@ -368,11 +395,22 @@ pub fn plan(
                 order_by: s.order_by.clone(),
                 limit: s.limit.clone(),
                 allow_filtering: s.allow_filtering,
+                restrictions,
             }))
         }
 
         Statement::Insert(i) => {
             let ks = resolve_keyspace(i.keyspace.as_deref(), active_keyspace)?;
+
+            // Validate column count matches value count.
+            if !i.columns.is_empty() && i.columns.len() != i.values.len() {
+                return Err(PlanError::InvalidQuery(format!(
+                    "Unmatched column names/values for INSERT: {} columns but {} values",
+                    i.columns.len(),
+                    i.values.len()
+                )));
+            }
+
             Ok(QueryPlan::Insert(InsertPlan {
                 keyspace: ks,
                 table: i.table.clone(),
@@ -465,6 +503,43 @@ pub fn plan(
             "statement type not yet supported by the planner".into(),
         )),
     }
+}
+
+/// Validate that SELECT selectors reference valid columns.
+fn validate_selectors(
+    selectors: &[Selector],
+    table: &cassandra_schema::table::TableMetadata,
+) -> Result<(), PlanError> {
+    for selector in selectors {
+        validate_selector(selector, table)?;
+    }
+    Ok(())
+}
+
+fn validate_selector(
+    selector: &Selector,
+    table: &cassandra_schema::table::TableMetadata,
+) -> Result<(), PlanError> {
+    match selector {
+        Selector::Column(name) => {
+            if table.column(name).is_none() {
+                return Err(PlanError::InvalidQuery(format!(
+                    "Undefined column name '{}'",
+                    name
+                )));
+            }
+        }
+        Selector::Function(_, args) => {
+            for arg in args {
+                validate_selector(arg, table)?;
+            }
+        }
+        Selector::Alias { selector, .. } => {
+            validate_selector(selector, table)?;
+        }
+        Selector::Count | Selector::WritetimeOrTtl(_, _) => {}
+    }
+    Ok(())
 }
 
 fn resolve_keyspace(explicit: Option<&str>, active: Option<&str>) -> Result<String, PlanError> {

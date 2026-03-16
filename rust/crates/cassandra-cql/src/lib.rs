@@ -32,12 +32,16 @@
 //! - Streaming-friendly design for future zero-copy parsing
 
 pub mod ast;
+pub mod conditions;
+pub mod functions;
 pub mod lexer;
 pub mod parser;
 pub mod planner;
 pub mod prepared;
 pub mod query_options;
+pub mod restrictions;
 pub mod result_set;
+pub mod selection;
 pub mod triggers;
 pub mod uda;
 pub mod udf;
