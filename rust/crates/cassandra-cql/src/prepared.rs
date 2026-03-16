@@ -43,6 +43,8 @@ pub struct PreparedCache {
     hits: AtomicU64,
     /// Cache miss counter for metrics.
     misses: AtomicU64,
+    /// Eviction counter for metrics.
+    evictions: AtomicU64,
 }
 
 impl PreparedCache {
@@ -53,6 +55,7 @@ impl PreparedCache {
             schema_version: AtomicU64::new(0),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         }
     }
 
@@ -68,6 +71,16 @@ impl PreparedCache {
 
     /// Prepare a statement: parse, cache, and return the PreparedStatement.
     pub fn prepare(&self, query: &str, schema_version: u64) -> Result<PreparedStatement, String> {
+        self.prepare_with_keyspace(query, schema_version, None)
+    }
+
+    /// Prepare a statement with an optional keyspace context.
+    pub fn prepare_with_keyspace(
+        &self,
+        query: &str,
+        schema_version: u64,
+        keyspace: Option<&str>,
+    ) -> Result<PreparedStatement, String> {
         let id = Self::compute_id(query);
 
         // Check if already cached with current schema version.
@@ -93,11 +106,24 @@ impl PreparedCache {
             schema_version,
             bind_count,
             result_metadata_id: None,
-            keyspace: None,
+            keyspace: keyspace.map(|s| s.to_string()),
         };
 
         self.cache.insert(id, prepared.clone());
         Ok(prepared)
+    }
+
+    /// Prepare multiple statements for a batch.
+    pub fn prepare_batch(
+        &self,
+        queries: &[&str],
+        schema_version: u64,
+        keyspace: Option<&str>,
+    ) -> Result<Vec<PreparedStatement>, String> {
+        queries
+            .iter()
+            .map(|q| self.prepare_with_keyspace(q, schema_version, keyspace))
+            .collect()
     }
 
     /// Look up a prepared statement by its ID.
@@ -112,12 +138,31 @@ impl PreparedCache {
     ///
     /// This is called whenever a DDL statement changes the schema.
     pub fn invalidate_for_schema_change(&self, new_version: u64) {
+        let before = self.cache.len();
         self.schema_version.store(new_version, Ordering::Release);
         self.cache.retain(|_, v| v.schema_version >= new_version);
+        let evicted = before.saturating_sub(self.cache.len());
+        self.evictions.fetch_add(evicted as u64, Ordering::Relaxed);
         tracing::info!(
             new_version,
             remaining = self.cache.len(),
+            evicted,
             "prepared cache invalidated for schema change"
+        );
+    }
+
+    /// Invalidate all entries whose keyspace matches the given keyspace.
+    pub fn invalidate_by_keyspace(&self, keyspace: &str) {
+        let before = self.cache.len();
+        self.cache
+            .retain(|_, v| v.keyspace.as_deref() != Some(keyspace));
+        let evicted = before.saturating_sub(self.cache.len());
+        self.evictions.fetch_add(evicted as u64, Ordering::Relaxed);
+        tracing::info!(
+            keyspace,
+            evicted,
+            remaining = self.cache.len(),
+            "prepared cache invalidated for keyspace"
         );
     }
 
@@ -144,6 +189,11 @@ impl PreparedCache {
     /// Get cache miss count.
     pub fn miss_count(&self) -> u64 {
         self.misses.load(Ordering::Relaxed)
+    }
+
+    /// Get eviction count.
+    pub fn eviction_count(&self) -> u64 {
+        self.evictions.load(Ordering::Relaxed)
     }
 }
 
@@ -332,5 +382,58 @@ mod tests {
         let p = cache.prepare("SELECT * FROM t1", 5).unwrap();
         assert_eq!(p.schema_version, 5);
         assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn prepare_with_keyspace() {
+        let cache = PreparedCache::new();
+        let p = cache
+            .prepare_with_keyspace("SELECT * FROM t1", 1, Some("my_ks"))
+            .unwrap();
+        assert_eq!(p.keyspace, Some("my_ks".to_string()));
+    }
+
+    #[test]
+    fn prepare_batch_multiple() {
+        let cache = PreparedCache::new();
+        let stmts = cache
+            .prepare_batch(
+                &["SELECT * FROM t1", "INSERT INTO t2 (a) VALUES (?)"],
+                1,
+                Some("ks"),
+            )
+            .unwrap();
+        assert_eq!(stmts.len(), 2);
+        assert_eq!(stmts[0].bind_count, 0);
+        assert_eq!(stmts[1].bind_count, 1);
+    }
+
+    #[test]
+    fn invalidate_by_keyspace() {
+        let cache = PreparedCache::new();
+        cache
+            .prepare_with_keyspace("SELECT * FROM t1", 1, Some("ks1"))
+            .unwrap();
+        cache
+            .prepare_with_keyspace("SELECT * FROM t2", 1, Some("ks2"))
+            .unwrap();
+        cache
+            .prepare_with_keyspace("SELECT * FROM t3", 1, Some("ks1"))
+            .unwrap();
+        assert_eq!(cache.len(), 3);
+
+        cache.invalidate_by_keyspace("ks1");
+        assert_eq!(cache.len(), 1); // Only ks2 entry remains.
+    }
+
+    #[test]
+    fn eviction_counter() {
+        let cache = PreparedCache::new();
+        cache.prepare("SELECT * FROM t1", 1).unwrap();
+        cache.prepare("SELECT * FROM t2", 1).unwrap();
+        assert_eq!(cache.eviction_count(), 0);
+
+        cache.invalidate_for_schema_change(5);
+        assert_eq!(cache.eviction_count(), 2);
     }
 }

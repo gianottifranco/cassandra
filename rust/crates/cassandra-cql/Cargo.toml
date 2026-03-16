@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
+cassandra-native-protocol = { path = "../cassandra-native-protocol" }
 cassandra-types = { path = "../cassandra-types" }
 cassandra-schema = { path = "../cassandra-schema" }
 tracing = { workspace = true }
@@ -16,6 +17,7 @@ md-5 = { workspace = true }
 dashmap = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

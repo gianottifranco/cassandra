@@ -22,8 +22,11 @@ use cassandra_security::fql::{FqlLogger, FqlRecord};
 use cassandra_security::tls::ReloadableTlsAcceptor;
 use tokio_util::codec::{Decoder, Encoder};
 
+use cassandra_cql::prepared::PreparedCache;
+
 use crate::client_state::ClientState;
 use crate::executor::{QueryExecutor, QueryResult};
+use crate::query_processor::QueryProcessor;
 use crate::resource_limits::ResourceLimits;
 use crate::shutdown::ShutdownCoordinator;
 use crate::transport_metrics::TransportMetrics;
@@ -36,6 +39,8 @@ pub struct ServerConfig {
 pub struct NativeServer {
     config: ServerConfig,
     executor: Arc<QueryExecutor>,
+    query_processor: Arc<QueryProcessor>,
+    prepared_cache: Arc<PreparedCache>,
     authenticator: Arc<dyn NativeAuthenticator>,
     tls_acceptor: Option<ReloadableTlsAcceptor>,
     fql_logger: Arc<FqlLogger>,
@@ -57,9 +62,18 @@ impl NativeServer {
         metrics: Arc<TransportMetrics>,
         shutdown: Arc<ShutdownCoordinator>,
     ) -> Self {
+        let prepared_cache = Arc::new(PreparedCache::new());
+        let catalog = executor.catalog();
+        let query_processor = Arc::new(QueryProcessor::new(
+            Arc::clone(&executor),
+            Arc::clone(&prepared_cache),
+            catalog,
+        ));
         Self {
             config,
             executor,
+            query_processor,
+            prepared_cache,
             authenticator,
             tls_acceptor,
             fql_logger,
@@ -229,48 +243,22 @@ impl NativeServer {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_micros() as i64,
-                        consistency_level: 1, // mapping ONE for now
+                        consistency_level: 1,
                         query: cql.clone(),
-                        bind_values: vec![], // No bind values in simple Query
+                        bind_values: vec![],
                     };
                     if let Err(e) = self.fql_logger.log_query(&record) {
                         tracing::warn!("Failed to append to FQL log: {}", e);
                     }
                 }
 
-                // Parse the CQL
-                let stmt = match cassandra_cql::parser::parse(&cql) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        return Ok(Some(response::error_frame(
-                            version,
-                            stream_id,
-                            0x2000,
-                            &e.to_string(), // SYNTAX_ERROR
-                        )));
-                    }
-                };
-
-                let schema_catalog = self.executor.catalog();
-                let schema = schema_catalog.read().snapshot();
-
-                let plan =
-                    match cassandra_cql::planner::plan(&stmt, &schema, ctx.keyspace.as_deref()) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            return Ok(Some(response::error_frame(
-                                version,
-                                stream_id,
-                                0x2200,
-                                &e.to_string(), // INVALID
-                            )));
-                        }
-                    };
-
-                // Execute the query
-                let result = self
-                    .executor
-                    .execute(&plan, ctx.authenticated_user.as_deref());
+                // Execute via QueryProcessor
+                let result = self.query_processor.process_query(
+                    &cql,
+                    &q.params,
+                    ctx.authenticated_user.as_deref(),
+                    ctx.keyspace.as_deref(),
+                );
 
                 // 2. Audit Logging
                 if self.audit_logger.is_enabled() {
@@ -288,65 +276,61 @@ impl NativeServer {
                 }
 
                 match result {
-                    Ok(QueryResult::Void) => Ok(Some(response::encode_response(
-                        &Message::Result(cassandra_native_protocol::message::ResultMessage::Void),
+                    Ok(qr) => Ok(Some(self.encode_query_result(
+                        qr,
+                        ctx,
+                        client_state,
                         version,
                         stream_id,
                     ))),
-                    Ok(QueryResult::SetKeyspace(ks)) => {
-                        ctx.keyspace = Some(ks.clone());
-                        client_state.set_keyspace(ks.clone());
-                        Ok(Some(response::encode_response(
-                            &Message::Result(
-                                cassandra_native_protocol::message::ResultMessage::SetKeyspace(ks),
-                            ),
-                            version,
-                            stream_id,
-                        )))
-                    }
-                    Ok(QueryResult::SchemaChange {
-                        change_type,
-                        target,
-                        keyspace,
-                        name,
-                    }) => {
-                        Ok(Some(response::encode_response(
-                            &Message::Result(
-                                cassandra_native_protocol::message::ResultMessage::SchemaChange(
-                                    cassandra_native_protocol::message::SchemaChange {
-                                        change_type,
-                                        target,
-                                        keyspace,
-                                        name,
-                                        arg_types: None,
-                                    },
-                                ),
-                            ),
-                            version,
-                            stream_id,
-                        )))
-                    }
-                    Ok(QueryResult::Rows {
-                        columns: _,
-                        rows: _,
-                    }) => {
-                        // TODO: Map to actual Row results
-                        Ok(Some(response::encode_response(
-                            &Message::Result(
-                                cassandra_native_protocol::message::ResultMessage::Void,
-                            ),
-                            version,
-                            stream_id,
-                        )))
-                    }
-                    Err(e) => {
-                        Ok(Some(response::error_frame(
-                            version,
-                            stream_id,
-                            0x2200,
-                            &e.to_string(), // INVALID
-                        )))
-                    }
+                    Err(e) => Ok(Some(self.cassandra_error_to_frame(e, version, stream_id))),
+                }
+            }
+            Message::Prepare(p) => {
+                let keyspace = p.keyspace.or_else(|| ctx.keyspace.clone());
+                match self
+                    .query_processor
+                    .process_prepare(&p.query, keyspace.as_deref())
+                {
+                    Ok(prepared_result) => Ok(Some(response::encode_response(
+                        &Message::Result(ResultMessage::Prepared(prepared_result)),
+                        version,
+                        stream_id,
+                    ))),
+                    Err(e) => Ok(Some(self.cassandra_error_to_frame(e, version, stream_id))),
+                }
+            }
+            Message::Execute(e) => {
+                match self.query_processor.process_execute(
+                    &e.id,
+                    &e.params,
+                    ctx.authenticated_user.as_deref(),
+                    ctx.keyspace.as_deref(),
+                ) {
+                    Ok(qr) => Ok(Some(self.encode_query_result(
+                        qr,
+                        ctx,
+                        client_state,
+                        version,
+                        stream_id,
+                    ))),
+                    Err(err) => Ok(Some(self.cassandra_error_to_frame(err, version, stream_id))),
+                }
+            }
+            Message::Batch(b) => {
+                match self.query_processor.process_batch(
+                    &b,
+                    ctx.authenticated_user.as_deref(),
+                    ctx.keyspace.as_deref(),
+                ) {
+                    Ok(qr) => Ok(Some(self.encode_query_result(
+                        qr,
+                        ctx,
+                        client_state,
+                        version,
+                        stream_id,
+                    ))),
+                    Err(err) => Ok(Some(self.cassandra_error_to_frame(err, version, stream_id))),
                 }
             }
             _ => Ok(Some(response::error_frame(
@@ -356,6 +340,121 @@ impl NativeServer {
                 "Message not supported in this state",
             ))),
         }
+    }
+
+    /// Encode a `QueryResult` into a protocol response frame.
+    fn encode_query_result(
+        &self,
+        result: QueryResult,
+        ctx: &mut ConnectionContext,
+        client_state: &mut ClientState,
+        version: u8,
+        stream_id: i16,
+    ) -> Frame {
+        use cassandra_native_protocol::message::*;
+        use cassandra_native_protocol::response;
+
+        match result {
+            QueryResult::Void => response::encode_response(
+                &Message::Result(ResultMessage::Void),
+                version,
+                stream_id,
+            ),
+            QueryResult::SetKeyspace(ks) => {
+                ctx.keyspace = Some(ks.clone());
+                client_state.set_keyspace(ks.clone());
+                response::encode_response(
+                    &Message::Result(ResultMessage::SetKeyspace(ks)),
+                    version,
+                    stream_id,
+                )
+            }
+            QueryResult::SchemaChange {
+                change_type,
+                target,
+                keyspace,
+                name,
+            } => response::encode_response(
+                &Message::Result(ResultMessage::SchemaChange(SchemaChange {
+                    change_type,
+                    target,
+                    keyspace,
+                    name,
+                    arg_types: None,
+                })),
+                version,
+                stream_id,
+            ),
+            QueryResult::Rows { columns, rows } => {
+                // Convert ResultColumn → ColumnSpec
+                let col_specs: Vec<ColumnSpec> = columns
+                    .iter()
+                    .map(|rc| ColumnSpec {
+                        ksname: Some(rc.keyspace.clone()),
+                        tablename: Some(rc.table.clone()),
+                        name: rc.name.clone(),
+                        col_type: ColumnType::from_cql_type(&rc.cql_type),
+                    })
+                    .collect();
+
+                // Detect global table spec optimization
+                let global_spec = if !col_specs.is_empty() {
+                    let first_ks = col_specs[0].ksname.as_deref();
+                    let first_tbl = col_specs[0].tablename.as_deref();
+                    if col_specs.iter().all(|s| {
+                        s.ksname.as_deref() == first_ks && s.tablename.as_deref() == first_tbl
+                    }) {
+                        first_ks.and_then(|ks| {
+                            first_tbl.map(|tbl| (ks.to_string(), tbl.to_string()))
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                let mut flags = 0i32;
+                if global_spec.is_some() {
+                    flags |= rows_flags::GLOBAL_TABLES_SPEC;
+                }
+
+                let metadata = RowsMetadata {
+                    flags,
+                    columns_count: col_specs.len() as i32,
+                    paging_state: None,
+                    new_metadata_id: None,
+                    global_table_spec: global_spec,
+                    col_specs,
+                };
+
+                let rows_count = rows.len() as i32;
+                response::encode_response(
+                    &Message::Result(ResultMessage::Rows(RowsResult {
+                        metadata,
+                        rows_count,
+                        rows,
+                    })),
+                    version,
+                    stream_id,
+                )
+            }
+        }
+    }
+
+    /// Convert a `CassandraError` to a protocol error frame with proper error code.
+    fn cassandra_error_to_frame(
+        &self,
+        err: cassandra_common::CassandraError,
+        version: u8,
+        stream_id: i16,
+    ) -> Frame {
+        use cassandra_native_protocol::error_codes;
+        use cassandra_native_protocol::message::Message;
+        use cassandra_native_protocol::response;
+
+        let error_msg = error_codes::error_to_message(&err);
+        response::encode_response(&Message::Error(error_msg), version, stream_id)
     }
 }
 

@@ -321,6 +321,7 @@ name = "cassandra-cql"
 version = "0.1.0"
 dependencies = [
  "cassandra-common",
+ "cassandra-native-protocol",
  "cassandra-schema",
  "cassandra-types",
  "dashmap",
@@ -330,6 +331,7 @@ dependencies = [
  "proptest",
  "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -494,6 +496,7 @@ dependencies = [
  "cassandra-storage",
  "cassandra-types",
  "dashmap",
+ "md-5",
  "parking_lot",
  "serde",
  "serde_json",
@@ -504,6 +507,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
