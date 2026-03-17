@@ -24,9 +24,13 @@ use tracing::{debug, info, warn};
 use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
 use cassandra_messaging::{Message, MessageHandler, MessagingService, Verb};
 
+use cassandra_schema::table::TransactionalMode;
+
 use crate::batch::BatchLogManager;
+use crate::consensus::ConsensusRouter;
 use crate::consistency::ConsistencyLevel;
 use crate::hints::HintStore;
+use crate::paxos::coordinator::CasResult;
 use crate::read::{
     CoordinatedRead, ReadCoordinator, ReadError, ReadResult, SinglePartitionReadCommand,
 };
@@ -88,6 +92,8 @@ pub struct StorageProxy {
     hint_store: Arc<HintStore>,
     /// Batch log manager for logged batches.
     batch_log: Arc<BatchLogManager>,
+    /// Consensus router for CAS/LWT operations.
+    consensus_router: Option<Arc<ConsensusRouter>>,
     /// Configuration.
     config: StorageProxyConfig,
 }
@@ -108,8 +114,19 @@ impl StorageProxy {
             messaging,
             hint_store,
             batch_log,
+            consensus_router: None,
             config,
         }
+    }
+
+    /// Set the consensus router for CAS operations.
+    pub fn set_consensus_router(&mut self, router: Arc<ConsensusRouter>) {
+        self.consensus_router = Some(router);
+    }
+
+    /// Access the consensus router (if configured).
+    pub fn consensus_router(&self) -> Option<&Arc<ConsensusRouter>> {
+        self.consensus_router.as_ref()
     }
 
     /// Access the write coordinator.
@@ -290,6 +307,107 @@ impl StorageProxy {
         //   5. Send Verb::ReadRepair mutations for stale replicas
 
         Ok(result)
+    }
+
+    // ─── CAS / LWT ──────────────────────────────────────────────────
+
+    /// Execute a Compare-And-Set (CAS) operation.
+    ///
+    /// Resolves the `TransactionalMode` from the table metadata and delegates
+    /// to the `ConsensusRouter`.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.cas()`
+    #[allow(clippy::too_many_arguments)]
+    pub async fn cas<R, F1, F2>(
+        &self,
+        keyspace: &str,
+        table: &str,
+        mode: TransactionalMode,
+        partition_key: &[u8],
+        mutation: Vec<u8>,
+        read_current_fn: F1,
+        condition_fn: F2,
+    ) -> Result<CasResult, Box<dyn std::error::Error + Send + Sync>>
+    where
+        R: std::future::Future<Output = Option<Vec<u8>>> + Send + 'static,
+        F1: Fn() -> R + Send + Sync,
+        F2: Fn(Option<&[u8]>) -> bool + Send + Sync,
+    {
+        let router = self.consensus_router.as_ref().ok_or(
+            "Consensus router not configured — CAS operations unavailable",
+        )?;
+
+        debug!(
+            keyspace,
+            table,
+            mode = ?mode,
+            "StorageProxy.cas"
+        );
+
+        router
+            .execute_cas(
+                keyspace,
+                table,
+                mode,
+                partition_key,
+                mutation,
+                read_current_fn,
+                condition_fn,
+            )
+            .await
+    }
+
+    /// Execute a CAS operation explicitly via Paxos.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.casPaxos()`
+    #[allow(clippy::too_many_arguments)]
+    pub async fn cas_paxos<R, F1, F2>(
+        &self,
+        keyspace: &str,
+        table: &str,
+        partition_key: &[u8],
+        mutation: Vec<u8>,
+        read_current_fn: F1,
+        condition_fn: F2,
+    ) -> Result<CasResult, Box<dyn std::error::Error + Send + Sync>>
+    where
+        R: std::future::Future<Output = Option<Vec<u8>>> + Send + 'static,
+        F1: Fn() -> R + Send + Sync,
+        F2: Fn(Option<&[u8]>) -> bool + Send + Sync,
+    {
+        self.cas(
+            keyspace,
+            table,
+            TransactionalMode::Paxos,
+            partition_key,
+            mutation,
+            read_current_fn,
+            condition_fn,
+        )
+        .await
+    }
+
+    /// Execute a CAS operation explicitly via Accord.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.casAccord()`
+    pub async fn cas_accord(
+        &self,
+        keyspace: &str,
+        mutations: Vec<Vec<u8>>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let router = self.consensus_router.as_ref().ok_or(
+            "Consensus router not configured — CAS operations unavailable",
+        )?;
+
+        debug!(keyspace, "StorageProxy.cas_accord");
+
+        router.execute_accord_transaction(keyspace, mutations).await
     }
 
     /// Whether this node is currently bootstrapping.

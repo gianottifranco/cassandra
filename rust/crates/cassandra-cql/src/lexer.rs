@@ -213,6 +213,11 @@ pub enum Keyword {
     Schema,
     Cluster,
     Full,
+    // Phase 12-13: Transaction keywords
+    Transaction,
+    Let,
+    Returning,
+    Commit,
 }
 
 impl Keyword {
@@ -322,6 +327,11 @@ impl Keyword {
             "SCHEMA" => Some(Keyword::Schema),
             "CLUSTER" => Some(Keyword::Cluster),
             "FULL" => Some(Keyword::Full),
+            // Phase 12-13: Transaction keywords
+            "TRANSACTION" => Some(Keyword::Transaction),
+            "LET" => Some(Keyword::Let),
+            "RETURNING" => Some(Keyword::Returning),
+            "COMMIT" => Some(Keyword::Commit),
             _ => None,
         }
     }

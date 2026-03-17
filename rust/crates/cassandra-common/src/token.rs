@@ -118,7 +118,9 @@ impl fmt::Display for Token {
 /// A contiguous range of tokens `(start, end]` on the ring.
 ///
 /// If `start >= end`, the range wraps around the ring.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub struct TokenRange {
     pub start: Token,
     pub end: Token,

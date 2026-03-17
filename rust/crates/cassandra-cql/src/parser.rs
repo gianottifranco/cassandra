@@ -143,7 +143,17 @@ impl Parser {
             TokenKind::Keyword(Keyword::Drop) => self.parse_drop(),
             TokenKind::Keyword(Keyword::Use) => self.parse_use(),
             TokenKind::Keyword(Keyword::Truncate) => self.parse_truncate(),
-            TokenKind::Keyword(Keyword::Begin) => self.parse_batch(),
+            TokenKind::Keyword(Keyword::Begin) => {
+                // Peek ahead: BEGIN TRANSACTION or BEGIN [UNLOGGED|COUNTER] BATCH
+                let save = self.pos;
+                self.advance(); // consume BEGIN
+                if self.eat_keyword(Keyword::Transaction) {
+                    self.parse_transaction_body()
+                } else {
+                    self.pos = save; // restore
+                    self.parse_batch()
+                }
+            }
             TokenKind::Keyword(Keyword::Grant) => self.parse_grant(),
             TokenKind::Keyword(Keyword::Revoke) => self.parse_revoke(),
             TokenKind::Keyword(Keyword::List) => self.parse_list(),
@@ -926,6 +936,70 @@ impl Parser {
     }
 
     // ─── BATCH ──────────────────────────────────────────────────────────
+
+    /// Parse the body of a BEGIN TRANSACTION ... COMMIT TRANSACTION statement.
+    fn parse_transaction_body(&mut self) -> Result<Statement, ParseError> {
+        let mut let_bindings = Vec::new();
+        let mut statements = Vec::new();
+
+        // Parse LET bindings and DML statements until COMMIT
+        loop {
+            if self.eat_keyword(Keyword::Commit) {
+                self.expect_keyword(Keyword::Transaction)?;
+                break;
+            }
+
+            if self.eat_keyword(Keyword::Let) {
+                // LET <name> = (<select>)
+                let name = self.expect_ident()?;
+                self.expect(TokenKind::Eq)?;
+                self.expect(TokenKind::LParen)?;
+                // Parse the inner SELECT
+                let select_stmt = self.parse_select()?;
+                let select = match select_stmt {
+                    Statement::Select(s) => s,
+                    _ => return Err(self.error("LET binding must contain a SELECT".to_string())),
+                };
+                self.expect(TokenKind::RParen)?;
+                self.eat_if(TokenKind::Semicolon);
+                let_bindings.push(LetBinding { name, select });
+            } else {
+                // Parse a DML statement (INSERT, UPDATE, DELETE)
+                let stmt = self.parse_statement()?;
+                match &stmt {
+                    Statement::Insert(_) | Statement::Update(_) | Statement::Delete(_) => {}
+                    _ => {
+                        return Err(self.error(
+                            "Only INSERT, UPDATE, DELETE allowed in transactions".to_string(),
+                        ))
+                    }
+                }
+                self.eat_if(TokenKind::Semicolon);
+                statements.push(stmt);
+            }
+        }
+
+        // Optional RETURNING clause
+        let returning = if self.eat_keyword(Keyword::Returning) {
+            let mut columns = Vec::new();
+            loop {
+                let sel = self.parse_selector()?;
+                columns.push(sel);
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+            Some(ReturningClause { columns })
+        } else {
+            None
+        };
+
+        Ok(Statement::Transaction(TransactionStatement {
+            let_bindings,
+            statements,
+            returning,
+        }))
+    }
 
     fn parse_batch(&mut self) -> Result<Statement, ParseError> {
         self.expect_keyword(Keyword::Begin)?;
@@ -1812,6 +1886,10 @@ fn is_unreserved_keyword(kw: Keyword) -> bool {
             | Keyword::All
             | Keyword::Cast
             | Keyword::Vector
+            | Keyword::Transaction
+            | Keyword::Let
+            | Keyword::Returning
+            | Keyword::Commit
     )
 }
 
@@ -2195,5 +2273,73 @@ mod tests {
     fn parse_drop_materialized_view() {
         let stmt = parse("DROP MATERIALIZED VIEW IF EXISTS ks.my_view").unwrap();
         assert!(matches!(stmt, Statement::DropMaterializedView(_)));
+    }
+
+    #[test]
+    fn parse_transaction_statement() {
+        let cql = r#"
+            BEGIN TRANSACTION
+                LET row1 = (SELECT * FROM ks.t WHERE id = 1);
+                INSERT INTO ks.t (id, v) VALUES (2, 'hello');
+            COMMIT TRANSACTION
+        "#;
+        let stmt = parse(cql).unwrap();
+        match stmt {
+            Statement::Transaction(t) => {
+                assert_eq!(t.let_bindings.len(), 1);
+                assert_eq!(t.let_bindings[0].name, "row1");
+                assert_eq!(t.statements.len(), 1);
+                assert!(t.returning.is_none());
+            }
+            _ => panic!("Expected Transaction"),
+        }
+    }
+
+    #[test]
+    fn parse_transaction_with_returning() {
+        let cql = r#"
+            BEGIN TRANSACTION
+                LET r = (SELECT v FROM ks.t WHERE id = 1);
+                UPDATE ks.t SET v = 10 WHERE id = 1;
+            COMMIT TRANSACTION
+            RETURNING v
+        "#;
+        let stmt = parse(cql).unwrap();
+        match stmt {
+            Statement::Transaction(t) => {
+                assert_eq!(t.let_bindings.len(), 1);
+                assert_eq!(t.statements.len(), 1);
+                assert!(t.returning.is_some());
+                let ret = t.returning.unwrap();
+                assert_eq!(ret.columns.len(), 1);
+            }
+            _ => panic!("Expected Transaction"),
+        }
+    }
+
+    #[test]
+    fn parse_transaction_no_let() {
+        let cql = r#"
+            BEGIN TRANSACTION
+                INSERT INTO ks.t (id, v) VALUES (1, 'a');
+                DELETE FROM ks.t WHERE id = 2;
+            COMMIT TRANSACTION
+        "#;
+        let stmt = parse(cql).unwrap();
+        match stmt {
+            Statement::Transaction(t) => {
+                assert!(t.let_bindings.is_empty());
+                assert_eq!(t.statements.len(), 2);
+                assert!(t.returning.is_none());
+            }
+            _ => panic!("Expected Transaction"),
+        }
+    }
+
+    #[test]
+    fn parse_batch_still_works() {
+        let cql = "BEGIN BATCH INSERT INTO t (id) VALUES (1); APPLY BATCH";
+        let stmt = parse(cql).unwrap();
+        assert!(matches!(stmt, Statement::Batch(_)));
     }
 }

@@ -77,6 +77,12 @@ pub struct PaxosStorage {
     engine: Arc<StorageEngine>,
 }
 
+impl std::fmt::Debug for PaxosStorage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PaxosStorage").finish()
+    }
+}
+
 impl PaxosStorage {
     pub fn new(engine: Arc<StorageEngine>) -> Self {
         Self { engine }
@@ -337,6 +343,26 @@ impl PaxosStorage {
 
         self.engine.apply_mutation(&mutation)
     }
+    /// Scan for all uncommitted Paxos state for recovery on startup.
+    /// Takes a set of known partition keys (from commit log replay or tracking)
+    /// and checks each for uncommitted proposals.
+    ///
+    /// ## Java Oracle
+    /// `org.apache.cassandra.service.paxos.uncommitted.PaxosUncommittedTracker`
+    pub fn load_all_uncommitted(
+        &self,
+        known_keys: &[Vec<u8>],
+        cf_id: Uuid,
+    ) -> Vec<(Vec<u8>, PaxosState)> {
+        let mut uncommitted = Vec::new();
+        for key in known_keys {
+            let state = self.load_state(key, cf_id);
+            if state.has_in_progress() {
+                uncommitted.push((key.clone(), state));
+            }
+        }
+        uncommitted
+    }
 }
 
 #[cfg(test)]
@@ -399,5 +425,47 @@ mod tests {
         assert!(state4.promised.is_none());
         assert!(state4.committed.is_some());
         assert_eq!(state4.committed.unwrap().mutation, b"INSERT data");
+    }
+
+    #[test]
+    fn test_load_all_uncommitted() {
+        let dir = TempDir::new().unwrap();
+        let config = EngineConfig {
+            data_directories: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+        let engine = Arc::new(StorageEngine::open(config).unwrap());
+        let storage = PaxosStorage::new(engine);
+
+        let cf_id = Uuid::new_v4();
+        let pk1 = b"uncommitted_key".to_vec();
+        let pk2 = b"committed_key".to_vec();
+        let pk3 = b"empty_key".to_vec();
+
+        // pk1: promise + proposal (uncommitted)
+        let ballot1 = Ballot::with_timestamp(100, Uuid::new_v4());
+        storage.save_promise(&pk1, cf_id, ballot1).unwrap();
+        let proposal1 = Proposal {
+            ballot: ballot1,
+            mutation: b"uncommitted data".to_vec(),
+        };
+        storage.save_proposal(&pk1, cf_id, &proposal1).unwrap();
+
+        // pk2: promise + proposal + commit (committed)
+        let ballot2 = Ballot::with_timestamp(200, Uuid::new_v4());
+        storage.save_promise(&pk2, cf_id, ballot2).unwrap();
+        let proposal2 = Proposal {
+            ballot: ballot2,
+            mutation: b"committed data".to_vec(),
+        };
+        storage.save_proposal(&pk2, cf_id, &proposal2).unwrap();
+        storage.save_commit(&pk2, cf_id, &proposal2).unwrap();
+
+        let keys = vec![pk1.clone(), pk2.clone(), pk3.clone()];
+        let uncommitted = storage.load_all_uncommitted(&keys, cf_id);
+
+        assert_eq!(uncommitted.len(), 1);
+        assert_eq!(uncommitted[0].0, pk1);
+        assert!(uncommitted[0].1.has_in_progress());
     }
 }

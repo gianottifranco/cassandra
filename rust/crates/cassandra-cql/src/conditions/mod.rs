@@ -6,5 +6,7 @@
 //! - `org.apache.cassandra.cql3.conditions.ColumnCondition`
 
 pub mod evaluator;
+pub mod statement;
 
 pub use evaluator::{ConditionEvaluator, ConditionResult};
+pub use statement::{ConditionStatement, VariableCondition};

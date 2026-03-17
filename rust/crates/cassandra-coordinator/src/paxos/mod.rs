@@ -40,14 +40,21 @@
 //! - [`coordinator`] — CAS coordinator orchestrating the full round
 
 pub mod ballot;
+pub mod cleanup;
+pub mod contention;
 pub mod coordinator;
 pub mod messages;
+pub mod repair;
 pub mod state;
 pub mod storage;
 
 pub use ballot::Ballot;
+pub use cleanup::PaxosCleanup;
+pub use contention::{ConstantBackoff, ContentionStrategy, ExponentialBackoff};
 pub use coordinator::{
     CasResult, PaxosConfig, PaxosCoordinator, PaxosCoordinatorError, PaxosReplica,
 };
 pub use messages::{PaxosAccept, PaxosCommit, PaxosPrepare, PaxosPromise, PaxosPropose};
+pub use repair::PaxosRepair;
 pub use state::{PaxosState, Proposal};
+pub use storage::PaxosStorage;

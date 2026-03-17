@@ -13,6 +13,22 @@ The phases are:
 
 State is persisted locally in the `system.paxos` table to ensure node restarts do not lose accepted proposals.
 
+### Paxos Persistence & Recovery
+
+`PaxosStorage` provides persistence to `system.paxos` with methods: `save_promise`, `save_proposal`, `save_commit`, `load_state`, and `load_all_uncommitted`. On startup, `PaxosReplica::recover()` scans for accepted-but-not-committed proposals and loads them into memory.
+
+### Paxos Repair
+
+`PaxosRepair` scans `system.paxos` for uncommitted proposals and drives them to completion via the coordinator. This runs during anti-entropy repair and on node startup.
+
+### Contention Strategy
+
+`ContentionStrategy` trait with `ExponentialBackoff` and `ConstantBackoff` implementations provides pluggable backoff behavior for CAS retries under contention.
+
+### Paxos Cleanup
+
+`PaxosCleanup` periodically removes committed Paxos state older than `gc_grace_seconds`, preventing unbounded growth of the `system.paxos` table.
+
 ## Shared Counters
 Shared counters (distributed G-Counters / state-based CRDTs) are coordinated using a read-before-write process.
 When a `CounterMutation` is sent to a coordinator:
@@ -23,8 +39,45 @@ When a `CounterMutation` is sent to a coordinator:
 
 Periodically (or via repair), replicas run a consolidation process to fold non-local shards into their local shard to prevent infinite shard vector growth.
 
-## Accord & Consensus Migration
-As per Cassandra 5.0 and beyond, Accord provides true multi-partition strictly serializable transactions.
-The Rust implementation provides the `cassandra-accord` crate which mirrors `org.apache.cassandra.service.accord`.
-A routing layer (the `consensus::Router`) dispatches CAS and transaction operations between classical Paxos and Accord.
-This dispatch is determined by the `TransactionalMode` (Off, Paxos, Accord, Mixed) defined in `TableMetadata`.
+## Accord Distributed Transactions
+
+The `cassandra-accord` crate implements the Accord consensus protocol for multi-partition transactions:
+
+- **Core Types**: `TxnId`, `Timestamp`, `Keys`, `Txn`, `CommandStatus`
+- **CommandStore**: In-memory DashMap tracking transaction status (PreAccepted -> Accepted -> Committed -> Applied)
+- **AccordJournal**: Write-ahead journal for crash recovery
+- **AccordExecutor**: Executes committed transactions
+- **AccordTopology**: Maps Cassandra node UUIDs to Accord integer IDs
+
+### 4-Phase Protocol
+1. **PreAccept** — Register transaction with initial timestamp
+2. **Accept** — Conflict resolution and execution timestamp agreement
+3. **Commit** — Durable decision
+4. **Apply** — Execute mutation
+
+## Consensus Migration (Paxos -> Accord)
+
+The `ConsensusRouter` dispatches CAS and transaction operations between Paxos and Accord based on `TransactionalMode` (Off, Paxos, Accord, Mixed).
+
+In Mixed mode, the router performs per-key migration-aware routing:
+- Keys in `Paxos` or `Migrating` state route to Paxos (safe default)
+- Keys in `Accord` state route to Accord
+- `TableMigrationState` tracks per-table migration progress
+
+`ConsensusMetrics` provides observability into routing decisions.
+
+## CQL Transaction Statement
+
+`BEGIN TRANSACTION ... COMMIT TRANSACTION` syntax supports:
+- `LET` bindings for read-phase SELECT queries
+- DML statements (INSERT, UPDATE, DELETE) for the write phase
+- Optional `RETURNING` clause for result projection
+
+`ConditionStatement` supports Accord-style multi-partition IF conditions with variable references from LET bindings.
+
+## StorageProxy CAS Entry Points
+
+`StorageProxy` provides:
+- `cas()` — Routes via TransactionalMode
+- `cas_paxos()` — Direct Paxos CAS
+- `cas_accord()` — Direct Accord transaction execution

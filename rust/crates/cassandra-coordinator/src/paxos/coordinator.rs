@@ -55,6 +55,7 @@ use uuid::Uuid;
 use super::ballot::Ballot;
 use super::messages::*;
 use super::state::{PaxosState, Proposal};
+use super::storage::PaxosStorage;
 
 /// Default maximum number of Paxos retries under contention.
 const DEFAULT_MAX_CONTENTION_RETRIES: u32 = 4;
@@ -134,15 +135,43 @@ pub struct PaxosReplica {
     states: DashMap<Vec<u8>, PaxosState>,
     /// This replica's node id.
     pub node_id: Uuid,
+    /// Optional persistent storage backend.
+    storage: Option<Arc<PaxosStorage>>,
 }
 
 impl PaxosReplica {
-    /// Create a new replica with the given node id.
+    /// Create a new replica with the given node id (no persistence).
     pub fn new(node_id: Uuid) -> Self {
         Self {
             states: DashMap::new(),
             node_id,
+            storage: None,
         }
+    }
+
+    /// Create a replica backed by persistent storage.
+    pub fn with_storage(node_id: Uuid, storage: Arc<PaxosStorage>) -> Self {
+        Self {
+            states: DashMap::new(),
+            node_id,
+            storage: Some(storage),
+        }
+    }
+
+    /// Recover uncommitted proposals from storage on startup.
+    ///
+    /// Returns the number of recovered entries.
+    pub fn recover(&self, known_keys: &[Vec<u8>], cf_id: Uuid) -> usize {
+        let storage = match &self.storage {
+            Some(s) => s,
+            None => return 0,
+        };
+        let uncommitted = storage.load_all_uncommitted(known_keys, cf_id);
+        let count = uncommitted.len();
+        for (key, state) in uncommitted {
+            self.states.insert(key, state);
+        }
+        count
     }
 
     /// Handle a Prepare request.
@@ -150,6 +179,15 @@ impl PaxosReplica {
         let mut state = self.states.entry(msg.partition_key.clone()).or_default();
 
         let resp = state.prepare(msg.ballot);
+
+        if resp.promised {
+            if let Some(ref storage) = self.storage {
+                if let Err(e) = storage.save_promise(&msg.partition_key, Uuid::nil(), msg.ballot) {
+                    warn!(error = %e, "Failed to persist Paxos promise");
+                }
+            }
+        }
+
         PaxosPromise {
             promised: resp.promised,
             ballot: resp.ballot,
@@ -163,6 +201,15 @@ impl PaxosReplica {
         let mut state = self.states.entry(msg.partition_key.clone()).or_default();
 
         let resp = state.propose(msg.proposal.clone());
+
+        if resp.accepted {
+            if let Some(ref storage) = self.storage {
+                if let Err(e) = storage.save_proposal(&msg.partition_key, Uuid::nil(), &msg.proposal) {
+                    warn!(error = %e, "Failed to persist Paxos proposal");
+                }
+            }
+        }
+
         PaxosAccept {
             accepted: resp.accepted,
             ballot: resp.ballot,
@@ -174,6 +221,12 @@ impl PaxosReplica {
         let mut state = self.states.entry(msg.partition_key.clone()).or_default();
 
         state.commit(msg.proposal.clone());
+
+        if let Some(ref storage) = self.storage {
+            if let Err(e) = storage.save_commit(&msg.partition_key, Uuid::nil(), &msg.proposal) {
+                warn!(error = %e, "Failed to persist Paxos commit");
+            }
+        }
     }
 
     /// Get the current state for a partition (for testing).

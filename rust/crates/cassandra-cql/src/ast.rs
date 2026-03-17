@@ -53,6 +53,8 @@ pub enum Statement {
     AlterType(AlterType),
     AlterMaterializedView(AlterMaterializedView),
     Describe(DescribeStatement),
+    // ── Accord transactions ──
+    Transaction(TransactionStatement),
 }
 
 impl Statement {
@@ -364,6 +366,50 @@ pub enum BatchType {
     Logged,
     Unlogged,
     Counter,
+}
+
+// ─── Transaction Statements ─────────────────────────────────────────────
+
+/// LET binding in a transaction.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LetBinding {
+    /// Variable name bound by LET.
+    pub name: String,
+    /// The SELECT statement that provides the value.
+    pub select: Select,
+}
+
+/// RETURNING clause for transaction results.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReturningClause {
+    /// Column references (may include LET variable refs).
+    pub columns: Vec<Selector>,
+}
+
+/// BEGIN TRANSACTION ... COMMIT TRANSACTION
+///
+/// ## Java Oracle
+/// - `org.apache.cassandra.cql3.statements.TransactionStatement`
+///
+/// ## Syntax
+/// ```text
+/// BEGIN TRANSACTION
+///   LET <name> = (<select>);
+///   ...
+///   <insert|update|delete>;
+///   ...
+/// COMMIT TRANSACTION
+///   [RETURNING <selector>, ...]
+/// ;
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct TransactionStatement {
+    /// LET bindings (read phase).
+    pub let_bindings: Vec<LetBinding>,
+    /// DML statements (write phase): INSERT, UPDATE, DELETE.
+    pub statements: Vec<Statement>,
+    /// Optional RETURNING clause.
+    pub returning: Option<ReturningClause>,
 }
 
 // ─── Index Statements ───────────────────────────────────────────────────
