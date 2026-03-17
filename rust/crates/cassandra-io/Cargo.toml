@@ -1,0 +1,31 @@
+[package]
+name = "cassandra-io"
+description = "IO utilities: compression, mmap/rebufferers, buffer pools, checksummed readers/writers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+byteorder = { workspace = true }
+crossbeam = { workspace = true }
+parking_lot = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+lz4_flex = { workspace = true }
+snap = { workspace = true }
+zstd = { workspace = true }
+flate2 = { workspace = true }
+crc32fast = { workspace = true }
+memmap2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+criterion = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "io_bench"
+harness = false

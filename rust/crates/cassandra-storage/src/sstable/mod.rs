@@ -28,8 +28,22 @@
 
 pub mod bloom;
 pub mod bti;
+pub mod compat;
+pub mod filtered_scanner;
 pub mod format;
+pub mod key_cache;
+pub mod metadata;
 pub mod reader;
+pub mod reverse_scanner;
+pub mod rewriter;
+pub mod scanner;
+pub mod scrubber;
+pub mod summary;
+pub mod tombstone_serializer;
+pub mod tracker;
+pub mod upgrader;
+pub mod verifier;
+pub mod version;
 pub mod writer;
 
 pub use bti::{BtiReader, BtiWriter};

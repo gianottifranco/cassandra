@@ -19,8 +19,19 @@
 //! | TWCS     | twcs    | Functional  | Time-window: groups by time window   |
 //! | UCS      | ucs     | Experimental| Unified: adaptive tiered/leveled     |
 
+pub mod active;
 pub mod anticompaction;
+pub mod controller;
+pub mod errors;
+pub mod iterator;
+pub mod journal;
 pub mod lcs;
+pub mod leveled_manifest;
+pub mod lifecycle;
+pub mod logger;
+pub mod manager;
+pub mod pending_repair;
+pub mod task;
 pub mod twcs;
 pub mod ucs;
 pub mod validation;

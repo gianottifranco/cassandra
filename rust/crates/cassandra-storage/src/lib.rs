@@ -37,6 +37,7 @@ pub mod compaction;
 pub mod engine;
 pub mod filter;
 pub mod memtable;
+pub mod notifications;
 pub mod partitions;
 pub mod rows;
 pub mod sstable;

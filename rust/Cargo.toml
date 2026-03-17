@@ -36,6 +36,7 @@ members = [
     "crates/cassandra-diff-tests",
     "xtask", "crates/cassandra-accord",
     "crates/cassandra-migration",
+    "crates/cassandra-io",
 ]
 
 [workspace.package]
@@ -76,9 +77,16 @@ dashmap = "6"
 # Configuration
 figment = { version = "0.10", features = ["yaml", "env"] }
 
+# Caching
+lru = "0.12"
+
 # Compression
 lz4_flex = "0.11"
 snap = "1"
+zstd = "0.13"
+flate2 = "1"
+memmap2 = "0.9"
+crc32fast = "1"
 
 # Hashing
 md-5 = "0.10"

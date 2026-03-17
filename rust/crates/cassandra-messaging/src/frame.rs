@@ -140,6 +140,10 @@ pub struct MessageHeader {
 pub struct Message {
     pub header: MessageHeader,
     pub payload: Vec<u8>,
+    /// Optional forwarding metadata (for forwarded requests).
+    pub forwarding: Option<crate::forwarding::ForwardingInfo>,
+    /// Optional expiration timestamp in nanoseconds (monotonic).
+    pub expires_at_nanos: Option<i64>,
 }
 
 impl Message {
@@ -159,6 +163,8 @@ impl Message {
                 payload_size: payload.len() as u32,
             },
             payload,
+            forwarding: None,
+            expires_at_nanos: None,
         }
     }
 
@@ -178,6 +184,8 @@ impl Message {
                 payload_size: payload.len() as u32,
             },
             payload,
+            forwarding: None,
+            expires_at_nanos: None,
         }
     }
 
@@ -197,6 +205,8 @@ impl Message {
                 payload_size: payload.len() as u32,
             },
             payload,
+            forwarding: None,
+            expires_at_nanos: None,
         }
     }
 
@@ -252,6 +262,34 @@ impl Message {
     /// Returns `true` if this message is compressed.
     pub fn is_compressed(&self) -> bool {
         self.header.flags & flags::COMPRESSED != 0
+    }
+
+    /// Set forwarding info on this message.
+    pub fn with_forwarding_info(mut self, info: crate::forwarding::ForwardingInfo) -> Self {
+        self.header.flags |= flags::FORWARDING;
+        self.forwarding = Some(info);
+        self
+    }
+
+    /// Set the expiration timestamp (nanoseconds, monotonic clock).
+    pub fn with_expiration(mut self, expires_at_nanos: i64) -> Self {
+        self.expires_at_nanos = Some(expires_at_nanos);
+        self
+    }
+
+    /// Returns `true` if this message has expired based on the current time.
+    ///
+    /// A message without an expiration never expires.
+    pub fn is_expired(&self) -> bool {
+        if let Some(expires_at) = self.expires_at_nanos {
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos() as i64;
+            now_nanos > expires_at
+        } else {
+            false
+        }
     }
 }
 
@@ -316,6 +354,8 @@ impl Decoder for MessageCodec {
                 payload_size: payload_size as u32,
             },
             payload,
+            forwarding: None,
+            expires_at_nanos: None,
         }))
     }
 }

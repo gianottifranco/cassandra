@@ -21,6 +21,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 crc32fast = "1"
+lru = { workspace = true }
 lz4_flex = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }

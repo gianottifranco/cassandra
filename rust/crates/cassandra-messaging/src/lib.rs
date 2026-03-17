@@ -35,8 +35,17 @@
 //! - [`metrics`] — per-verb counters and latency tracking
 //! - [`service`] — central messaging hub with handler dispatch
 
+pub mod connection_type;
+pub mod crc;
+pub mod forwarding;
 pub mod frame;
+pub mod frame_codec;
+pub mod handshake;
 pub mod metrics;
+pub mod outbound_connection;
+pub mod outbound_connections;
+pub mod outbound_queue;
+pub mod resource_limits;
 pub mod service;
 pub mod verb;
 

@@ -46,8 +46,11 @@ use cassandra_security::tls::ReloadableTlsAcceptor;
 use rustls::pki_types::ServerName;
 use tokio_rustls::TlsConnector;
 
+use crate::connection_type::ConnectionType;
 use crate::frame::{Message, MessageCodec};
 use crate::metrics::MessagingMetrics;
+use crate::outbound_connections::OutboundConnections;
+use crate::resource_limits::{self, Limit};
 use crate::verb::Verb;
 
 /// Handler function type for incoming messages.
@@ -92,6 +95,10 @@ pub struct MessagingService {
     tls_acceptor: Option<ReloadableTlsAcceptor>,
     /// Optional TLS connector for outgoing connections.
     tls_connector: Option<TlsConnector>,
+    /// Per-endpoint persistent outbound connections (three channels each).
+    outbound: DashMap<SocketAddr, Arc<OutboundConnections>>,
+    /// Global resource limit for outbound messaging.
+    global_resource_limit: Arc<Limit>,
 }
 
 impl MessagingService {
@@ -107,6 +114,10 @@ impl MessagingService {
             metrics: Arc::new(MessagingMetrics::new()),
             tls_acceptor: None,
             tls_connector: None,
+            outbound: DashMap::new(),
+            global_resource_limit: Arc::new(Limit::new(
+                resource_limits::DEFAULT_GLOBAL_LIMIT,
+            )),
         }
     }
 
@@ -391,6 +402,59 @@ impl MessagingService {
         Ok(())
     }
 
+    /// Get or create the persistent outbound connections for an endpoint.
+    ///
+    /// Lazily creates three-channel connections on first use.
+    pub fn get_outbound(
+        &self,
+        endpoint: SocketAddr,
+    ) -> Arc<OutboundConnections> {
+        if let Some(existing) = self.outbound.get(&endpoint) {
+            return Arc::clone(existing.value());
+        }
+        let conns = Arc::new(OutboundConnections::new(endpoint, self.listen_addr));
+        self.outbound
+            .entry(endpoint)
+            .or_insert_with(|| Arc::clone(&conns));
+        // Return whatever is in the map (handles races)
+        Arc::clone(self.outbound.get(&endpoint).unwrap().value())
+    }
+
+    /// Send a message via persistent outbound connections.
+    ///
+    /// Routes through the three-channel `OutboundConnections` instead of
+    /// opening a new TCP connection.
+    pub fn send_persistent(
+        &self,
+        endpoint: SocketAddr,
+        msg: Message,
+        timeout: Duration,
+    ) -> Result<(), MessagingError> {
+        let verb = msg.header.verb;
+        let payload_len = msg.payload.len();
+        self.metrics.verb(verb).record_sent();
+
+        let conn_type = ConnectionType::classify(verb, payload_len);
+        self.metrics
+            .record_bytes_sent(payload_len as u64, conn_type);
+
+        let conns = self.get_outbound(endpoint);
+        if conns.send(msg, timeout) {
+            Ok(())
+        } else {
+            self.metrics.verb(verb).record_dropped();
+            Err(MessagingError::Backpressure)
+        }
+    }
+
+    /// Close all persistent outbound connections.
+    pub fn close_all_outbound(&self) {
+        for entry in self.outbound.iter() {
+            entry.value().close_all();
+        }
+        self.outbound.clear();
+    }
+
     /// Get the listen address.
     pub fn listen_addr(&self) -> SocketAddr {
         self.listen_addr
@@ -399,6 +463,11 @@ impl MessagingService {
     /// Get the metrics.
     pub fn messaging_metrics(&self) -> Arc<MessagingMetrics> {
         Arc::clone(&self.metrics)
+    }
+
+    /// Get the global resource limit.
+    pub fn global_resource_limit(&self) -> &Arc<Limit> {
+        &self.global_resource_limit
     }
 }
 

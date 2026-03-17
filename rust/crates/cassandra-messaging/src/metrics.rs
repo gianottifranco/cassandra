@@ -85,6 +85,22 @@ pub struct VerbMetricsSnapshot {
     pub avg_latency_us: f64,
 }
 
+/// Per-connection-type metrics.
+#[derive(Debug, Default)]
+pub struct ConnectionTypeMetrics {
+    pub bytes_sent: AtomicU64,
+    pub bytes_received: AtomicU64,
+    pub reconnects: AtomicU64,
+}
+
+/// Per-endpoint metrics.
+#[derive(Debug, Default)]
+pub struct EndpointMetrics {
+    pub queue_depth: AtomicU64,
+    pub expired_messages: AtomicU64,
+    pub resource_bytes_allocated: AtomicU64,
+}
+
 /// Global messaging metrics registry.
 #[derive(Debug)]
 pub struct MessagingMetrics {
@@ -93,13 +109,35 @@ pub struct MessagingMetrics {
     pub connections_created: AtomicU64,
     pub bytes_sent: AtomicU64,
     pub bytes_received: AtomicU64,
+    /// Per-connection-type metrics (urgent, small, large).
+    pub urgent_metrics: ConnectionTypeMetrics,
+    pub small_metrics: ConnectionTypeMetrics,
+    pub large_metrics: ConnectionTypeMetrics,
 }
 
 impl MessagingMetrics {
     pub fn new() -> Self {
         let mut verb_metrics = HashMap::new();
-        // Pre-allocate metrics for all known verbs
-        for verb in [
+        // Pre-allocate metrics for all 45 known verbs
+        for verb in Self::all_verbs() {
+            verb_metrics.insert(verb, VerbMetrics::default());
+        }
+
+        Self {
+            verb_metrics,
+            connections_active: AtomicU64::new(0),
+            connections_created: AtomicU64::new(0),
+            bytes_sent: AtomicU64::new(0),
+            bytes_received: AtomicU64::new(0),
+            urgent_metrics: ConnectionTypeMetrics::default(),
+            small_metrics: ConnectionTypeMetrics::default(),
+            large_metrics: ConnectionTypeMetrics::default(),
+        }
+    }
+
+    /// All known verbs for pre-registration.
+    fn all_verbs() -> Vec<Verb> {
+        vec![
             Verb::Mutation,
             Verb::MutationResponse,
             Verb::ReadData,
@@ -121,22 +159,80 @@ impl MessagingMetrics {
             Verb::SchemaResponse,
             Verb::Ping,
             Verb::Pong,
+            Verb::GossipShutdown,
+            Verb::StreamInit,
+            Verb::StreamInitResponse,
+            Verb::StreamData,
+            Verb::StreamDataResponse,
+            Verb::StreamComplete,
+            Verb::StreamCompleteResponse,
+            Verb::RepairRequest,
+            Verb::RepairResponse,
+            Verb::MerkleTreeRequest,
+            Verb::MerkleTreeResponse,
+            Verb::AntiCompactionRequest,
+            Verb::AntiCompactionResponse,
+            Verb::TopologyChange,
+            Verb::TopologyChangeResponse,
+            Verb::BootstrapRequest,
+            Verb::BootstrapResponse,
+            Verb::TcmCommit,
+            Verb::TcmCommitResponse,
+            Verb::TcmFetch,
+            Verb::TcmFetchResponse,
+            Verb::TcmNotify,
             Verb::RequestFailure,
-        ] {
-            verb_metrics.insert(verb, VerbMetrics::default());
-        }
-
-        Self {
-            verb_metrics,
-            connections_active: AtomicU64::new(0),
-            connections_created: AtomicU64::new(0),
-            bytes_sent: AtomicU64::new(0),
-            bytes_received: AtomicU64::new(0),
-        }
+        ]
     }
 
     pub fn verb(&self, verb: Verb) -> &VerbMetrics {
         self.verb_metrics.get(&verb).expect("Verb not registered")
+    }
+
+    /// Record bytes sent, updating both global and connection-type metrics.
+    pub fn record_bytes_sent(
+        &self,
+        bytes: u64,
+        conn_type: crate::connection_type::ConnectionType,
+    ) {
+        self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+        match conn_type {
+            crate::connection_type::ConnectionType::Urgent => {
+                self.urgent_metrics.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+            }
+            crate::connection_type::ConnectionType::Small => {
+                self.small_metrics.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+            }
+            crate::connection_type::ConnectionType::Large => {
+                self.large_metrics.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Record bytes received, updating both global and connection-type metrics.
+    pub fn record_bytes_received(
+        &self,
+        bytes: u64,
+        conn_type: crate::connection_type::ConnectionType,
+    ) {
+        self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+        match conn_type {
+            crate::connection_type::ConnectionType::Urgent => {
+                self.urgent_metrics
+                    .bytes_received
+                    .fetch_add(bytes, Ordering::Relaxed);
+            }
+            crate::connection_type::ConnectionType::Small => {
+                self.small_metrics
+                    .bytes_received
+                    .fetch_add(bytes, Ordering::Relaxed);
+            }
+            crate::connection_type::ConnectionType::Large => {
+                self.large_metrics
+                    .bytes_received
+                    .fetch_add(bytes, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Get a snapshot of all verb metrics.
@@ -184,5 +280,42 @@ mod tests {
         let snaps = metrics.all_verb_snapshots();
         assert_eq!(snaps[&Verb::Mutation].sent, 1);
         assert_eq!(snaps[&Verb::ReadData].sent, 2);
+    }
+
+    #[test]
+    fn all_45_verbs_registered() {
+        let metrics = MessagingMetrics::new();
+        let snaps = metrics.all_verb_snapshots();
+        // Should have all 44 verbs (45 total - GossipShutdown has no separate response)
+        assert!(snaps.len() >= 44, "Expected >= 44 verbs, got {}", snaps.len());
+
+        // Spot-check some previously missing verbs
+        metrics.verb(Verb::StreamInit).record_sent();
+        metrics.verb(Verb::TcmCommit).record_sent();
+        metrics.verb(Verb::GossipShutdown).record_sent();
+    }
+
+    #[test]
+    fn connection_type_metrics() {
+        use crate::connection_type::ConnectionType;
+
+        let metrics = MessagingMetrics::new();
+        metrics.record_bytes_sent(100, ConnectionType::Urgent);
+        metrics.record_bytes_sent(200, ConnectionType::Small);
+        metrics.record_bytes_sent(300, ConnectionType::Large);
+
+        assert_eq!(
+            metrics.urgent_metrics.bytes_sent.load(Ordering::Relaxed),
+            100
+        );
+        assert_eq!(
+            metrics.small_metrics.bytes_sent.load(Ordering::Relaxed),
+            200
+        );
+        assert_eq!(
+            metrics.large_metrics.bytes_sent.load(Ordering::Relaxed),
+            300
+        );
+        assert_eq!(metrics.bytes_sent.load(Ordering::Relaxed), 600);
     }
 }

@@ -38,10 +38,16 @@
 //! cassandra-tools setlogginglevel     Set a logging level
 //! cassandra-tools sstabledump         Dump SSTable contents
 //! cassandra-tools sstablemetadata     Show SSTable metadata
+//! cassandra-tools sstableverify       Verify SSTable integrity
+//! cassandra-tools sstablescrub        Scrub an SSTable (recover valid data)
+//! cassandra-tools sstableupgrade      Upgrade SSTable to current format
 //! cassandra-tools rebuild_index       A full rebuild of native secondary indexes for a given table
 //! ```
 
+mod sstable_scrub;
 mod sstable_tools;
+mod sstable_upgrade;
+mod sstable_verify;
 
 use cassandra_common::version::version_string;
 use clap::{Parser, Subcommand};
@@ -151,6 +157,24 @@ enum Commands {
     /// Show SSTable metadata.
     Sstablemetadata {
         /// Path to the SSTable.
+        file: String,
+    },
+    /// Verify SSTable integrity (magic bytes, CRC, index order, bloom filter).
+    Sstableverify {
+        /// Path to the SSTable data file.
+        file: String,
+    },
+    /// Scrub an SSTable: read valid partitions and write to a new SSTable.
+    Sstablescrub {
+        /// Path to the SSTable data file.
+        file: String,
+        /// Output directory (defaults to same directory, generation+1).
+        #[arg(long)]
+        output_dir: Option<String>,
+    },
+    /// Upgrade an SSTable by rewriting it in the current format.
+    Sstableupgrade {
+        /// Path to the SSTable data file.
         file: String,
     },
     /// Bulk load SSTables to a cluster.
@@ -427,6 +451,15 @@ fn main() {
         }
         Commands::Sstablemetadata { file } => {
             sstable_tools::show_metadata(&file);
+        }
+        Commands::Sstableverify { file } => {
+            sstable_verify::run(&file);
+        }
+        Commands::Sstablescrub { file, output_dir } => {
+            sstable_scrub::run(&file, output_dir.as_deref());
+        }
+        Commands::Sstableupgrade { file } => {
+            sstable_upgrade::run(&file);
         }
         Commands::Sstableloader { dir } => {
             println!("Loading SSTables from {}...", dir);
