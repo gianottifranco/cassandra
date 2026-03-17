@@ -16,7 +16,7 @@
 # limitations under the License.
 
 """
-Coverage Audit Script for Cassandra Java→Rust Rewrite
+Coverage Audit Script for Cassandra Java->Rust Rewrite
 
 Scans the Java source tree and cross-references against the gap matrix
 to detect unclassified packages, classes, nodetool commands, virtual tables,
@@ -25,7 +25,8 @@ and config files.
 Usage:
     python3 scripts/coverage_audit.py [--repo-root /path/to/cassandra]
     python3 scripts/coverage_audit.py --generate-inventory
-    python3 scripts/coverage_audit.py --check-matrix
+    python3 scripts/coverage_audit.py --check-matrix [--strict]
+    python3 scripts/coverage_audit.py --check-matrix --json
 
 Exit codes:
     0 - All items classified
@@ -36,10 +37,10 @@ Exit codes:
 import argparse
 import json
 import os
-import re
 import sys
 from collections import defaultdict
 from pathlib import Path
+from typing import Optional
 
 try:
     import yaml
@@ -48,7 +49,7 @@ except ImportError:
     HAS_YAML = False
 
 
-def find_repo_root(start: Path = None) -> Path:
+def find_repo_root(start: Optional[Path] = None) -> Path:
     """Walk up from start to find the repo root (contains src/java)."""
     p = start or Path(__file__).resolve().parent.parent
     while p != p.parent:
@@ -86,7 +87,6 @@ def scan_nodetool_commands(repo: Path) -> list:
     if nodetool_dir.exists():
         for f in sorted(nodetool_dir.glob("*.java")):
             name = f.stem
-            # Skip abstract/utility classes
             if name.startswith("Abstract") or name in (
                 "NodetoolCommand", "CommandUtils", "PrintPortMixin",
                 "JmxConnect", "HostStat", "HostStatWithPort",
@@ -114,7 +114,6 @@ def scan_virtual_tables(repo: Path) -> list:
                 "SystemViewsKeyspace",
             ):
                 continue
-            # Anything ending in Table or Tables, or metric-related
             if "Table" in name or "Row" in name or "Walker" in name:
                 tables.append(name)
     return tables
@@ -156,7 +155,7 @@ def scan_test_directories(repo: Path) -> dict:
     return tests
 
 
-def load_gap_matrix(repo: Path) -> list:
+def load_gap_matrix(repo: Path) -> Optional[list]:
     """Load the gap matrix YAML."""
     matrix_path = repo / "docs" / "rewrite" / "final_gap_matrix.yaml"
     if not matrix_path.exists():
@@ -167,7 +166,6 @@ def load_gap_matrix(repo: Path) -> list:
             data = yaml.safe_load(f)
         return data.get("features", data) if isinstance(data, dict) else data
     else:
-        # Fallback: just check the file exists
         return []
 
 
@@ -186,7 +184,39 @@ def get_classified_packages(matrix: list) -> set:
     return classified
 
 
-def generate_inventory(repo: Path, output_path: Path = None):
+def is_package_classified(pkg: str, classified: set) -> bool:
+    """Check if a package is classified (exact or parent/child match)."""
+    if pkg in classified:
+        return True
+    for c in classified:
+        if pkg.startswith(c + ".") or c.startswith(pkg + "."):
+            return True
+    return False
+
+
+def check_orphan_entries(matrix: list, packages: dict) -> list:
+    """Find matrix entries referencing packages that don't exist in Java."""
+    orphans = []
+    all_pkg_names = set(packages.keys())
+    if not matrix:
+        return orphans
+    for entry in matrix:
+        if not isinstance(entry, dict):
+            continue
+        for pkg in entry.get("java_packages", []):
+            if not isinstance(pkg, str):
+                continue
+            found = False
+            for existing in all_pkg_names:
+                if existing == pkg or existing.startswith(pkg + ".") or pkg.startswith(existing + "."):
+                    found = True
+                    break
+            if not found and pkg:
+                orphans.append((entry.get("id", "unknown"), pkg))
+    return orphans
+
+
+def generate_inventory(repo: Path, matrix: Optional[list] = None, output_path: Optional[Path] = None):
     """Generate the package_inventory.md file."""
     packages = scan_java_packages(repo)
     nodetool_cmds = scan_nodetool_commands(repo)
@@ -195,7 +225,8 @@ def generate_inventory(repo: Path, output_path: Path = None):
     sstable_tools = scan_sstable_tools(repo)
     test_stats = scan_test_directories(repo)
 
-    # Group packages by top-level
+    classified = get_classified_packages(matrix) if matrix else set()
+
     top_level = defaultdict(list)
     for pkg in sorted(packages.keys()):
         parts = pkg.replace("org.apache.cassandra", "").lstrip(".")
@@ -207,26 +238,38 @@ def generate_inventory(repo: Path, output_path: Path = None):
 
     total_files = sum(p["count"] for p in packages.values())
     total_packages = len(packages)
+    classified_count = sum(
+        1 for pkg in packages if is_package_classified(pkg, classified)
+    )
 
     with open(out, "w") as f:
         f.write("# Java Package Inventory\n\n")
         f.write(f"**Generated**: auto by `scripts/coverage_audit.py`\n")
         f.write(f"**Total packages**: {total_packages}\n")
-        f.write(f"**Total Java files**: {total_files}\n\n")
+        f.write(f"**Total Java files**: {total_files}\n")
+        if classified:
+            f.write(f"**Classified**: {classified_count}/{total_packages}\n")
+        f.write("\n")
 
         f.write("## Packages by Subsystem\n\n")
-        f.write("| Top-Level | Packages | Files |\n")
-        f.write("|-----------|----------|-------|\n")
+        f.write("| Top-Level | Packages | Files | Classified |\n")
+        f.write("|-----------|----------|-------|------------|\n")
         for top in sorted(top_level.keys()):
             pkgs = top_level[top]
             file_count = sum(packages[p]["count"] for p in pkgs)
-            f.write(f"| `{top}` | {len(pkgs)} | {file_count} |\n")
+            cls_count = sum(
+                1 for p in pkgs if is_package_classified(p, classified)
+            ) if classified else "-"
+            f.write(f"| `{top}` | {len(pkgs)} | {file_count} | {cls_count} |\n")
 
         f.write(f"\n## All Packages ({total_packages})\n\n")
-        f.write("| Package | Files |\n")
-        f.write("|---------|-------|\n")
+        f.write("| Package | Files | Classified |\n")
+        f.write("|---------|-------|------------|\n")
         for pkg in sorted(packages.keys()):
-            f.write(f"| `{pkg}` | {packages[pkg]['count']} |\n")
+            cls = "yes" if is_package_classified(pkg, classified) else "**NO**"
+            if not classified:
+                cls = "-"
+            f.write(f"| `{pkg}` | {packages[pkg]['count']} | {cls} |\n")
 
         f.write(f"\n## Nodetool Commands ({len(nodetool_cmds)})\n\n")
         for i, cmd in enumerate(nodetool_cmds):
@@ -250,7 +293,7 @@ def generate_inventory(repo: Path, output_path: Path = None):
         for cat, count in sorted(test_stats.items()):
             f.write(f"| {cat} | {count} |\n")
 
-    print(f"✅ Inventory written to {out}")
+    print(f"Inventory written to {out}")
     return {
         "packages": packages,
         "nodetool_commands": nodetool_cmds,
@@ -261,70 +304,129 @@ def generate_inventory(repo: Path, output_path: Path = None):
     }
 
 
-def check_matrix(repo: Path) -> bool:
+def check_matrix(repo: Path, strict: bool = False, json_output: bool = False) -> bool:
     """Validate the gap matrix covers all Java packages."""
     packages = scan_java_packages(repo)
     matrix = load_gap_matrix(repo)
 
     if matrix is None:
-        print("❌ Gap matrix not found at docs/rewrite/final_gap_matrix.yaml",
-              file=sys.stderr)
+        msg = "Gap matrix not found at docs/rewrite/final_gap_matrix.yaml"
+        if json_output:
+            json.dump({"error": msg, "passed": False}, sys.stdout, indent=2)
+            print()
+        else:
+            print(f"FAIL: {msg}", file=sys.stderr)
         return False
 
     classified = get_classified_packages(matrix)
     all_ok = True
+    results = {
+        "passed": True,
+        "mode": "strict" if strict else "top-level",
+        "total_packages": len(packages),
+        "classified_packages": 0,
+        "unclassified": [],
+        "orphan_entries": [],
+        "missing_status": [],
+        "status_counts": {},
+    }
 
-    # Check every top-level package is covered
-    top_level_pkgs = set()
-    for pkg in packages.keys():
-        parts = pkg.replace("org.apache.cassandra.", "").split(".")
-        top = "org.apache.cassandra." + parts[0] if parts[0] else "org.apache.cassandra"
-        top_level_pkgs.add(top)
-
-    unclassified = []
-    for pkg in sorted(top_level_pkgs):
-        if pkg not in classified:
-            # Check if a parent or child is classified
-            found = False
-            for c in classified:
-                if pkg.startswith(c) or c.startswith(pkg):
-                    found = True
-                    break
-            if not found:
+    if strict:
+        # Sub-package-level: every single Java package must be classified
+        unclassified = []
+        for pkg in sorted(packages.keys()):
+            if not is_package_classified(pkg, classified):
                 unclassified.append(pkg)
                 all_ok = False
 
-    if unclassified:
-        print(f"❌ {len(unclassified)} unclassified top-level packages:",
-              file=sys.stderr)
-        for pkg in unclassified:
-            print(f"   - {pkg}", file=sys.stderr)
+        results["classified_packages"] = len(packages) - len(unclassified)
+        results["unclassified"] = unclassified
+
+        if unclassified and not json_output:
+            print(
+                f"FAIL: {len(unclassified)} unclassified sub-packages:",
+                file=sys.stderr,
+            )
+            for pkg in unclassified:
+                print(f"   - {pkg}", file=sys.stderr)
+        elif not unclassified and not json_output:
+            print(f"PASS: All {len(packages)} sub-packages are classified")
     else:
-        print(f"✅ All {len(top_level_pkgs)} top-level packages are classified")
+        # Top-level only
+        top_level_pkgs = set()
+        for pkg in packages.keys():
+            parts = pkg.replace("org.apache.cassandra.", "").split(".")
+            top = "org.apache.cassandra." + parts[0] if parts[0] else "org.apache.cassandra"
+            top_level_pkgs.add(top)
+
+        unclassified = []
+        for pkg in sorted(top_level_pkgs):
+            if not is_package_classified(pkg, classified):
+                unclassified.append(pkg)
+                all_ok = False
+
+        results["classified_packages"] = len(top_level_pkgs) - len(unclassified)
+        results["unclassified"] = unclassified
+
+        if unclassified and not json_output:
+            print(
+                f"FAIL: {len(unclassified)} unclassified top-level packages:",
+                file=sys.stderr,
+            )
+            for pkg in unclassified:
+                print(f"   - {pkg}", file=sys.stderr)
+        elif not unclassified and not json_output:
+            print(f"PASS: All {len(top_level_pkgs)} top-level packages are classified")
+
+    # Check for orphan matrix entries
+    orphans = check_orphan_entries(matrix, packages)
+    results["orphan_entries"] = [
+        {"feature_id": fid, "package": pkg} for fid, pkg in orphans
+    ]
+    if orphans and not json_output:
+        print(
+            f"WARNING: {len(orphans)} matrix entries reference non-existent packages:",
+            file=sys.stderr,
+        )
+        for fid, pkg in orphans:
+            print(f"   - {fid}: {pkg}", file=sys.stderr)
 
     # Check matrix entries have required fields
+    missing_status = []
     if matrix:
-        missing_status = []
         for entry in matrix:
             if isinstance(entry, dict):
                 if not entry.get("status"):
                     missing_status.append(entry.get("id", "unknown"))
+        results["missing_status"] = missing_status
         if missing_status:
-            print(f"❌ {len(missing_status)} matrix entries missing status:",
-                  file=sys.stderr)
-            for ms in missing_status:
-                print(f"   - {ms}", file=sys.stderr)
+            if not json_output:
+                print(
+                    f"FAIL: {len(missing_status)} matrix entries missing status:",
+                    file=sys.stderr,
+                )
+                for ms in missing_status:
+                    print(f"   - {ms}", file=sys.stderr)
             all_ok = False
 
-    # Print summary
+    # Status summary
     if matrix:
         status_counts = defaultdict(int)
         for entry in matrix:
             if isinstance(entry, dict):
                 status_counts[entry.get("status", "unknown")] += 1
-        print("\n📊 Gap Matrix Summary:")
-        for status, count in sorted(status_counts.items()):
-            print(f"   {status}: {count}")
+        results["status_counts"] = dict(status_counts)
+        results["total_features"] = sum(status_counts.values())
+        if not json_output:
+            print("\nGap Matrix Summary:")
+            for status, count in sorted(status_counts.items()):
+                print(f"   {status}: {count}")
+            print(f"   TOTAL: {sum(status_counts.values())}")
+
+    results["passed"] = all_ok
+    if json_output:
+        json.dump(results, sys.stdout, indent=2)
+        print()
 
     return all_ok
 
@@ -337,16 +439,18 @@ def main():
                         help="Generate package_inventory.md")
     parser.add_argument("--check-matrix", action="store_true",
                         help="Validate gap matrix completeness")
+    parser.add_argument("--strict", action="store_true",
+                        help="Sub-package-level validation (default: top-level only)")
     parser.add_argument("--json", action="store_true",
-                        help="Output inventory as JSON to stdout")
+                        help="Output as JSON (for CI/xtask consumption)")
     args = parser.parse_args()
 
     repo = args.repo_root or find_repo_root()
 
-    if args.generate_inventory or not (args.check_matrix):
-        inventory = generate_inventory(repo)
-        if args.json:
-            # Serialize for xtask consumption
+    if args.generate_inventory or not args.check_matrix:
+        matrix = load_gap_matrix(repo)
+        inventory = generate_inventory(repo, matrix)
+        if args.json and not args.check_matrix:
             out = {
                 "nodetool_commands": inventory["nodetool_commands"],
                 "virtual_tables": inventory["virtual_tables"],
@@ -359,7 +463,7 @@ def main():
             print()
 
     if args.check_matrix:
-        ok = check_matrix(repo)
+        ok = check_matrix(repo, strict=args.strict, json_output=args.json)
         sys.exit(0 if ok else 1)
 
 

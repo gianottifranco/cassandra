@@ -2,31 +2,50 @@
 
 ## Status
 
-**Active** — Frozen 2026-03-15
+**Definitive** — Frozen 2026-03-15, Tag `cassandra-rewrite-baseline-v1`
 
 ## Primary Baseline (Oracle Commit)
 
-| Field            | Value                                              |
-|------------------|----------------------------------------------------|
-| Branch           | `trunk`                                            |
-| Commit           | `076c6f11364645bbb43360f013bee6f50a099185`          |
-| Date frozen      | 2026-03-15                                         |
-| Cassandra ver.   | post-5.0, pre-6.0                                  |
-| Rust HEAD at freeze | `fffb78a5283efacb1e912d17b96f7d972916c0e1`       |
+| Field               | Value                                              |
+|---------------------|----------------------------------------------------|
+| Branch              | `trunk`                                            |
+| Commit              | `076c6f11364645bbb43360f013bee6f50a099185`          |
+| Date frozen         | 2026-03-15                                         |
+| Cassandra ver.      | post-5.0, pre-6.0                                  |
+| Git tag             | `cassandra-rewrite-baseline-v1`                    |
+| Rust HEAD at freeze | `fffb78a5283efacb1e912d17b96f7d972916c0e1`         |
+
+### SHA Verification
+
+```bash
+# Verify the baseline commit SHA256
+echo "076c6f11364645bbb43360f013bee6f50a099185" | sha256sum
+# Expected: deterministic hash of the commit ID string
+
+# In the Java oracle checkout:
+cd /path/to/cassandra-java
+git rev-parse cassandra-rewrite-baseline-v1
+# Expected: 076c6f11364645bbb43360f013bee6f50a099185
+
+git log -1 --format="%H %ai %s" cassandra-rewrite-baseline-v1
+```
 
 ## Stable Reference Baseline
 
-| Field            | Value                                              |
-|------------------|----------------------------------------------------|
-| Branch           | `cassandra-5.0`                                    |
-| Tag              | Latest `cassandra-5.0.x` at freeze                 |
-| Purpose          | Distinguish stable vs trunk-only features           |
+| Field               | Value                                              |
+|---------------------|----------------------------------------------------|
+| Branch              | `cassandra-5.0`                                    |
+| Tag                 | `cassandra-5.0.3` (pinned at freeze)               |
+| Purpose             | Distinguish stable vs trunk-only features           |
 
 ## Cross-References
 
 - **ADR-016**: Dual-Baseline Freeze Policy — defines primary/stable distinction
 - **ADR-017**: Experimental Features Policy — trunk-only gating via `#[cfg(feature = "trunk_only")]`
+- **ADR-025**: JMX Replacement Strategy — HTTP admin API replaces JMX
+- **ADR-026**: Rewrite Completeness Criteria — defines what "done" means
 - **Gap Matrix**: `docs/rewrite/final_gap_matrix.yaml` — `baseline` section records same commits
+- **Verification**: `scripts/verify_baseline.sh` — automated consistency check
 
 ## Branch Policy
 
@@ -46,7 +65,13 @@ CI runs both profiles: stable-only (must pass) and trunk-only (allowed known gap
 
 ## Validation Steps
 
-To verify you are on the correct baseline:
+Run the automated verification script:
+
+```bash
+bash scripts/verify_baseline.sh
+```
+
+Or verify manually:
 
 ```bash
 # 1. Check Java oracle commit (if cloned)
@@ -68,6 +93,9 @@ assert b['commit'] == '076c6f11364645bbb43360f013bee6f50a099185'
 assert b['date'] == '2026-03-15'
 print('Baseline verified:', b['branch'], '@', b['commit'][:12])
 "
+
+# 4. Run full verification script
+bash scripts/verify_baseline.sh
 ```
 
 ## Re-Freeze Criteria
@@ -81,5 +109,6 @@ Re-freeze requires:
 - New ADR documenting rationale
 - Updated `final_gap_matrix.yaml` baseline section
 - Updated `baseline_freeze.md` (this file)
-- Full re-run of gap audit: `python3 rust/scripts/gap_audit.py revalidate`
+- Updated tag: `cassandra-rewrite-baseline-v2`
+- Full re-run of coverage audit: `python3 scripts/coverage_audit.py --check-matrix --repo-root .`
 - Gap matrix update within 48h

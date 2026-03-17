@@ -2,7 +2,7 @@
 # or more contributor license agreements.
 # See the NOTICE file and LICENSE.txt at the repository root.
 
-.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate gap-audit cluster-validate capture-evidence phase26-validate
+.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate gap-audit cluster-validate capture-evidence phase26-validate coverage-audit coverage-guard
 
 # Default target
 all: check-all
@@ -60,6 +60,26 @@ status:
 gap-audit:
 	python3 scripts/gap_audit.py todos
 	python3 scripts/gap_audit.py gap-guards
+
+## Run coverage audit (gap matrix validation)
+coverage-audit:
+	cargo run -p xtask -- coverage-audit
+
+## Run coverage guard (CI-friendly: strict mode, fail on unclassified)
+coverage-guard:
+	@echo "── Coverage Guard ──────────────────────────────────"
+	@python3 ../scripts/coverage_audit.py --check-matrix --strict --repo-root ..
+	@echo ""
+	@echo "── Gap Guard Count ─────────────────────────────────"
+	@echo "Ignored gap guards:"
+	@grep -c '#\[ignore' crates/cassandra-diff-tests/src/gap_guards.rs || echo "0"
+	@echo "Active (non-ignored) gap guards:"
+	@grep -c 'fn gap_guard_' crates/cassandra-diff-tests/src/gap_guards.rs || echo "0"
+	@echo ""
+	@echo "── YAML Validity ───────────────────────────────────"
+	@python3 -c "import yaml; yaml.safe_load(open('../docs/rewrite/final_gap_matrix.yaml')); print('YAML valid')"
+	@echo ""
+	@echo "✓ Coverage guard passed"
 
 ## ── Differential Testing ────────────────────────────────────────────────
 

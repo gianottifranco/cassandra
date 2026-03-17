@@ -25,7 +25,13 @@ on-disk data compatibility, and operational tooling within each phase's scope.
 | Field              | Value                                                  |
 |--------------------|--------------------------------------------------------|
 | **Branch**         | `cassandra-5.0`                                        |
+| **Tag (pinned)**   | `cassandra-5.0.3`                                      |
 | **Purpose**        | Distinguish stable vs trunk-only features              |
+
+### Git Tag
+
+The freeze is tagged as `cassandra-rewrite-baseline-v1` in the Java oracle repo.
+Verify with: `bash scripts/verify_baseline.sh`
 
 See [ADR-016](adrs/016-baseline-freeze-policy.md) for re-freeze policy.
 
@@ -60,6 +66,14 @@ replaces JMX with:
 - **HTTP Admin API** (Prometheus-compatible metrics endpoint)
 - **CLI tool** (`cassandra-tools`) using HTTP to the admin API
 - No JMX dependency; existing JMX-based tools will not work directly.
+
+See [ADR-025](adrs/025-jmx-replacement-strategy.md) for the full JMX replacement strategy.
+
+### Completeness Criteria
+
+A feature is considered "rewrite-complete" when it meets all criteria defined in
+[ADR-026](adrs/026-rewrite-completeness-criteria.md). The coverage audit enforces
+that every Java package is classified in the gap matrix.
 
 ## 3. Scope & Principles
 

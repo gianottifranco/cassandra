@@ -72,6 +72,45 @@ fn gap_guard_index_differential_testing() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// CQL GAPS (Expanded — Prompt 11)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "GAP: CQL masking functions — Java: cql3.functions.masking — Target: prompt-12"]
+fn gap_guard_cql_masking_functions() {
+    // Dynamic data masking: mask_default, mask_null, mask_inner, mask_outer
+    panic!("CQL masking functions not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: CQL function type helpers — Java: cql3.functions.types — Target: prompt-12"]
+fn gap_guard_cql_function_type_helpers() {
+    // UDF type resolution helpers, CodecRegistry for UDF arguments
+    panic!("CQL function type helpers not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: CQL schema statements — Java: cql3.statements.schema — Target: prompt-12"]
+fn gap_guard_cql_schema_statements() {
+    // CREATE/ALTER/DROP for types, functions, aggregates, indexes, triggers
+    panic!("CQL schema statements not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: CQL selection function calls (writetime/ttl/cast) — Java: cql3.selection — Target: prompt-12"]
+fn gap_guard_cql_selection_functions() {
+    // writetime(), ttl(), maxwritetime(), cast() in SELECT
+    panic!("CQL selection function calls not fully implemented");
+}
+
+#[test]
+#[ignore = "GAP: CQL advanced terms (collection modifiers) — Java: cql3.terms — Target: prompt-12"]
+fn gap_guard_cql_terms_advanced() {
+    // UserTypes.literal(), Lists.prepender/appender, Maps.putter/discarder
+    panic!("CQL advanced term operations not yet implemented");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // STORAGE GAPS
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -135,6 +174,73 @@ fn gap_guard_guardrails() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// STORAGE GAPS (Expanded — Prompt 11)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "GAP: Trie Memtable (off-heap) — Java: db.memtable — Target: prompt-12"]
+fn gap_guard_memtable_trie() {
+    // TrieMemtable for off-heap trie-based memtable
+    panic!("Trie Memtable not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: CommitLog compression/encryption — Java: db.commitlog — Target: prompt-12"]
+fn gap_guard_commitlog_compression() {
+    // Compressed and encrypted commit log segments, CDC integration
+    panic!("CommitLog compression/encryption not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: SSTable read compatibility (big-format) — Java: io.sstable.format.big — Target: prompt-12"]
+fn gap_guard_sstable_read_compat() {
+    // Must read Java's big-format SSTables for migration
+    panic!("SSTable big-format read compatibility not implemented");
+}
+
+#[test]
+#[ignore = "GAP: Unified Compaction Strategy — Java: db.compaction.unified — Target: prompt-12"]
+fn gap_guard_compaction_unified() {
+    // UCS tiered/leveled hybrid, Controller, ShardManager
+    panic!("Unified Compaction Strategy not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Compaction writers — Java: db.compaction.writers — Target: prompt-12"]
+fn gap_guard_compaction_writers() {
+    // DefaultCompactionWriter, SplittingSizeTieredCompactionWriter
+    panic!("Compaction writers not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: SSTable index summary — Java: io.sstable.indexsummary — Target: prompt-12"]
+fn gap_guard_sstable_index_summary() {
+    // Sampling-based partition index for SSTable lookup
+    panic!("SSTable index summary not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: SSTable metadata — Java: io.sstable.metadata — Target: prompt-12"]
+fn gap_guard_sstable_metadata() {
+    // StatsMetadata, CompactionMetadata, ValidationMetadata
+    panic!("SSTable metadata reading not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Column index builder — Java: db.columnindex — Target: prompt-12"]
+fn gap_guard_column_index_builder() {
+    // Partition-internal row index blocks
+    panic!("Column index builder not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Bloom filter — Java: utils.bloom — Target: prompt-12"]
+fn gap_guard_bloom_filter() {
+    // BloomFilter, FilterFactory for SSTable bloom filters
+    panic!("Bloom filter not yet implemented");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // DISTRIBUTED GAPS
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -171,6 +277,52 @@ fn gap_guard_internode_wire_compat() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// DISTRIBUTED GAPS (Expanded — Prompt 11)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "GAP: Dynamic Snitch — Java: locator — Target: prompt-12"]
+fn gap_guard_snitches_dynamic() {
+    // DynamicEndpointSnitch for latency-aware routing
+    panic!("Dynamic snitch not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Read Repair (blocking/async) — Java: service.reads.repair — Target: prompt-12"]
+fn gap_guard_coordinator_read_repair() {
+    // BlockingReadRepair, AsyncReadRepair for consistency convergence
+    panic!("Read repair not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Repair messages — Java: repair.messages — Target: prompt-12"]
+fn gap_guard_repair_messages() {
+    // RepairMessage types for inter-node repair coordination
+    panic!("Repair messages not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Consistent repair — Java: repair.consistent — Target: prompt-12"]
+fn gap_guard_consistent_repair() {
+    // CoordinatorSession, LocalSession for incremental repair
+    panic!("Consistent repair not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Streaming messages — Java: streaming.messages — Target: prompt-12"]
+fn gap_guard_streaming_messages() {
+    // StreamMessage types, IncomingStreamMessage, OutgoingStreamMessage
+    panic!("Streaming messages not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Hints file persistence — Java: hints — Target: prompt-12"]
+fn gap_guard_hints_persistence() {
+    // HintsWriter, HintsReader, HintsDescriptor for on-disk hint storage
+    panic!("Hints file persistence not yet implemented");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // SECURITY GAPS
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -188,6 +340,13 @@ fn gap_guard_ldap_kerberos_auth() {
     // Java packages: org.apache.cassandra.auth
     // Missing: LdapAuthenticator, Kerberos integration.
     panic!("LDAP/Kerberos auth not implemented");
+}
+
+#[test]
+#[ignore = "GAP: Auth persistent stores — Java: auth — Target: prompt-12"]
+fn gap_guard_auth_persistent() {
+    // CassandraRoleManager, CassandraAuthorizer persistence to system_auth keyspace
+    panic!("Auth persistent stores not yet implemented");
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -278,4 +437,68 @@ fn gap_guard_tracing_storage() {
     // Java packages: org.apache.cassandra.tracing
     // Trace context propagation exists. Missing: system_traces keyspace storage.
     panic!("Distributed tracing storage not implemented");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// TOOLING GAPS (Expanded — Prompt 11)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "GAP: Nodetool output formatters — Java: tools.nodetool.formatter — Target: prompt-12"]
+fn gap_guard_nodetool_formatters() {
+    // TableFormatter and output formatting for nodetool output
+    panic!("Nodetool output formatters not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Nodetool stats commands — Java: tools.nodetool.stats — Target: prompt-12"]
+fn gap_guard_nodetool_stats() {
+    // TableStatsHolder, StatsTable, StatsPrinter for cfstats/tablestats
+    panic!("Nodetool stats commands not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: SAI disk format — Java: index.sai.disk — Target: prompt-12"]
+fn gap_guard_sai_disk_format() {
+    // SAI on-disk format versioning (v1-v5), vector index persistence
+    panic!("SAI disk format not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: SAI analyzers — Java: index.sai.analyzer — Target: prompt-12"]
+fn gap_guard_sai_analyzers() {
+    // Text analyzers (Standard, NonTokenizing), filter chain for SAI text indexes
+    panic!("SAI analyzers not yet implemented");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// COMMON / UTILITIES GAPS (Expanded — Prompt 11)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+#[ignore = "GAP: Memory management utilities — Java: utils.memory — Target: prompt-12"]
+fn gap_guard_utils_memory() {
+    // MemtableAllocator, NativeAllocator, SlabAllocator, MemtablePool
+    panic!("Memory management utilities not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Concurrent utilities — Java: utils.concurrent — Target: prompt-12"]
+fn gap_guard_utils_concurrent() {
+    // Ref, SharedCloseable, Transactional, WaitQueue, OpOrder
+    panic!("Concurrent utilities not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: ByteComparable — Java: utils.bytecomparable — Target: prompt-12"]
+fn gap_guard_utils_bytecomparable() {
+    // ByteComparable, ByteSource for trie-compatible key encoding
+    panic!("ByteComparable not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Change Data Capture — Java: cdc — Target: prompt-12"]
+fn gap_guard_cdc() {
+    // CDC commit log segment allocator and reader for streaming changes
+    panic!("CDC not yet implemented");
 }

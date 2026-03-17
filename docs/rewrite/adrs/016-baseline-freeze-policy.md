@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-03-15
+Accepted — 2026-03-15 | Definitive freeze — 2026-03-17 (Prompt 11)
 
 ## Context
 
@@ -31,8 +31,13 @@ stable or experimental—must be accounted for in the gap matrix.
 | Field           | Value                                      |
 |-----------------|--------------------------------------------|
 | Branch          | `cassandra-5.0`                            |
-| Tag             | Latest `cassandra-5.0.x` tag at freeze     |
+| Tag (pinned)    | `cassandra-5.0.3`                          |
 | Purpose         | Distinguish stable vs trunk-only features  |
+
+### Git tag
+
+The freeze is tagged as `cassandra-rewrite-baseline-v1` in the Java oracle repo.
+Automated verification: `bash scripts/verify_baseline.sh`
 
 Features present **only in trunk** (not in `cassandra-5.0`) are classified
 `trunk-only` in the gap matrix and gated behind `#[cfg(feature = "trunk_only")]`.

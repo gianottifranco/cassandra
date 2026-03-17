@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted — 2026-03-15
+Accepted — 2026-03-15 | Updated — 2026-03-17 (Prompt 11: definitive freeze)
 
 ## Context
 

@@ -119,21 +119,67 @@ fn cmd_coverage_audit() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Step 2: Validate gap matrix
-    println!("\n── Step 2: Validating Gap Matrix ────────────────────────\n");
+    // Step 2: Validate gap matrix (strict mode — sub-package level)
+    println!("\n── Step 2: Validating Gap Matrix (strict) ──────────────\n");
     let matrix_ok = run_cmd(
         "python3",
         &[
             "scripts/coverage_audit.py",
             "--check-matrix",
+            "--strict",
             "--repo-root",
             ".",
         ],
         Some(&repo_root),
     );
 
-    // Step 3: Check gap matrix YAML exists and is non-empty
-    println!("\n── Step 3: Checking Matrix YAML ─────────────────────────\n");
+    // Step 3: Get JSON summary for structured output
+    println!("\n── Step 3: Structured Summary ───────────────────────────\n");
+    let json_output = run_cmd_capture(
+        "python3",
+        &[
+            "scripts/coverage_audit.py",
+            "--check-matrix",
+            "--strict",
+            "--json",
+            "--repo-root",
+            ".",
+        ],
+        Some(&repo_root),
+    );
+
+    let json_ok = if let Some(ref output) = json_output {
+        match parse_audit_json(output) {
+            Some(summary) => {
+                println!("  Total features:        {}", summary.total_features);
+                println!("  Total packages:        {}", summary.total_packages);
+                println!("  Classified packages:   {}", summary.classified_packages);
+                println!(
+                    "  Unclassified packages: {}",
+                    summary.unclassified_count
+                );
+                println!("  Orphan entries:        {}", summary.orphan_count);
+                println!();
+                if !summary.status_counts.is_empty() {
+                    println!("  Status breakdown:");
+                    for (status, count) in &summary.status_counts {
+                        println!("    {}: {}", status, count);
+                    }
+                }
+                summary.passed
+            }
+            None => {
+                eprintln!("  ⚠️  Could not parse JSON output");
+                false
+            }
+        }
+    } else {
+        eprintln!("  ⚠️  JSON audit command failed");
+        false
+    };
+
+    // Step 4: Check YAML validity
+    println!("\n── Step 4: Checking Matrix YAML ─────────────────────────\n");
     let matrix_path = repo_root.join("docs/rewrite/final_gap_matrix.yaml");
     let yaml_ok = if matrix_path.exists() {
         let content = std::fs::read_to_string(&matrix_path).unwrap_or_default();
@@ -155,6 +201,7 @@ fn cmd_coverage_audit() -> ExitCode {
     println!("═══════════════════════════════════════════════════════════");
     println!("  Inventory generation: {}", status_icon(inventory_ok));
     println!("  Matrix validation:   {}", status_icon(matrix_ok));
+    println!("  JSON summary:        {}", status_icon(json_ok));
     println!("  Matrix YAML:         {}", status_icon(yaml_ok));
     println!("═══════════════════════════════════════════════════════════\n");
 
@@ -162,6 +209,101 @@ fn cmd_coverage_audit() -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
+    }
+}
+
+struct AuditSummary {
+    passed: bool,
+    total_features: u64,
+    total_packages: u64,
+    classified_packages: u64,
+    unclassified_count: u64,
+    orphan_count: u64,
+    status_counts: Vec<(String, u64)>,
+}
+
+fn parse_audit_json(json_str: &str) -> Option<AuditSummary> {
+    // Minimal JSON parsing without serde dependency
+    let passed = json_str.contains("\"passed\": true");
+    let total_features = extract_json_number(json_str, "total_features");
+    let total_packages = extract_json_number(json_str, "total_packages");
+    let classified_packages = extract_json_number(json_str, "classified_packages");
+
+    let orphan_count = json_str.matches("\"feature_id\"").count() as u64;
+
+    // Extract status counts
+    let mut status_counts = Vec::new();
+    for status in &[
+        "done", "partial", "stub", "missing", "trunk-only", "experimental",
+        "baseline-excluded", "tooling-only", "ops-only", "blocked",
+    ] {
+        let key = format!("\"{}\": ", status);
+        if let Some(pos) = json_str.find(&key) {
+            let rest = &json_str[pos + key.len()..];
+            if let Some(end) = rest.find([',', '}', '\n']) {
+                if let Ok(n) = rest[..end].trim().parse::<u64>() {
+                    if n > 0 {
+                        status_counts.push((status.to_string(), n));
+                    }
+                }
+            }
+        }
+    }
+
+    Some(AuditSummary {
+        passed,
+        total_features,
+        total_packages,
+        classified_packages,
+        unclassified_count: extract_json_array_len(json_str, "unclassified"),
+        orphan_count,
+        status_counts,
+    })
+}
+
+fn extract_json_number(json_str: &str, key: &str) -> u64 {
+    let pattern = format!("\"{}\": ", key);
+    if let Some(pos) = json_str.find(&pattern) {
+        let rest = &json_str[pos + pattern.len()..];
+        if let Some(end) = rest.find([',', '}', '\n', ' ']) {
+            return rest[..end].trim().parse().unwrap_or(0);
+        }
+    }
+    0
+}
+
+fn extract_json_array_len(json_str: &str, key: &str) -> u64 {
+    let pattern = format!("\"{}\": [", key);
+    if let Some(pos) = json_str.find(&pattern) {
+        let rest = &json_str[pos + pattern.len()..];
+        if let Some(end) = rest.find(']') {
+            let content = rest[..end].trim();
+            if content.is_empty() {
+                return 0;
+            }
+            return content.split(',').count() as u64;
+        }
+    }
+    0
+}
+
+fn run_cmd_capture(
+    program: &str,
+    args: &[&str],
+    cwd: Option<&std::path::Path>,
+) -> Option<String> {
+    let mut cmd = Command::new(program);
+    cmd.args(args).stderr(Stdio::inherit());
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    match cmd.output() {
+        Ok(output) if output.status.success() => {
+            String::from_utf8(output.stdout).ok()
+        }
+        _ => None,
     }
 }
 
