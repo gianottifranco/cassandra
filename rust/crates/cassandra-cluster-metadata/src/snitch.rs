@@ -422,8 +422,8 @@ impl Snitch for RackInferringSnitch {
 
 /// Ec2Snitch: reads DC/rack from EC2 instance metadata API.
 ///
-/// **Stub implementation** — returns defaults until the EC2 metadata
-/// fetcher is wired. Gated behind feature flag for non-AWS builds.
+/// Uses the EC2 availability zone to derive datacenter (region)
+/// and rack (full AZ string).
 ///
 /// ## Java Oracle
 ///
@@ -442,6 +442,14 @@ impl Ec2Snitch {
         Self {
             region: region.into(),
             availability_zone: az.into(),
+        }
+    }
+
+    /// Create from parsed cloud metadata.
+    pub fn from_metadata(location: crate::cloud_metadata::CloudLocation) -> Self {
+        Self {
+            region: location.datacenter,
+            availability_zone: location.rack,
         }
     }
 }
@@ -579,6 +587,14 @@ impl GoogleCloudSnitch {
             zone: zone.into(),
         }
     }
+
+    /// Create from parsed cloud metadata.
+    pub fn from_metadata(location: crate::cloud_metadata::CloudLocation) -> Self {
+        Self {
+            region: location.datacenter,
+            zone: location.rack,
+        }
+    }
 }
 
 impl Snitch for GoogleCloudSnitch {
@@ -595,6 +611,154 @@ impl Snitch for GoogleCloudSnitch {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// AzureSnitch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// AzureSnitch: reads DC/rack from Azure Instance Metadata Service.
+///
+/// Datacenter = Azure location (e.g., "eastus"), rack = location-zone.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.locator.AzureSnitch`
+#[derive(Debug, Clone)]
+pub struct AzureSnitch {
+    location: String,
+    rack: String,
+}
+
+impl AzureSnitch {
+    /// Create with pre-fetched values (for testing/injection).
+    pub fn new(location: impl Into<String>, rack: impl Into<String>) -> Self {
+        Self {
+            location: location.into(),
+            rack: rack.into(),
+        }
+    }
+
+    /// Create from parsed cloud metadata.
+    pub fn from_metadata(location: crate::cloud_metadata::CloudLocation) -> Self {
+        Self {
+            location: location.datacenter,
+            rack: location.rack,
+        }
+    }
+}
+
+impl Snitch for AzureSnitch {
+    fn datacenter(&self, _endpoint: &Endpoint) -> String {
+        self.location.clone()
+    }
+
+    fn rack(&self, _endpoint: &Endpoint) -> String {
+        self.rack.clone()
+    }
+
+    fn snitch_name(&self) -> &'static str {
+        "AzureSnitch"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AlibabaCloudSnitch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// AlibabaCloudSnitch: reads DC/rack from Alibaba Cloud (Aliyun) metadata.
+///
+/// Datacenter = region (e.g., "cn-hangzhou"), rack = zone (e.g., "cn-hangzhou-b").
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.locator.AlibabaCloudSnitch`
+#[derive(Debug, Clone)]
+pub struct AlibabaCloudSnitch {
+    region: String,
+    zone: String,
+}
+
+impl AlibabaCloudSnitch {
+    /// Create with pre-fetched values (for testing/injection).
+    pub fn new(region: impl Into<String>, zone: impl Into<String>) -> Self {
+        Self {
+            region: region.into(),
+            zone: zone.into(),
+        }
+    }
+
+    /// Create from parsed cloud metadata.
+    pub fn from_metadata(location: crate::cloud_metadata::CloudLocation) -> Self {
+        Self {
+            region: location.datacenter,
+            zone: location.rack,
+        }
+    }
+}
+
+impl Snitch for AlibabaCloudSnitch {
+    fn datacenter(&self, _endpoint: &Endpoint) -> String {
+        self.region.clone()
+    }
+
+    fn rack(&self, _endpoint: &Endpoint) -> String {
+        self.zone.clone()
+    }
+
+    fn snitch_name(&self) -> &'static str {
+        "AlibabaCloudSnitch"
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CloudstackSnitch
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// CloudstackSnitch: reads DC/rack from CloudStack metadata.
+///
+/// Uses the CloudStack DHCP-based metadata service to determine
+/// datacenter and rack from the availability zone.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.locator.CloudstackSnitch`
+#[derive(Debug, Clone)]
+pub struct CloudstackSnitch {
+    datacenter: String,
+    rack: String,
+}
+
+impl CloudstackSnitch {
+    /// Create with pre-fetched values (for testing/injection).
+    pub fn new(datacenter: impl Into<String>, rack: impl Into<String>) -> Self {
+        Self {
+            datacenter: datacenter.into(),
+            rack: rack.into(),
+        }
+    }
+
+    /// Create from parsed cloud metadata.
+    pub fn from_metadata(location: crate::cloud_metadata::CloudLocation) -> Self {
+        Self {
+            datacenter: location.datacenter,
+            rack: location.rack,
+        }
+    }
+}
+
+impl Snitch for CloudstackSnitch {
+    fn datacenter(&self, _endpoint: &Endpoint) -> String {
+        self.datacenter.clone()
+    }
+
+    fn rack(&self, _endpoint: &Endpoint) -> String {
+        self.rack.clone()
+    }
+
+    fn snitch_name(&self) -> &'static str {
+        "CloudstackSnitch"
+    }
+}
+
 /// Factory: create a snitch by name.
 pub fn create_snitch(name: &str) -> Box<dyn Snitch> {
     if name.contains("SimpleSnitch") || name == "simple" {
@@ -608,6 +772,12 @@ pub fn create_snitch(name: &str) -> Box<dyn Snitch> {
         Box::new(Ec2Snitch::new("us-east-1", "us-east-1a"))
     } else if name.contains("GoogleCloudSnitch") || name == "googlecloud" {
         Box::new(GoogleCloudSnitch::new("us-central1", "us-central1-a"))
+    } else if name.contains("AzureSnitch") || name == "azure" {
+        Box::new(AzureSnitch::new("eastus", "eastus-1"))
+    } else if name.contains("AlibabaCloudSnitch") || name == "alibaba" {
+        Box::new(AlibabaCloudSnitch::new("cn-hangzhou", "cn-hangzhou-b"))
+    } else if name.contains("CloudstackSnitch") || name == "cloudstack" {
+        Box::new(CloudstackSnitch::new("zone1", "zone1-default"))
     } else {
         // Default to SimpleSnitch
         Box::new(SimpleSnitch)
@@ -820,6 +990,48 @@ mod tests {
     }
 
     #[test]
+    fn azure_snitch() {
+        let snitch = AzureSnitch::new("eastus", "eastus-1");
+        assert_eq!(snitch.datacenter(&ep(7001)), "eastus");
+        assert_eq!(snitch.rack(&ep(7001)), "eastus-1");
+        assert_eq!(snitch.snitch_name(), "AzureSnitch");
+    }
+
+    #[test]
+    fn alibaba_cloud_snitch() {
+        let snitch = AlibabaCloudSnitch::new("cn-hangzhou", "cn-hangzhou-b");
+        assert_eq!(snitch.datacenter(&ep(7001)), "cn-hangzhou");
+        assert_eq!(snitch.rack(&ep(7001)), "cn-hangzhou-b");
+        assert_eq!(snitch.snitch_name(), "AlibabaCloudSnitch");
+    }
+
+    #[test]
+    fn cloudstack_snitch() {
+        let snitch = CloudstackSnitch::new("zone1", "zone1-rack1");
+        assert_eq!(snitch.datacenter(&ep(7001)), "zone1");
+        assert_eq!(snitch.rack(&ep(7001)), "zone1-rack1");
+        assert_eq!(snitch.snitch_name(), "CloudstackSnitch");
+    }
+
+    #[test]
+    fn ec2_from_metadata() {
+        use crate::cloud_metadata::{CloudLocation, parse_ec2_az};
+        let loc = parse_ec2_az("us-west-2c").unwrap();
+        let snitch = Ec2Snitch::from_metadata(loc);
+        assert_eq!(snitch.datacenter(&ep(7001)), "us-west-2");
+        assert_eq!(snitch.rack(&ep(7001)), "us-west-2c");
+    }
+
+    #[test]
+    fn gce_from_metadata() {
+        use crate::cloud_metadata::{CloudLocation, parse_gce_zone};
+        let loc = parse_gce_zone("projects/123/zones/europe-west1-b").unwrap();
+        let snitch = GoogleCloudSnitch::from_metadata(loc);
+        assert_eq!(snitch.datacenter(&ep(7001)), "europe-west1");
+        assert_eq!(snitch.rack(&ep(7001)), "europe-west1-b");
+    }
+
+    #[test]
     fn snitch_factory() {
         let s = create_snitch("SimpleSnitch");
         assert_eq!(s.snitch_name(), "SimpleSnitch");
@@ -832,5 +1044,14 @@ mod tests {
 
         let s = create_snitch("ec2");
         assert_eq!(s.snitch_name(), "Ec2Snitch");
+
+        let s = create_snitch("azure");
+        assert_eq!(s.snitch_name(), "AzureSnitch");
+
+        let s = create_snitch("alibaba");
+        assert_eq!(s.snitch_name(), "AlibabaCloudSnitch");
+
+        let s = create_snitch("cloudstack");
+        assert_eq!(s.snitch_name(), "CloudstackSnitch");
     }
 }

@@ -106,7 +106,7 @@ impl MaskingFunction for HashMask {
         // Simple hash using available primitives (not cryptographic-grade for DDM).
         // In production, use a proper SHA-256 from ring or sha2 crate.
         // For now, use a simple FNV-1a style hash as placeholder.
-        // TODO: Replace with SHA-256 when sha2 crate is added.
+        // GAP(gap_guard_ldap_kerberos_auth): Replace with SHA-256 when sha2 crate is added — tracked in gap_guards.rs
         let mut hash: u64 = 0xcbf29ce484222325;
         for &byte in value {
             hash ^= byte as u64;

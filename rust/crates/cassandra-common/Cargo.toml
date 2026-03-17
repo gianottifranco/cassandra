@@ -16,6 +16,7 @@ parking_lot = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 md-5 = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

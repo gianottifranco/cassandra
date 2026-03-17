@@ -72,7 +72,7 @@ impl QueryProcessor {
         cql: &str,
         keyspace: Option<&str>,
     ) -> Result<PreparedResult, CassandraError> {
-        let schema_version = 0; // TODO: track real schema version
+        let schema_version = 0; // GAP(gap_guard_tcm): track real schema version — tracked in gap_guards.rs
         let prepared = self
             .prepared_cache
             .prepare_with_keyspace(cql, schema_version, keyspace)

@@ -272,7 +272,7 @@ struct GrantKey {
 /// Checks permissions with role inheritance: if user is a member of a role
 /// (directly or transitively), they inherit that role's permissions.
 ///
-/// TODO(production): Persist permissions to system_auth.role_permissions.
+/// GAP(gap_guard_cql_permission_statements): Persist permissions to system_auth.role_permissions — tracked in gap_guards.rs
 pub struct CassandraAuthorizer<R: RoleManager> {
     /// Map of (role, resource) → set of granted permissions.
     grants: DashMap<GrantKey, Vec<Permission>>,

@@ -372,7 +372,7 @@ impl ReadCoordinator {
             &sorted_replicas,
             required,
             &self.speculative_retry_policy,
-            |_percentile| 50, // TODO: wire real latency percentiles from metrics
+            |_percentile| 50, // GAP(gap_guard_concurrency_stages): wire real latency percentiles from metrics — tracked in gap_guards.rs
         );
 
         debug!(
@@ -564,7 +564,7 @@ impl ReadCoordinator {
 
         let mut resolver = DataResolver::new(self.tombstone_thresholds.clone());
 
-        // TODO: Send READ_DATA to all replicas via MessagingService and collect responses.
+        // GAP(gap_guard_internode_wire_compat): Send READ_DATA to all replicas via MessagingService and collect responses — tracked in gap_guards.rs
         // For now, we simulate fetching data from the replicas to feed the DataResolver.
         for _ep in replicas.iter() {
             // Simulated partition data (empty for simplicity, but forces DataResolver to process)

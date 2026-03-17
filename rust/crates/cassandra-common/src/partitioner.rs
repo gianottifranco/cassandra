@@ -23,6 +23,8 @@
 //! - `org.apache.cassandra.dht.RandomPartitioner`
 //! - `org.apache.cassandra.dht.ByteOrderedPartitioner`
 
+use std::collections::HashMap;
+
 use crate::murmur3;
 use crate::token::Token;
 
@@ -30,6 +32,10 @@ use crate::token::Token;
 ///
 /// Every Cassandra cluster uses exactly one partitioner for the lifetime of
 /// its data. The default (and recommended) is `Murmur3Partitioner`.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.dht.IPartitioner`
 pub trait Partitioner: Send + Sync {
     /// Compute the token for a given partition key.
     fn get_token(&self, key: &[u8]) -> Token;
@@ -46,6 +52,127 @@ pub trait Partitioner: Send + Sync {
     /// Midpoint between two tokens (used for range splitting).
     fn midpoint(&self, left: Token, right: Token) -> Token {
         Token::midpoint(left, right)
+    }
+
+    /// Split a token range into `pieces` equal sub-ranges.
+    ///
+    /// Returns `pieces + 1` boundary tokens (including start and end).
+    fn split(&self, start: Token, end: Token, pieces: usize) -> Vec<Token> {
+        if pieces == 0 {
+            return vec![start, end];
+        }
+        let mut result = Vec::with_capacity(pieces + 1);
+        result.push(start);
+        let s = start.value() as i128;
+        let e = if end.value() <= start.value() {
+            // Wrap-around: treat end as beyond max
+            end.value() as i128 + (1i128 << 64)
+        } else {
+            end.value() as i128
+        };
+        for i in 1..pieces {
+            let mid = s + (e - s) * i as i128 / pieces as i128;
+            result.push(Token::from_raw(mid as i64));
+        }
+        result.push(end);
+        result
+    }
+
+    /// Whether this partitioner preserves byte-order of keys.
+    fn preserves_order(&self) -> bool {
+        false
+    }
+
+    /// Generate a random token in this partitioner's token space.
+    fn random_token(&self) -> Token {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        Token::from_raw(rng.r#gen())
+    }
+
+    /// Describe ownership: fraction of the ring owned by each token.
+    ///
+    /// Given a sorted list of tokens, returns the fraction of the total
+    /// token space each token is responsible for (the range from the
+    /// previous token to this token).
+    fn describe_ownership(&self, sorted_tokens: &[Token]) -> HashMap<Token, f64> {
+        let mut result = HashMap::new();
+        if sorted_tokens.is_empty() {
+            return result;
+        }
+        if sorted_tokens.len() == 1 {
+            result.insert(sorted_tokens[0], 1.0);
+            return result;
+        }
+        let total_range =
+            self.max_token().value() as f64 - self.min_token().value() as f64 + 1.0;
+        for i in 0..sorted_tokens.len() {
+            let prev = if i == 0 {
+                sorted_tokens[sorted_tokens.len() - 1]
+            } else {
+                sorted_tokens[i - 1]
+            };
+            let current = sorted_tokens[i];
+            let range = if current.value() > prev.value() {
+                (current.value() - prev.value()) as f64
+            } else {
+                // Wrap-around
+                (self.max_token().value() as f64 - prev.value() as f64)
+                    + (current.value() as f64 - self.min_token().value() as f64)
+                    + 1.0
+            };
+            result.insert(current, range / total_range);
+        }
+        result
+    }
+}
+
+/// Factory for creating tokens from string or byte representations.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.dht.Token.TokenFactory`
+pub trait TokenFactory: Send + Sync {
+    /// Parse a token from its string representation.
+    fn from_string(&self, s: &str) -> Option<Token>;
+
+    /// Create a token from its byte representation.
+    fn from_bytes(&self, bytes: &[u8]) -> Option<Token>;
+
+    /// Serialize a token to its string representation.
+    fn to_string(&self, token: Token) -> String;
+
+    /// Serialize a token to bytes.
+    fn to_bytes(&self, token: Token) -> Vec<u8>;
+}
+
+/// Token factory for i64-based tokens (Murmur3, Random).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LongTokenFactory;
+
+impl TokenFactory for LongTokenFactory {
+    fn from_string(&self, s: &str) -> Option<Token> {
+        s.parse::<i64>().ok().map(Token::from_raw)
+    }
+
+    fn from_bytes(&self, bytes: &[u8]) -> Option<Token> {
+        if bytes.len() >= 8 {
+            let mut buf = [0u8; 8];
+            buf.copy_from_slice(&bytes[..8]);
+            Some(Token::deserialize(&buf))
+        } else {
+            None
+        }
+    }
+
+    fn to_string(&self, token: Token) -> String {
+        token.value().to_string()
+    }
+
+    fn to_bytes(&self, token: Token) -> Vec<u8> {
+        let mut buf = [0u8; 8];
+        token.serialize(&mut buf);
+        buf.to_vec()
     }
 }
 
@@ -173,6 +300,75 @@ impl Partitioner for ByteOrderedPartitioner {
     fn max_token(&self) -> Token {
         Token::MAXIMUM
     }
+
+    fn preserves_order(&self) -> bool {
+        true
+    }
+
+    fn random_token(&self) -> Token {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+        // For BOP, generate a random positive token (keys are typically positive)
+        Token::from_raw(rng.r#gen::<i64>().abs())
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// LocalPartitioner
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// LocalPartitioner: returns a fixed token for all keys.
+///
+/// Used by system keyspaces and local-only data that doesn't need
+/// distributed partitioning. Every key maps to the same token.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.dht.LocalPartitioner`
+#[derive(Debug, Clone, Copy)]
+pub struct LocalPartitioner {
+    token: Token,
+}
+
+impl LocalPartitioner {
+    /// Create a LocalPartitioner that always returns the given token.
+    pub fn new(token: Token) -> Self {
+        Self { token }
+    }
+}
+
+impl Default for LocalPartitioner {
+    fn default() -> Self {
+        Self {
+            token: Token::from_raw(0),
+        }
+    }
+}
+
+impl Partitioner for LocalPartitioner {
+    fn get_token(&self, _key: &[u8]) -> Token {
+        self.token
+    }
+
+    fn name(&self) -> &'static str {
+        "org.apache.cassandra.dht.LocalPartitioner"
+    }
+
+    fn min_token(&self) -> Token {
+        self.token
+    }
+
+    fn max_token(&self) -> Token {
+        self.token
+    }
+
+    fn preserves_order(&self) -> bool {
+        true
+    }
+
+    fn random_token(&self) -> Token {
+        self.token
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -189,6 +385,8 @@ pub fn create_partitioner(name: &str) -> Box<dyn Partitioner> {
         Box::new(RandomPartitioner)
     } else if name.contains("ByteOrderedPartitioner") || name == "byteordered" {
         Box::new(ByteOrderedPartitioner)
+    } else if name.contains("LocalPartitioner") || name == "local" {
+        Box::new(LocalPartitioner::default())
     } else {
         // Default to Murmur3 (matches Java behavior)
         Box::new(Murmur3Partitioner)
@@ -296,5 +494,86 @@ mod tests {
         let r = RandomPartitioner;
         assert!(r.min_token() < r.max_token());
         assert_eq!(r.min_token().value(), 0);
+    }
+
+    #[test]
+    fn preserves_order() {
+        assert!(!Murmur3Partitioner.preserves_order());
+        assert!(!RandomPartitioner.preserves_order());
+        assert!(ByteOrderedPartitioner.preserves_order());
+        assert!(LocalPartitioner::default().preserves_order());
+    }
+
+    #[test]
+    fn local_partitioner_fixed_token() {
+        let p = LocalPartitioner::new(Token::from_raw(42));
+        assert_eq!(p.get_token(b"any key"), Token::from_raw(42));
+        assert_eq!(p.get_token(b"other key"), Token::from_raw(42));
+        assert_eq!(p.min_token(), Token::from_raw(42));
+        assert_eq!(p.max_token(), Token::from_raw(42));
+    }
+
+    #[test]
+    fn factory_local() {
+        let p = create_partitioner("local");
+        assert_eq!(p.name(), "org.apache.cassandra.dht.LocalPartitioner");
+    }
+
+    #[test]
+    fn split_range() {
+        let p = Murmur3Partitioner;
+        let splits = p.split(Token::from_raw(0), Token::from_raw(100), 4);
+        assert_eq!(splits.len(), 5);
+        assert_eq!(splits[0], Token::from_raw(0));
+        assert_eq!(splits[1], Token::from_raw(25));
+        assert_eq!(splits[2], Token::from_raw(50));
+        assert_eq!(splits[3], Token::from_raw(75));
+        assert_eq!(splits[4], Token::from_raw(100));
+    }
+
+    #[test]
+    fn describe_ownership_even() {
+        let p = Murmur3Partitioner;
+        // Evenly spaced tokens: each should own ~1/3 of the ring
+        // Token space: i64::MIN to i64::MAX, total range ~2^64
+        // Split into thirds:
+        let third = (i64::MAX as i128 - i64::MIN as i128) / 3;
+        let tokens = vec![
+            Token::from_raw((i64::MIN as i128 + third) as i64),
+            Token::from_raw((i64::MIN as i128 + 2 * third) as i64),
+            Token::from_raw(i64::MAX),
+        ];
+        let ownership = p.describe_ownership(&tokens);
+        assert_eq!(ownership.len(), 3);
+        // Each should own roughly 1/3 of the ring
+        for (_, frac) in &ownership {
+            assert!(*frac > 0.2 && *frac < 0.45, "fraction={}", frac);
+        }
+    }
+
+    #[test]
+    fn describe_ownership_single() {
+        let p = Murmur3Partitioner;
+        let tokens = vec![Token::from_raw(0)];
+        let ownership = p.describe_ownership(&tokens);
+        assert_eq!(ownership[&Token::from_raw(0)], 1.0);
+    }
+
+    #[test]
+    fn token_factory_round_trip() {
+        let factory = LongTokenFactory;
+        let token = Token::from_raw(12345);
+        let s = factory.to_string(token);
+        assert_eq!(factory.from_string(&s), Some(token));
+        let bytes = factory.to_bytes(token);
+        assert_eq!(factory.from_bytes(&bytes), Some(token));
+    }
+
+    #[test]
+    fn random_token_in_range() {
+        let p = Murmur3Partitioner;
+        // Just verify it doesn't panic and returns a valid token
+        let t = p.random_token();
+        assert!(t.value() >= i64::MIN && t.value() <= i64::MAX);
     }
 }

@@ -112,6 +112,69 @@ pub fn error_to_message(err: &CassandraError) -> ErrorMessage {
                 data_present: *data_present,
             },
         },
+        CassandraError::ReadFailure {
+            consistency,
+            received,
+            block_for,
+            num_failures,
+            data_present,
+        } => ErrorMessage {
+            code: 0x1300,
+            message: format!(
+                "Operation failed - received {} responses and {} failures for {}",
+                received, num_failures, consistency
+            ),
+            detail: ErrorDetail::ReadFailure {
+                consistency: Consistency::from_name(consistency).unwrap_or(Consistency::One),
+                received: *received,
+                block_for: *block_for,
+                num_failures: *num_failures,
+                data_present: *data_present,
+            },
+        },
+        CassandraError::FunctionFailure {
+            keyspace,
+            function,
+            arg_types,
+        } => ErrorMessage {
+            code: 0x1400,
+            message: format!(
+                "Execution of function {}.{}({}) failed",
+                keyspace,
+                function,
+                arg_types.join(", ")
+            ),
+            detail: ErrorDetail::FunctionFailure {
+                keyspace: keyspace.clone(),
+                function: function.clone(),
+                arg_types: arg_types.clone(),
+            },
+        },
+        CassandraError::WriteFailure {
+            consistency,
+            received,
+            block_for,
+            num_failures,
+            write_type,
+        } => ErrorMessage {
+            code: 0x1500,
+            message: format!(
+                "Operation failed - received {} responses and {} failures for {}",
+                received, num_failures, consistency
+            ),
+            detail: ErrorDetail::WriteFailure {
+                consistency: Consistency::from_name(consistency).unwrap_or(Consistency::One),
+                received: *received,
+                block_for: *block_for,
+                num_failures: *num_failures,
+                write_type: write_type.clone(),
+            },
+        },
+        CassandraError::CDCWriteFailure => ErrorMessage {
+            code: 0x1600,
+            message: "CDC write failure".to_string(),
+            detail: ErrorDetail::None,
+        },
         CassandraError::SyntaxError(msg) => ErrorMessage {
             code: 0x2000,
             message: msg.clone(),
@@ -240,6 +303,35 @@ mod tests {
             (CassandraError::Overloaded, 0x1001),
             (CassandraError::IsBootstrapping, 0x1002),
             (CassandraError::TruncateError("x".into()), 0x1003),
+            (
+                CassandraError::ReadFailure {
+                    consistency: "ONE".into(),
+                    received: 0,
+                    block_for: 1,
+                    num_failures: 1,
+                    data_present: false,
+                },
+                0x1300,
+            ),
+            (
+                CassandraError::FunctionFailure {
+                    keyspace: "ks".into(),
+                    function: "f".into(),
+                    arg_types: vec![],
+                },
+                0x1400,
+            ),
+            (
+                CassandraError::WriteFailure {
+                    consistency: "ONE".into(),
+                    received: 0,
+                    block_for: 1,
+                    num_failures: 1,
+                    write_type: "SIMPLE".into(),
+                },
+                0x1500,
+            ),
+            (CassandraError::CDCWriteFailure, 0x1600),
             (CassandraError::SyntaxError("x".into()), 0x2000),
             (CassandraError::Unauthorized("x".into()), 0x2100),
             (CassandraError::InvalidQuery("x".into()), 0x2200),
@@ -250,6 +342,95 @@ mod tests {
             let msg = error_to_message(&err);
             assert_eq!(msg.code, expected_code, "code mismatch for {:?}", err);
         }
+    }
+
+    #[test]
+    fn read_failure_mapping() {
+        let err = CassandraError::ReadFailure {
+            consistency: "QUORUM".to_string(),
+            received: 1,
+            block_for: 2,
+            num_failures: 1,
+            data_present: false,
+        };
+        let msg = error_to_message(&err);
+        assert_eq!(msg.code, 0x1300);
+        match &msg.detail {
+            ErrorDetail::ReadFailure {
+                consistency,
+                received,
+                block_for,
+                num_failures,
+                data_present,
+            } => {
+                assert_eq!(*consistency, Consistency::Quorum);
+                assert_eq!(*received, 1);
+                assert_eq!(*block_for, 2);
+                assert_eq!(*num_failures, 1);
+                assert!(!*data_present);
+            }
+            _ => panic!("expected ReadFailure detail"),
+        }
+    }
+
+    #[test]
+    fn write_failure_mapping() {
+        let err = CassandraError::WriteFailure {
+            consistency: "ALL".to_string(),
+            received: 2,
+            block_for: 3,
+            num_failures: 1,
+            write_type: "SIMPLE".to_string(),
+        };
+        let msg = error_to_message(&err);
+        assert_eq!(msg.code, 0x1500);
+        match &msg.detail {
+            ErrorDetail::WriteFailure {
+                consistency,
+                received,
+                block_for,
+                num_failures,
+                write_type,
+            } => {
+                assert_eq!(*consistency, Consistency::All);
+                assert_eq!(*received, 2);
+                assert_eq!(*block_for, 3);
+                assert_eq!(*num_failures, 1);
+                assert_eq!(write_type, "SIMPLE");
+            }
+            _ => panic!("expected WriteFailure detail"),
+        }
+    }
+
+    #[test]
+    fn function_failure_mapping() {
+        let err = CassandraError::FunctionFailure {
+            keyspace: "ks".to_string(),
+            function: "my_func".to_string(),
+            arg_types: vec!["int".to_string(), "text".to_string()],
+        };
+        let msg = error_to_message(&err);
+        assert_eq!(msg.code, 0x1400);
+        match &msg.detail {
+            ErrorDetail::FunctionFailure {
+                keyspace,
+                function,
+                arg_types,
+            } => {
+                assert_eq!(keyspace, "ks");
+                assert_eq!(function, "my_func");
+                assert_eq!(arg_types, &vec!["int".to_string(), "text".to_string()]);
+            }
+            _ => panic!("expected FunctionFailure detail"),
+        }
+    }
+
+    #[test]
+    fn cdc_write_failure_mapping() {
+        let err = CassandraError::CDCWriteFailure;
+        let msg = error_to_message(&err);
+        assert_eq!(msg.code, 0x1600);
+        assert!(matches!(msg.detail, ErrorDetail::None));
     }
 
     #[test]

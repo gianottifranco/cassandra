@@ -419,6 +419,25 @@ pub enum ErrorDetail {
         block_for: i32,
         data_present: bool,
     },
+    ReadFailure {
+        consistency: Consistency,
+        received: i32,
+        block_for: i32,
+        num_failures: i32,
+        data_present: bool,
+    },
+    WriteFailure {
+        consistency: Consistency,
+        received: i32,
+        block_for: i32,
+        num_failures: i32,
+        write_type: String,
+    },
+    FunctionFailure {
+        keyspace: String,
+        function: String,
+        arg_types: Vec<String>,
+    },
     AlreadyExists {
         keyspace: String,
         table: String,

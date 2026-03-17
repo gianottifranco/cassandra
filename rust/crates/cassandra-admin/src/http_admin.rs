@@ -74,6 +74,7 @@ async fn handle_request(
     let method = req.method().clone();
 
     let response = match (method, path.as_str()) {
+        // Core endpoints
         (Method::GET, "/metrics") => handle_metrics(&state),
         (Method::GET, "/health") => handle_health(),
         (Method::GET, "/api/v1/operations") => handle_operations(&state),
@@ -86,6 +87,93 @@ async fn handle_request(
         (Method::GET, p) if p.starts_with("/admin/indexes/") => {
             handle_index_detail(p, &state)
         }
+
+        // Cluster info endpoints
+        (Method::GET, "/api/v1/cluster/status") => crate::handlers_cluster::handle_cluster_status(&state),
+        (Method::GET, "/api/v1/cluster/info") => crate::handlers_cluster::handle_cluster_info(&state),
+        (Method::GET, "/api/v1/cluster/ring") => crate::handlers_cluster::handle_cluster_ring(&state),
+        (Method::GET, "/api/v1/cluster/describe") => crate::handlers_cluster::handle_describe_cluster(&state),
+        (Method::GET, "/api/v1/cluster/gossip") => crate::handlers_cluster::handle_gossip_info(&state),
+
+        // Compaction endpoints
+        (Method::POST, "/api/v1/operations/compact") => crate::handlers_compaction::handle_compact(req, &state).await,
+        (Method::POST, "/api/v1/operations/cleanup") => crate::handlers_compaction::handle_cleanup(req, &state).await,
+        (Method::POST, "/api/v1/operations/flush") => crate::handlers_compaction::handle_flush(req, &state).await,
+        (Method::POST, "/api/v1/operations/scrub") => crate::handlers_compaction::handle_scrub(req, &state).await,
+        (Method::GET, "/api/v1/compaction/stats") => crate::handlers_compaction::handle_compaction_stats(&state),
+        (Method::GET, "/api/v1/compaction/history") => crate::handlers_compaction::handle_compaction_history(&state),
+        (Method::POST, "/api/v1/compaction/autocompaction/enable") => crate::handlers_compaction::handle_enable_autocompaction(&state),
+        (Method::POST, "/api/v1/compaction/autocompaction/disable") => crate::handlers_compaction::handle_disable_autocompaction(&state),
+        (Method::GET, "/api/v1/compaction/autocompaction/status") => crate::handlers_compaction::handle_autocompaction_status(&state),
+        (Method::GET, "/api/v1/compaction/throughput") => crate::handlers_compaction::handle_get_compaction_throughput(&state),
+        (Method::POST, "/api/v1/compaction/throughput") => crate::handlers_compaction::handle_set_compaction_throughput(req, &state).await,
+
+        // Snapshot endpoints
+        (Method::POST, "/api/v1/operations/snapshot") => crate::handlers_snapshots::handle_take_snapshot(req, &state).await,
+        (Method::GET, "/api/v1/snapshots") => crate::handlers_snapshots::handle_list_snapshots(&state),
+        (Method::DELETE, "/api/v1/snapshots") => crate::handlers_snapshots::handle_clear_snapshot(req, &state).await,
+        (Method::POST, "/api/v1/operations/import") => crate::handlers_snapshots::handle_import(req, &state).await,
+        (Method::POST, "/api/v1/backup/enable") => crate::handlers_snapshots::handle_enable_backup(&state),
+        (Method::POST, "/api/v1/backup/disable") => crate::handlers_snapshots::handle_disable_backup(&state),
+        (Method::GET, "/api/v1/backup/status") => crate::handlers_snapshots::handle_backup_status(&state),
+
+        // Topology endpoints
+        (Method::POST, "/api/v1/topology/decommission") => crate::handlers_topology::handle_decommission(&state),
+        (Method::POST, "/api/v1/topology/removenode") => crate::handlers_topology::handle_removenode(req, &state).await,
+        (Method::POST, "/api/v1/topology/move") => crate::handlers_topology::handle_move(req, &state).await,
+        (Method::POST, "/api/v1/topology/rebuild") => crate::handlers_topology::handle_rebuild(req, &state).await,
+        (Method::POST, "/api/v1/topology/refresh") => crate::handlers_topology::handle_refresh(req, &state).await,
+        (Method::POST, "/api/v1/topology/join") => crate::handlers_topology::handle_join(&state),
+        (Method::POST, "/api/v1/topology/bootstrap") => crate::handlers_topology::handle_bootstrap(&state),
+        (Method::POST, "/api/v1/topology/drain") => crate::handlers_topology::handle_drain(&state),
+        (Method::POST, "/api/v1/topology/assassinate") => crate::handlers_topology::handle_assassinate(req, &state).await,
+        (Method::GET, "/api/v1/topology/status") => crate::handlers_topology::handle_topology_status(&state),
+        (Method::GET, "/api/v1/topology/netstats") => crate::handlers_topology::handle_netstats(&state),
+
+        // Statistics endpoints
+        (Method::GET, "/api/v1/stats/tables") => crate::handlers_stats::handle_table_stats(&state),
+        (Method::GET, "/api/v1/stats/histograms") => crate::handlers_stats::handle_table_histograms(&state),
+        (Method::GET, "/api/v1/stats/tpstats") => crate::handlers_stats::handle_tp_stats(&state),
+        (Method::GET, "/api/v1/stats/gcstats") => crate::handlers_stats::handle_gc_stats(&state),
+        (Method::GET, "/api/v1/stats/proxyhistograms") => crate::handlers_stats::handle_proxy_histograms(&state),
+        (Method::GET, "/api/v1/stats/clients") => crate::handlers_stats::handle_client_stats(&state),
+        (Method::GET, "/api/v1/stats/toppartitions") => crate::handlers_stats::handle_top_partitions(&state),
+
+        // Cache and hints endpoints
+        (Method::POST, "/api/v1/cache/invalidate") => crate::handlers_cache_hints::handle_invalidate_cache(req, &state).await,
+        (Method::POST, "/api/v1/cache/capacity") => crate::handlers_cache_hints::handle_set_cache_capacity(req, &state).await,
+        (Method::POST, "/api/v1/hints/truncate") => crate::handlers_cache_hints::handle_truncate_hints(&state),
+        (Method::GET, "/api/v1/hints/pending") => crate::handlers_cache_hints::handle_pending_hints(&state),
+        (Method::POST, "/api/v1/handoff/enable") => crate::handlers_cache_hints::handle_enable_handoff(&state),
+        (Method::POST, "/api/v1/handoff/disable") => crate::handlers_cache_hints::handle_disable_handoff(&state),
+        (Method::POST, "/api/v1/handoff/pause") => crate::handlers_cache_hints::handle_pause_handoff(&state),
+        (Method::POST, "/api/v1/handoff/resume") => crate::handlers_cache_hints::handle_resume_handoff(&state),
+
+        // Config endpoints
+        (Method::GET, "/api/v1/config") => crate::handlers_config::handle_get_config(&state),
+        (Method::POST, "/api/v1/config") => crate::handlers_config::handle_set_config(req, &state).await,
+        (Method::POST, "/api/v1/config/reload/schema") => crate::handlers_config::handle_reload_schema(&state),
+        (Method::POST, "/api/v1/config/reload/triggers") => crate::handlers_config::handle_reload_triggers(&state),
+        (Method::POST, "/api/v1/config/reload/ssl") => crate::handlers_config::handle_reload_ssl(&state),
+        (Method::POST, "/api/v1/binary/enable") => crate::handlers_config::handle_enable_binary(&state),
+        (Method::POST, "/api/v1/binary/disable") => crate::handlers_config::handle_disable_binary(&state),
+        (Method::GET, "/api/v1/binary/status") => crate::handlers_config::handle_binary_status(&state),
+        (Method::POST, "/api/v1/gossip/enable") => crate::handlers_config::handle_enable_gossip(&state),
+        (Method::POST, "/api/v1/gossip/disable") => crate::handlers_config::handle_disable_gossip(&state),
+        (Method::GET, "/api/v1/gossip/status") => crate::handlers_config::handle_gossip_status(&state),
+
+        // Logging and security endpoints
+        (Method::GET, "/api/v1/logging/levels") => crate::handlers_logging::handle_get_logging_levels(&state),
+        (Method::POST, "/api/v1/logging/level") => crate::handlers_logging::handle_set_logging_level(req, &state).await,
+        (Method::POST, "/api/v1/operations/enableauditlog") => crate::handlers_logging::handle_enable_audit_log(&state),
+        (Method::POST, "/api/v1/operations/disableauditlog") => crate::handlers_logging::handle_disable_audit_log(&state),
+        (Method::GET, "/api/v1/audit/config") => crate::handlers_logging::handle_get_audit_config(&state),
+        (Method::POST, "/api/v1/operations/enablefql") => crate::handlers_logging::handle_enable_fql(req, &state).await,
+        (Method::POST, "/api/v1/operations/disablefql") => crate::handlers_logging::handle_disable_fql(&state),
+        (Method::GET, "/api/v1/fql/config") => crate::handlers_logging::handle_get_fql_config(&state),
+        (Method::GET, "/api/v1/tracing/probability") => crate::handlers_logging::handle_get_trace_probability(&state),
+        (Method::POST, "/api/v1/tracing/probability") => crate::handlers_logging::handle_set_trace_probability(req, &state).await,
+
         _ => not_found(),
     };
 
@@ -222,7 +310,7 @@ fn handle_index_detail(path: &str, state: &AdminState) -> Response<Full<Bytes>> 
     }
 }
 
-fn not_found() -> Response<Full<Bytes>> {
+pub fn not_found() -> Response<Full<Bytes>> {
     json_response(
         StatusCode::NOT_FOUND,
         &serde_json::json!({"error": "not found"}),
@@ -444,7 +532,7 @@ async fn handle_rebuild_index(req: Request<Incoming>, state: &AdminState) -> Res
     }
 }
 
-fn json_response(status: StatusCode, body: &serde_json::Value) -> Response<Full<Bytes>> {
+pub fn json_response(status: StatusCode, body: &serde_json::Value) -> Response<Full<Bytes>> {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")

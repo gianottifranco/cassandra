@@ -225,7 +225,7 @@ impl RepairCoordinator {
 
         Some(RepairStatus {
             repair_id,
-            repair_type: RepairType::Full, // TODO: track actual type
+            repair_type: RepairType::Full, // GAP(gap_guard_nodetool_commands): track actual repair type — tracked in gap_guards.rs
             keyspace,
             tables,
             total_ranges: total,

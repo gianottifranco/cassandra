@@ -367,7 +367,7 @@ mod tests {
     use super::*;
 
     /// Golden test values: these are the output of our Murmur3 implementation.
-    /// TODO(diff-test): Validate these against Java's MurmurHash.hash3_x64_128
+    /// GAP(gap_guard_gossip_wire_compat): Validate against Java MurmurHash.hash3_x64_128 — tracked in gap_guards.rs
     /// using the diff-testing harness to confirm bit-for-bit compatibility.
     #[test]
     fn golden_empty() {

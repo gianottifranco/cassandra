@@ -26,9 +26,20 @@ pub mod http_tracing_audit;
 pub mod metrics;
 pub mod operations;
 pub mod prometheus_metrics;
+pub mod route_table;
 pub mod virtual_tables;
 pub mod virtual_tables_metrics;
 pub mod virtual_tables_operations;
+
+// Domain handler modules
+pub mod handlers_cache_hints;
+pub mod handlers_cluster;
+pub mod handlers_compaction;
+pub mod handlers_config;
+pub mod handlers_logging;
+pub mod handlers_snapshots;
+pub mod handlers_stats;
+pub mod handlers_topology;
 
 pub use diagnostics::{DiagnosticEvent, DiagnosticEventService, DiagnosticEventType};
 pub use http_admin::{AdminState, start_admin_server};

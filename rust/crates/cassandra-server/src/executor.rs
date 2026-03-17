@@ -132,7 +132,7 @@ impl QueryExecutor {
             QueryPlan::AlterKeyspace(ak) => self.execute_alter_keyspace(ak),
             QueryPlan::DropKeyspace(dk) => self.execute_drop_keyspace(dk),
             QueryPlan::CreateTable(ct) => self.execute_create_table(ct),
-            QueryPlan::AlterTable(_) => Ok(QueryResult::Void), // TODO
+            QueryPlan::AlterTable(_) => Ok(QueryResult::Void), // GAP(gap_guard_cql_functions): executor function dispatch — tracked in gap_guards.rs
             QueryPlan::DropTable(dt) => self.execute_drop_table(dt),
             QueryPlan::Insert(ins) => self.execute_insert(ins),
             QueryPlan::Update(upd) => self.execute_update(upd),

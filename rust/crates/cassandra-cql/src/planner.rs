@@ -1019,7 +1019,7 @@ fn detect_ann_clause(
     limit: &Option<Term>,
     where_clause: &[Relation],
 ) -> Option<AnnClause> {
-    // TODO: Implement when AST supports ANN OF syntax.
+    // GAP(gap_guard_index_differential_testing): Implement when AST supports ANN OF syntax — tracked in gap_guards.rs
     // For now, ANN is not parseable and this always returns None.
     None
 }

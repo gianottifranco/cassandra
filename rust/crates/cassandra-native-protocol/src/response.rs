@@ -225,6 +225,41 @@ fn encode_error(err: &ErrorMessage, buf: &mut BytesMut) {
             types::write_int(buf, *block_for);
             types::write_byte(buf, if *data_present { 1 } else { 0 });
         }
+        ErrorDetail::ReadFailure {
+            consistency,
+            received,
+            block_for,
+            num_failures,
+            data_present,
+        } => {
+            types::write_consistency(buf, *consistency);
+            types::write_int(buf, *received);
+            types::write_int(buf, *block_for);
+            types::write_int(buf, *num_failures);
+            types::write_byte(buf, if *data_present { 1 } else { 0 });
+        }
+        ErrorDetail::WriteFailure {
+            consistency,
+            received,
+            block_for,
+            num_failures,
+            write_type,
+        } => {
+            types::write_consistency(buf, *consistency);
+            types::write_int(buf, *received);
+            types::write_int(buf, *block_for);
+            types::write_int(buf, *num_failures);
+            types::write_string(buf, write_type);
+        }
+        ErrorDetail::FunctionFailure {
+            keyspace,
+            function,
+            arg_types,
+        } => {
+            types::write_string(buf, keyspace);
+            types::write_string(buf, function);
+            types::write_string_list(buf, arg_types);
+        }
         ErrorDetail::AlreadyExists { keyspace, table } => {
             types::write_string(buf, keyspace);
             types::write_string(buf, table);

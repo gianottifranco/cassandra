@@ -265,7 +265,7 @@ impl RoleManager for SystemAuthRoleManager {
         // Full table scan is not supported by StorageEngine's current API.
         // Roles must be looked up by name. Return known roles by scanning
         // the in-memory index if available, or return empty.
-        // TODO: Add scan_partitions to StorageEngine for full table iteration.
+        // GAP(gap_guard_paging): Add scan_partitions to StorageEngine for full table iteration — tracked in gap_guards.rs
         tracing::warn!("list_roles: full table scan not yet supported by storage engine");
         vec![]
     }

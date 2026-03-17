@@ -35,13 +35,18 @@
 //! - [`cluster`] — immutable cluster snapshot (Arc-swapped)
 //! - [`tcm`] — Transactional Cluster Metadata (epoch-based metadata log)
 
+pub mod cloud_metadata;
 pub mod cluster;
 pub mod gossip;
 pub mod node;
+pub mod range_streamer;
+pub mod replica_collection;
+pub mod replica_plan;
 pub mod replication;
 pub mod ring;
 pub mod snitch;
 pub mod tcm;
+pub mod token_allocator;
 pub mod topology;
 
 // Re-exports for ergonomic usage.
@@ -55,15 +60,22 @@ pub use gossip::{
     ApplicationState, EndpointState, Gossiper, HeartbeatState, SeedProvider, VersionedValue,
 };
 pub use node::{Endpoint, NodeId, NodeInfo, NodeState};
+pub use range_streamer::{FetchReplica, RangeStreamer, SourceFilter};
+pub use replica_collection::{
+    EndpointsForRange, EndpointsForToken, RangesAtEndpoint, ReplicationFactor,
+};
+pub use replica_plan::{ReplicaPlanForRangeRead, ReplicaPlanForRead, ReplicaPlanForWrite};
 pub use replication::{
-    EverywhereStrategy, LocalStrategy, NetworkTopologyStrategy, ReplicationStrategy,
-    SimpleStrategy, TransientReplicationStrategy, create_strategy,
+    EverywhereStrategy, LocalStrategy, NetworkTopologyStrategy, OldNetworkTopologyStrategy,
+    Replica, ReplicationStrategy, SimpleStrategy, TransientReplicationStrategy, create_strategy,
 };
 pub use ring::TokenRing;
 pub use snitch::{
-    DynamicEndpointSnitch, Ec2Snitch, GossipingPropertyFileSnitch, PropertyFileSnitch,
-    RackInferringSnitch, SimpleSnitch, Snitch, create_snitch,
+    AlibabaCloudSnitch, AzureSnitch, CloudstackSnitch, DynamicEndpointSnitch, Ec2Snitch,
+    GossipingPropertyFileSnitch, PropertyFileSnitch, RackInferringSnitch, SimpleSnitch, Snitch,
+    create_snitch,
 };
+pub use token_allocator::{TokenAllocator, create_token_allocator};
 pub use tcm::bridge::{ControlPlaneBridge, ControlPlaneMode};
 pub use tcm::{
     Epoch, LockedRanges, MetadataLog, NodeDirectory, Placement, TcmError, TcmMetadata,

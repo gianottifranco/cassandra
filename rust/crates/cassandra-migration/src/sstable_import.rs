@@ -359,7 +359,7 @@ pub fn import_sstable(
         };
     }
 
-    // TODO: Full binary conversion from Java to Rust SSTable format.
+    // GAP(gap_guard_sstable_java_compat): Full binary conversion from Java to Rust SSTable format — tracked in gap_guards.rs
     // For now, perform file-level copy with checksum validation as a
     // working framework. The inner parsing of Java SSTable binary layout
     // (partition headers, clustering prefixes, cells, range tombstones)

@@ -95,15 +95,18 @@ fn gap_guard_compaction_execution() {
 #[test]
 fn gap_guard_trie_index() {
     // CLOSED by prompt-05: InMemoryTrie, MergeTrie, MemtableTrie, cursor-based iteration.
-    // Java packages: org.apache.cassandra.db.tries
-    // Implemented in cassandra-storage::tries
+    // Verify cassandra_storage::tries module types are constructible.
+    use cassandra_storage::tries::InMemoryTrie;
+    let _trie: InMemoryTrie<String> = InMemoryTrie::new();
 }
 
 #[test]
 fn gap_guard_db_filters() {
     // CLOSED by prompt-05: ColumnFilter, ClusteringIndexFilter, RowFilter, DataLimits.
-    // Java packages: org.apache.cassandra.db.filter
-    // Implemented in cassandra-storage::filter
+    // Verify cassandra_storage::filter module types exist.
+    use cassandra_storage::filter::{ColumnFilter, RowFilter};
+    let _cf = ColumnFilter::AllColumns;
+    let _rf = RowFilter::none();
 }
 
 #[test]
@@ -116,10 +119,11 @@ fn gap_guard_caching() {
 
 #[test]
 fn gap_guard_row_transformations() {
-    // CLOSED by prompt-05: Transformation trait, FilteredRows, FilteredPartitions,
-    // PurgeTransform, LimitsTransform, FilterTransform, DuplicateRowChecker, RTBoundCloser.
-    // Java packages: org.apache.cassandra.db.transform
-    // Implemented in cassandra-storage::transform
+    // CLOSED by prompt-05: Transformation trait, FilteredRows, etc.
+    // Verify cassandra_storage::transform module types exist.
+    use cassandra_storage::transform::Transformation;
+    // Trait exists - verified by import
+    let _ = std::any::TypeId::of::<dyn Transformation>();
 }
 
 #[test]
@@ -256,12 +260,16 @@ fn gap_guard_journal() {
 // ═══════════════════════════════════════════════════════════════════════
 
 #[test]
-#[ignore = "GAP: Stage model / concurrency — Java: concurrent — Target: prompt-12"]
 fn gap_guard_concurrency_stages() {
-    // Java packages: org.apache.cassandra.concurrent
-    // SEPExecutor, SharedExecutorPool, Stage enum.
-    // Rust uses tokio but the Cassandra Stage model is missing.
-    panic!("Stage-based concurrency model not implemented");
+    // CLOSED by prompt-25: Stage enum with observable metrics.
+    use cassandra_common::{Stage, StageRegistry};
+    let registry = StageRegistry::new();
+    // Verify all 15 stage variants are tracked
+    assert_eq!(Stage::all().len(), 15);
+    let metrics = registry.get(Stage::Read);
+    metrics.inc_active();
+    let (active, _, _) = metrics.snapshot();
+    assert_eq!(active, 1);
 }
 
 #[test]

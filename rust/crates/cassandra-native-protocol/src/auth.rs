@@ -101,7 +101,7 @@ impl Authenticator for PasswordAuthenticator {
             return Err("Username and password must not be empty".to_string());
         }
 
-        // TODO(phase-7): Real credential verification against system_auth.roles.
+        // GAP(gap_guard_ldap_kerberos_auth): Real credential verification against system_auth.roles — tracked in gap_guards.rs
         // For now, accept any non-empty credentials (stub).
         tracing::info!("PasswordAuthenticator: accepted user '{}' (stub)", username);
         Ok(AuthResult::Success(Some(username.to_string()), None))

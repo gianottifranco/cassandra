@@ -1292,7 +1292,7 @@ impl Parser {
             return Ok(CqlTypeName::Map(Box::new(key_type), Box::new(val_type)));
         }
 
-        // TODO: tuple<...>
+        // GAP(gap_guard_cql_functions): tuple type parsing — tracked in gap_guards.rs
 
         let name = self.expect_ident()?;
         Ok(CqlTypeName::Simple(name))

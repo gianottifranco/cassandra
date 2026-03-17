@@ -82,6 +82,38 @@ pub enum CassandraError {
         data_present: bool,
     },
 
+    /// Read failure (0x1300).
+    #[error("Read failure: consistency={consistency}, received={received}, required={block_for}, failures={num_failures}")]
+    ReadFailure {
+        consistency: String,
+        received: i32,
+        block_for: i32,
+        num_failures: i32,
+        data_present: bool,
+    },
+
+    /// Function failure (0x1400).
+    #[error("Function failure: {keyspace}.{function}({arg_types:?})")]
+    FunctionFailure {
+        keyspace: String,
+        function: String,
+        arg_types: Vec<String>,
+    },
+
+    /// Write failure (0x1500).
+    #[error("Write failure: consistency={consistency}, received={received}, required={block_for}, failures={num_failures}")]
+    WriteFailure {
+        consistency: String,
+        received: i32,
+        block_for: i32,
+        num_failures: i32,
+        write_type: String,
+    },
+
+    /// CDC write failure (0x1600).
+    #[error("CDC write failure")]
+    CDCWriteFailure,
+
     // --- Syntax/Validation errors (0x2000 - 0x2FFF) ---
     /// Syntax error (0x2000).
     #[error("Syntax error: {0}")]
@@ -132,6 +164,10 @@ impl CassandraError {
             Self::TruncateError(_) => Some(0x1003),
             Self::WriteTimeout { .. } => Some(0x1100),
             Self::ReadTimeout { .. } => Some(0x1200),
+            Self::ReadFailure { .. } => Some(0x1300),
+            Self::FunctionFailure { .. } => Some(0x1400),
+            Self::WriteFailure { .. } => Some(0x1500),
+            Self::CDCWriteFailure => Some(0x1600),
             Self::SyntaxError(_) => Some(0x2000),
             Self::Unauthorized(_) => Some(0x2100),
             Self::InvalidQuery(_) => Some(0x2200),
@@ -167,6 +203,38 @@ mod tests {
             Some(0x2000)
         );
         assert_eq!(CassandraError::Internal("x".into()).error_code(), None);
+        assert_eq!(
+            CassandraError::ReadFailure {
+                consistency: "QUORUM".into(),
+                received: 2,
+                block_for: 3,
+                num_failures: 1,
+                data_present: false,
+            }
+            .error_code(),
+            Some(0x1300)
+        );
+        assert_eq!(
+            CassandraError::FunctionFailure {
+                keyspace: "ks".into(),
+                function: "fn".into(),
+                arg_types: vec!["int".into()],
+            }
+            .error_code(),
+            Some(0x1400)
+        );
+        assert_eq!(
+            CassandraError::WriteFailure {
+                consistency: "QUORUM".into(),
+                received: 2,
+                block_for: 3,
+                num_failures: 1,
+                write_type: "SIMPLE".into(),
+            }
+            .error_code(),
+            Some(0x1500)
+        );
+        assert_eq!(CassandraError::CDCWriteFailure.error_code(), Some(0x1600));
     }
 
     #[test]

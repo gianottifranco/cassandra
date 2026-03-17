@@ -26,9 +26,12 @@
 //! - `org.apache.cassandra.exceptions`
 //! - `org.apache.cassandra.serializers`
 
+pub mod bounds;
 pub mod error;
+pub mod estimated_histogram;
 pub mod murmur3;
 pub mod partitioner;
+pub mod stages;
 pub mod timestamp;
 pub mod token;
 pub mod tombstone;
@@ -37,7 +40,12 @@ pub mod version;
 
 /// Re-export commonly used types.
 pub use error::{CassandraError, CassandraResult};
-pub use partitioner::{Murmur3Partitioner, Partitioner, create_partitioner};
+pub use estimated_histogram::EstimatedHistogram;
+pub use stages::{Stage, StageMetrics, StageRegistry};
+pub use partitioner::{
+    ByteOrderedPartitioner, LocalPartitioner, LongTokenFactory, Murmur3Partitioner, Partitioner,
+    RandomPartitioner, TokenFactory, create_partitioner,
+};
 pub use timestamp::Timestamp;
 pub use token::Token;
 pub use tombstone::{DeletionTime, RangeTombstone};
@@ -46,12 +54,8 @@ pub use ttl::{LocalDeletionTime, Ttl};
 /// Crate version, matching the workspace version.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-// TODO(phase-3+): Add modules:
-// - bloom: Bloom filter implementation
-// - concurrent: Thread pool abstractions
-// - bytes: ByteBuf / ByteComparable abstractions
-// - compression: LZ4, Snappy, Zstd wrappers
-// - merkle: Merkle tree for anti-entropy repair
+// GAP(gap_guard_caching): bloom filter — tracked in gap_guards.rs
+// GAP(gap_guard_concurrency_stages): thread pool abstractions — tracked in gap_guards.rs
 
 #[cfg(test)]
 mod tests {

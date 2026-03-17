@@ -144,7 +144,7 @@ impl ReadRepairHandler {
                 "Executing read repair mutations"
             );
             if let Some(msg_svc) = messaging {
-                // TODO: For blocking strategy, we should use send_and_wait and collect responses
+                // GAP(gap_guard_internode_wire_compat): For blocking strategy, use send_and_wait and collect responses — tracked in gap_guards.rs
                 // For now, fire-and-forget or just log
                 for repair in self.pending.drain(..) {
                     let payload = b"simulated_repair_payload".to_vec(); // Simplified for parity test stub

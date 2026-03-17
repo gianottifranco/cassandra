@@ -121,7 +121,7 @@ pub fn replay_session(entries: &[FqlEntry]) -> ShadowReport {
     for (idx, entry) in entries.iter().enumerate() {
         let start = std::time::Instant::now();
 
-        // TODO: Wire to QueryExecutor when protocol layer is connected.
+        // GAP(gap_guard_nodetool_commands): Wire to QueryExecutor when protocol layer is connected — tracked in gap_guards.rs
         // For now, we validate the replay framework itself.
         let status = match &entry.expected_result {
             None => ReplayStatus::NoBaseline,
