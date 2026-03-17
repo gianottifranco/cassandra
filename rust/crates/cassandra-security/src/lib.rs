@@ -44,6 +44,9 @@ pub mod authz;
 pub mod cache;
 pub mod cidr;
 pub mod credentials_cache;
+pub mod crypto;
+pub mod encryption_at_rest;
+pub mod encryption_context;
 pub mod fql;
 pub mod identity_mapping;
 pub mod internode_auth;
@@ -53,6 +56,7 @@ pub mod network_auth;
 pub mod permissions_cache;
 pub mod roles;
 pub mod roles_cache;
+pub mod tde;
 pub mod tls;
 
 // Re-export key types
@@ -82,6 +86,14 @@ pub use permissions_cache::PermissionsCache;
 pub use roles::{InMemoryRoleManager, Role, RoleManager, RoleOptions};
 pub use roles_cache::RolesCache;
 pub use tls::{ReloadableTlsAcceptor, TlsConfig, TlsVersion};
+
+// Encryption-at-rest
+pub use crypto::{AesCbcProvider, CryptoProvider, FileKeyProvider, KeyProvider, NoOpCryptoProvider};
+pub use encryption_at_rest::{
+    create_encryptor, NoOpStorageEncryptor, StorageEncryptor, TdeStorageEncryptor,
+};
+pub use encryption_context::{EncryptionContext, EncryptionHeader};
+pub use tde::{KeyProviderConfig, TransparentDataEncryptionOptions};
 
 // ─── Security Error ────────────────────────────────────────────────────────
 

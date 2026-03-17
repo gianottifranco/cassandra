@@ -26,6 +26,7 @@
 //! - CDC integration hooks
 //! - Operational metrics
 
+pub mod encrypted;
 pub mod segment;
 
 use std::collections::HashMap;

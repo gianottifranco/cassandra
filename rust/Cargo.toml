@@ -129,6 +129,11 @@ ipnet = "2"
 notify = "7"
 hex = "0.4"
 
+# Crypto (encryption-at-rest)
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+cipher = { version = "0.4", features = ["block-padding"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

@@ -34,6 +34,8 @@ pub enum QueryPlan {
     Grant(GrantPlan),
     Revoke(RevokePlan),
     ListRoles(ListRolesPlan),
+    CreateIndex(CreateIndexPlan),
+    DropIndex(DropIndexPlan),
 }
 
 impl QueryPlan {
@@ -46,6 +48,8 @@ impl QueryPlan {
                 | QueryPlan::CreateTable(_)
                 | QueryPlan::AlterTable(_)
                 | QueryPlan::DropTable(_)
+                | QueryPlan::CreateIndex(_)
+                | QueryPlan::DropIndex(_)
         )
     }
 }
@@ -205,6 +209,25 @@ pub struct RevokePlan {
 pub struct ListRolesPlan {
     pub of_role: Option<String>,
     pub no_recursive: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateIndexPlan {
+    pub keyspace: String,
+    pub table: String,
+    pub index_name: String,
+    pub column: String,
+    pub kind: String,
+    pub custom_class: Option<String>,
+    pub options: HashMap<String, String>,
+    pub if_not_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropIndexPlan {
+    pub keyspace: String,
+    pub index_name: String,
+    pub if_exists: bool,
 }
 
 /// Plan a parsed statement against the current schema.
@@ -498,7 +521,96 @@ pub fn plan(
             no_recursive: lr.no_recursive,
         })),
 
-        // Phase 12: new statement types not yet fully plannable
+        Statement::CreateIndex(ci) => {
+            let ks = resolve_keyspace(ci.keyspace.as_deref(), active_keyspace)?;
+
+            // Validate keyspace and table exist
+            let ks_meta = schema
+                .keyspace(&ks)
+                .ok_or_else(|| PlanError::InvalidQuery(format!("Keyspace '{}' does not exist", ks)))?;
+
+            let table_meta = ks_meta
+                .table(&ci.table)
+                .ok_or_else(|| {
+                    PlanError::InvalidQuery(format!("Table '{}.{}' does not exist", ks, ci.table))
+                })?;
+
+            // Validate column exists
+            if table_meta.column(&ci.column).is_none() {
+                return Err(PlanError::InvalidQuery(format!(
+                    "Column '{}' does not exist in table '{}.{}'",
+                    ci.column, ks, ci.table
+                )));
+            }
+
+            // Validate column is not a partition key
+            let pk_names: Vec<&str> = table_meta
+                .partition_key_columns()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            if pk_names.contains(&ci.column.as_str()) {
+                return Err(PlanError::InvalidQuery(format!(
+                    "Cannot create secondary index on partition key column '{}'",
+                    ci.column
+                )));
+            }
+
+            // Auto-generate name if not provided
+            let index_name = ci
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("{}_{}_idx", ci.table, ci.column));
+
+            // Check for duplicate index name
+            if !ci.if_not_exists && table_meta.index(&index_name).is_some() {
+                return Err(PlanError::AlreadyExists {
+                    ks: ks.clone(),
+                    name: index_name,
+                });
+            }
+
+            let kind = if ci.custom_class.is_some() {
+                "CUSTOM".to_string()
+            } else {
+                "KEYS".to_string()
+            };
+
+            Ok(QueryPlan::CreateIndex(CreateIndexPlan {
+                keyspace: ks,
+                table: ci.table.clone(),
+                index_name,
+                column: ci.column.clone(),
+                kind,
+                custom_class: ci.custom_class.clone(),
+                options: ci.options.clone(),
+                if_not_exists: ci.if_not_exists,
+            }))
+        }
+
+        Statement::DropIndex(di) => {
+            let ks = resolve_keyspace(di.keyspace.as_deref(), active_keyspace)?;
+
+            if !di.if_exists {
+                // Verify the index exists somewhere in the keyspace
+                if let Some(ks_meta) = schema.keyspace(&ks) {
+                    if ks_meta.find_indexed_table(&di.name).is_none() {
+                        return Err(PlanError::InvalidQuery(format!(
+                            "Index '{}' does not exist in keyspace '{}'",
+                            di.name, ks
+                        )));
+                    }
+                }
+            }
+
+            Ok(QueryPlan::DropIndex(DropIndexPlan {
+                keyspace: ks,
+                index_name: di.name.clone(),
+                if_exists: di.if_exists,
+            }))
+        }
+
+        // Statement types not yet fully plannable
         _ => Err(PlanError::InvalidQuery(
             "statement type not yet supported by the planner".into(),
         )),
@@ -684,5 +796,110 @@ mod tests {
         let stmt = parser::parse("CREATE KEYSPACE k WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         assert!(p.is_schema_altering());
+    }
+
+    fn schema_with_table() -> SchemaSnapshot {
+        use cassandra_schema::column::ColumnMetadata;
+        use cassandra_schema::table::TableMetadataBuilder;
+        use cassandra_types::CqlType;
+
+        let table = TableMetadataBuilder::new("test_ks", "users")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular("email", CqlType::Varchar))
+            .add_column(ColumnMetadata::regular("name", CqlType::Varchar))
+            .build();
+        let ks =
+            KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
+        let mut snapshot = SchemaSnapshot::empty();
+        snapshot.keyspaces.insert("test_ks".to_string(), ks);
+        snapshot
+    }
+
+    #[test]
+    fn plan_create_index_basic() {
+        let schema = schema_with_table();
+        let stmt =
+            parser::parse("CREATE INDEX email_idx ON test_ks.users (email)").unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        assert!(p.is_schema_altering());
+        match p {
+            QueryPlan::CreateIndex(ci) => {
+                assert_eq!(ci.keyspace, "test_ks");
+                assert_eq!(ci.table, "users");
+                assert_eq!(ci.index_name, "email_idx");
+                assert_eq!(ci.column, "email");
+                assert_eq!(ci.kind, "KEYS");
+                assert!(ci.custom_class.is_none());
+            }
+            _ => panic!("expected CreateIndex, got {:?}", p),
+        }
+    }
+
+    #[test]
+    fn plan_create_index_auto_name() {
+        let schema = schema_with_table();
+        let stmt =
+            parser::parse("CREATE INDEX ON test_ks.users (email)").unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::CreateIndex(ci) => {
+                assert_eq!(ci.index_name, "users_email_idx");
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn plan_create_index_on_partition_key_fails() {
+        let schema = schema_with_table();
+        let stmt =
+            parser::parse("CREATE INDEX ON test_ks.users (id)").unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
+    fn plan_create_index_nonexistent_column_fails() {
+        let schema = schema_with_table();
+        let stmt =
+            parser::parse("CREATE INDEX ON test_ks.users (nonexistent)").unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
+    fn plan_create_index_if_not_exists() {
+        let schema = schema_with_table();
+        let stmt = parser::parse(
+            "CREATE INDEX IF NOT EXISTS ON test_ks.users (email)",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::CreateIndex(ci) => assert!(ci.if_not_exists),
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn plan_drop_index_if_exists() {
+        let schema = schema_with_table();
+        let stmt =
+            parser::parse("DROP INDEX IF EXISTS test_ks.some_idx").unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::DropIndex(di) => {
+                assert_eq!(di.keyspace, "test_ks");
+                assert_eq!(di.index_name, "some_idx");
+                assert!(di.if_exists);
+            }
+            _ => panic!("expected DropIndex"),
+        }
+    }
+
+    #[test]
+    fn plan_drop_index_nonexistent_fails() {
+        let schema = schema_with_table();
+        let stmt =
+            parser::parse("DROP INDEX test_ks.nonexistent_idx").unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
     }
 }

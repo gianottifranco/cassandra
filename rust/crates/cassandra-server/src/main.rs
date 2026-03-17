@@ -17,6 +17,7 @@ mod client_state;
 mod dispatcher;
 mod error_mapping;
 mod executor;
+mod guardrail_checks;
 mod query_processor;
 mod resource_limits;
 mod server;

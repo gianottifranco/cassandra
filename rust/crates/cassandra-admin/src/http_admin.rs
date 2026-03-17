@@ -333,6 +333,7 @@ async fn handle_rebuild_index(req: Request<Incoming>, state: &AdminState) -> Res
                         );
                     }
                 }
+                cassandra_schema::IndexKind::Composites => cassandra_storage::index::IndexType::Legacy,
             };
 
             let definition = cassandra_storage::index::IndexDefinition {

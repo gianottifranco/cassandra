@@ -13,6 +13,9 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 figment = { workspace = true }
 tracing = { workspace = true }
+parking_lot = { workspace = true }
+notify = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

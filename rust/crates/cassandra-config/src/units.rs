@@ -204,6 +204,94 @@ impl fmt::Display for Duration {
     }
 }
 
+/// A data rate in bytes per second, parsed from strings like "10MiB/s".
+///
+/// ## Java Oracle
+/// - `org.apache.cassandra.config.DataRateSpec`
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct DataRateSpec(pub u64);
+
+impl DataRateSpec {
+    pub const ZERO: Self = Self(0);
+
+    pub fn bytes_per_second(self) -> u64 {
+        self.0
+    }
+
+    pub fn mebibytes_per_second(self) -> u64 {
+        self.0 / (1024 * 1024)
+    }
+
+    pub fn from_bytes_per_second(bps: u64) -> Self {
+        Self(bps)
+    }
+
+    pub fn from_mebibytes_per_second(mibps: u64) -> Self {
+        Self(mibps * 1024 * 1024)
+    }
+}
+
+impl FromStr for DataRateSpec {
+    type Err = ParseUnitError;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err(ParseUnitError("empty data rate".to_string()));
+        }
+        let lower = s.to_lowercase();
+        if let Some(num) = lower.strip_suffix("mib/s") {
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            return Ok(Self::from_mebibytes_per_second(v));
+        }
+        if let Some(num) = lower.strip_suffix("kib/s") {
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            return Ok(Self(v * 1024));
+        }
+        if let Some(num) = lower.strip_suffix("b/s") {
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            return Ok(Self(v));
+        }
+        // Plain number = bytes per second
+        let v: u64 = s
+            .parse()
+            .map_err(|_| ParseUnitError(format!("invalid data rate: {}", s)))?;
+        Ok(Self(v))
+    }
+}
+
+impl<'de> Deserialize<'de> for DataRateSpec {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = StringOrNumber::deserialize(deserializer)?;
+        match s {
+            StringOrNumber::Str(s) => s.parse().map_err(serde::de::Error::custom),
+            StringOrNumber::Num(n) => Ok(DataRateSpec(n)),
+        }
+    }
+}
+
+impl fmt::Display for DataRateSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.0 == 0 {
+            write!(f, "0B/s")
+        } else if self.0 % (1024 * 1024) == 0 {
+            write!(f, "{}MiB/s", self.0 / (1024 * 1024))
+        } else if self.0 % 1024 == 0 {
+            write!(f, "{}KiB/s", self.0 / 1024)
+        } else {
+            write!(f, "{}B/s", self.0)
+        }
+    }
+}
+
 /// Helper for deserializing YAML values that can be string or number.
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -284,5 +372,35 @@ mod tests {
     #[test]
     fn invalid_duration() {
         assert!("bad".parse::<Duration>().is_err());
+    }
+
+    #[test]
+    fn data_rate_mib_s() {
+        let dr: DataRateSpec = "10MiB/s".parse().unwrap();
+        assert_eq!(dr.bytes_per_second(), 10 * 1024 * 1024);
+        assert_eq!(dr.mebibytes_per_second(), 10);
+    }
+
+    #[test]
+    fn data_rate_kib_s() {
+        let dr: DataRateSpec = "512KiB/s".parse().unwrap();
+        assert_eq!(dr.bytes_per_second(), 512 * 1024);
+    }
+
+    #[test]
+    fn data_rate_plain() {
+        let dr: DataRateSpec = "1048576".parse().unwrap();
+        assert_eq!(dr.bytes_per_second(), 1048576);
+    }
+
+    #[test]
+    fn data_rate_display() {
+        assert_eq!(DataRateSpec::from_mebibytes_per_second(10).to_string(), "10MiB/s");
+        assert_eq!(DataRateSpec::from_bytes_per_second(0).to_string(), "0B/s");
+    }
+
+    #[test]
+    fn invalid_data_rate() {
+        assert!("bad/s".parse::<DataRateSpec>().is_err());
     }
 }

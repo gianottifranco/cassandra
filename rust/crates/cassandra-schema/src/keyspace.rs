@@ -146,6 +146,38 @@ impl KeyspaceMetadata {
     pub fn table_count(&self) -> usize {
         self.tables.len()
     }
+
+    /// Find the table that contains an index with the given name.
+    pub fn find_indexed_table(&self, index_name: &str) -> Option<&str> {
+        for (table_name, table) in &self.tables {
+            if table.index(index_name).is_some() {
+                return Some(table_name.as_str());
+            }
+        }
+        None
+    }
+
+    /// Return a new `KeyspaceMetadata` with the given index added to the specified table.
+    pub fn with_table_index(
+        mut self,
+        table_name: &str,
+        idx: crate::index::IndexMetadata,
+    ) -> Self {
+        if let Some(table) = self.tables.remove(table_name) {
+            let updated = table.with_index(idx);
+            self.tables.insert(table_name.to_string(), updated);
+        }
+        self
+    }
+
+    /// Return a new `KeyspaceMetadata` with the named index removed from the specified table.
+    pub fn without_table_index(mut self, table_name: &str, index_name: &str) -> Self {
+        if let Some(table) = self.tables.remove(table_name) {
+            let updated = table.without_index(index_name);
+            self.tables.insert(table_name.to_string(), updated);
+        }
+        self
+    }
 }
 
 #[cfg(test)]
@@ -209,5 +241,48 @@ mod tests {
         let rep = ReplicationParams::simple(3);
         assert!(rep.strategy_class.contains("SimpleStrategy"));
         assert_eq!(rep.options.get("replication_factor").unwrap(), "3");
+    }
+
+    #[test]
+    fn find_indexed_table() {
+        use crate::index::{IndexKind, IndexMetadata};
+        use std::collections::HashMap;
+
+        let mut opts = HashMap::new();
+        opts.insert("target".into(), "email".into());
+        let idx = IndexMetadata::new("id1".into(), "email_idx".into(), IndexKind::Keys, opts);
+        let table = TableMetadataBuilder::new("ks", "users")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_index(idx)
+            .build();
+        let ks = KeyspaceMetadata::new("ks", KeyspaceParams::default()).with_table(table);
+
+        assert_eq!(ks.find_indexed_table("email_idx"), Some("users"));
+        assert_eq!(ks.find_indexed_table("nonexistent"), None);
+    }
+
+    #[test]
+    fn with_and_without_table_index() {
+        use crate::index::{IndexKind, IndexMetadata};
+        use std::collections::HashMap;
+
+        let table = TableMetadataBuilder::new("ks", "users")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .build();
+        let ks = KeyspaceMetadata::new("ks", KeyspaceParams::default()).with_table(table);
+
+        let idx = IndexMetadata::new(
+            "id1".into(),
+            "name_idx".into(),
+            IndexKind::Keys,
+            HashMap::new(),
+        );
+        let ks2 = ks.clone().with_table_index("users", idx);
+        assert!(ks2.table("users").unwrap().index("name_idx").is_some());
+        // original unchanged
+        assert!(ks.table("users").unwrap().index("name_idx").is_none());
+
+        let ks3 = ks2.without_table_index("users", "name_idx");
+        assert!(ks3.table("users").unwrap().index("name_idx").is_none());
     }
 }

@@ -5,6 +5,7 @@
 //! Loads `cassandra.yaml`, applies environment overrides, and validates.
 
 use crate::config::CassandraConfig;
+use crate::properties;
 use crate::validation::{self, ConfigError};
 use std::path::Path;
 
@@ -39,7 +40,8 @@ impl std::error::Error for LoadError {}
 /// Returns the validated configuration or the first set of errors encountered.
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<CassandraConfig, LoadError> {
     let content = std::fs::read_to_string(path.as_ref()).map_err(LoadError::Io)?;
-    let config: CassandraConfig = serde_yaml::from_str(&content).map_err(LoadError::Parse)?;
+    let mut config: CassandraConfig = serde_yaml::from_str(&content).map_err(LoadError::Parse)?;
+    properties::apply_overrides(&mut config);
     let errors = validation::validate(&config);
     if errors.is_empty() {
         Ok(config)

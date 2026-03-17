@@ -52,6 +52,11 @@ impl<'a> QueryPlanner<'a> {
     }
 
     /// Generates a query plan for the given keyspace, table, and row filter.
+    ///
+    /// Strategy:
+    /// 1. ANN queries always take priority (vector search dictates ordering).
+    /// 2. Among non-ANN candidates, rank by index type: SAI > Legacy.
+    /// 3. Fallback to FullScan if no indexes match.
     pub fn plan_read(&self, keyspace: &str, table: &str, filter: &RowFilter) -> QueryPlan {
         if filter.is_empty() {
             return QueryPlan::FullScan;
@@ -72,18 +77,34 @@ impl<'a> QueryPlanner<'a> {
             }
         }
 
-        // 2. Look for strict equality or bounding exact matches.
-        // In a real planner, we'd rank indexes by selectivity or index type (SAI > SASI > Legacy).
+        // 2. Collect all candidate indexes, then rank by type (SAI > Legacy).
+        let mut candidates: Vec<(String, String, Expression)> = Vec::new();
         for expr in &filter.expressions {
-            if let Some((idx_name, _)) =
+            if let Some((idx_name, idx_type)) =
                 self.catalog
                     .get_index_for_column(keyspace, table, &expr.column)
             {
-                return QueryPlan::IndexScan {
-                    index_name: idx_name,
-                    expression: expr.clone(),
-                };
+                candidates.push((idx_name, idx_type, expr.clone()));
             }
+        }
+
+        if !candidates.is_empty() {
+            // Sort: "sai" > anything else (like "legacy")
+            candidates.sort_by(|a, b| {
+                let rank = |t: &str| -> u8 {
+                    match t {
+                        "sai" => 2,
+                        _ => 1, // legacy, sasi, etc.
+                    }
+                };
+                rank(&b.1).cmp(&rank(&a.1))
+            });
+
+            let best = &candidates[0];
+            return QueryPlan::IndexScan {
+                index_name: best.0.clone(),
+                expression: best.2.clone(),
+            };
         }
 
         // Fallback
@@ -153,5 +174,93 @@ mod tests {
 
         let plan = planner.plan_read("ks", "t1", &filter);
         assert_eq!(plan, QueryPlan::FullScan);
+    }
+
+    /// Mock catalog with multiple indexes for best-index selection testing.
+    struct MultiIndexCatalog;
+    impl SchemaCatalogStub for MultiIndexCatalog {
+        fn get_index_for_column(
+            &self,
+            ks: &str,
+            tbl: &str,
+            col: &str,
+        ) -> Option<(String, String)> {
+            if ks == "ks" && tbl == "t1" {
+                match col {
+                    "email" => Some(("email_legacy_idx".to_string(), "legacy".to_string())),
+                    "name" => Some(("name_sai_idx".to_string(), "sai".to_string())),
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn best_index_prefers_sai_over_legacy() {
+        let planner = QueryPlanner::new(&MultiIndexCatalog);
+        // Filter references both legacy-indexed and sai-indexed columns
+        let filter = RowFilter::default()
+            .add_expression(Expression {
+                column: "email".to_string(),
+                operator: Operator::Eq,
+                value: b"alice@example.com".to_vec(),
+            })
+            .add_expression(Expression {
+                column: "name".to_string(),
+                operator: Operator::Eq,
+                value: b"Alice".to_vec(),
+            });
+
+        let plan = planner.plan_read("ks", "t1", &filter);
+        match plan {
+            QueryPlan::IndexScan { index_name, .. } => {
+                assert_eq!(index_name, "name_sai_idx", "should prefer SAI over legacy");
+            }
+            _ => panic!("Expected IndexScan"),
+        }
+    }
+
+    #[test]
+    fn ann_still_takes_priority_over_sai() {
+        let planner = QueryPlanner::new(&MultiIndexCatalog);
+        // ANN on a non-indexed column won't match, but let's use a catalog that has vector
+        struct VecCatalog;
+        impl SchemaCatalogStub for VecCatalog {
+            fn get_index_for_column(
+                &self,
+                _ks: &str,
+                _tbl: &str,
+                col: &str,
+            ) -> Option<(String, String)> {
+                match col {
+                    "vec" => Some(("vec_idx".to_string(), "sai".to_string())),
+                    "name" => Some(("name_sai".to_string(), "sai".to_string())),
+                    _ => None,
+                }
+            }
+        }
+
+        let planner = QueryPlanner::new(&VecCatalog);
+        let filter = RowFilter::default()
+            .add_expression(Expression {
+                column: "vec".to_string(),
+                operator: Operator::Ann,
+                value: vec![1, 2, 3],
+            })
+            .add_expression(Expression {
+                column: "name".to_string(),
+                operator: Operator::Eq,
+                value: b"Alice".to_vec(),
+            });
+
+        let plan = planner.plan_read("ks", "t1", &filter);
+        match plan {
+            QueryPlan::AnnSearch { index_name, .. } => {
+                assert_eq!(index_name, "vec_idx", "ANN should take priority");
+            }
+            _ => panic!("Expected AnnSearch"),
+        }
     }
 }

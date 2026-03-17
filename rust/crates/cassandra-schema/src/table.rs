@@ -164,6 +164,18 @@ impl TableMetadata {
     pub fn index(&self, name: &str) -> Option<&IndexMetadata> {
         self.indexes.iter().find(|i| i.name == name)
     }
+
+    /// Return a new `TableMetadata` with the given index added.
+    pub fn with_index(mut self, idx: IndexMetadata) -> Self {
+        self.indexes.push(idx);
+        self
+    }
+
+    /// Return a new `TableMetadata` with the named index removed.
+    pub fn without_index(mut self, name: &str) -> Self {
+        self.indexes.retain(|i| i.name != name);
+        self
+    }
 }
 
 /// Builder for constructing `TableMetadata`.
@@ -291,5 +303,29 @@ mod tests {
     fn static_columns() {
         let t = sample_table();
         assert_eq!(t.static_columns().len(), 1);
+    }
+
+    #[test]
+    fn with_and_without_index() {
+        use crate::index::{IndexKind, IndexMetadata};
+        use std::collections::HashMap;
+
+        let t = sample_table();
+        assert!(t.indexes.is_empty());
+
+        let idx = IndexMetadata::new(
+            "id1".into(),
+            "email_idx".into(),
+            IndexKind::Keys,
+            HashMap::new(),
+        );
+        let t2 = t.clone().with_index(idx);
+        assert_eq!(t2.indexes.len(), 1);
+        assert!(t2.index("email_idx").is_some());
+        // original unchanged
+        assert!(t.indexes.is_empty());
+
+        let t3 = t2.without_index("email_idx");
+        assert!(t3.indexes.is_empty());
     }
 }

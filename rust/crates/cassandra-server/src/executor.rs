@@ -20,9 +20,10 @@ use cassandra_cql::ast::{
 };
 use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::planner::{
-    AlterKeyspacePlan, AlterRolePlan, BatchPlan, CreateKeyspacePlan, CreateRolePlan,
-    CreateTablePlan, DeletePlan, DropKeyspacePlan, DropRolePlan, DropTablePlan, GrantPlan,
-    InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan, UpdatePlan, UsePlan,
+    AlterKeyspacePlan, AlterRolePlan, BatchPlan, CreateIndexPlan, CreateKeyspacePlan,
+    CreateRolePlan, CreateTablePlan, DeletePlan, DropIndexPlan, DropKeyspacePlan, DropRolePlan,
+    DropTablePlan, GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan,
+    UpdatePlan, UsePlan,
 };
 use cassandra_schema::{
     ClusteringOrder, ColumnKind, ColumnMetadata, KeyspaceMetadata, KeyspaceParams,
@@ -135,6 +136,8 @@ impl QueryExecutor {
             QueryPlan::Grant(gr) => self.execute_grant(gr),
             QueryPlan::Revoke(rv) => self.execute_revoke(rv),
             QueryPlan::ListRoles(lr) => self.execute_list_roles(lr),
+            QueryPlan::CreateIndex(ci) => self.execute_create_index(ci),
+            QueryPlan::DropIndex(di) => self.execute_drop_index(di),
         }
     }
 
@@ -334,6 +337,132 @@ impl QueryExecutor {
             target: "TABLE".into(),
             keyspace: plan.keyspace.clone(),
             name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_create_index(&self, plan: &CreateIndexPlan) -> Result<QueryResult, ExecutorError> {
+        use cassandra_schema::index::{IndexKind, IndexMetadata};
+        use cassandra_storage::index::{IndexDefinition, IndexType};
+
+        let kind = if plan.custom_class.is_some() {
+            IndexKind::Custom
+        } else {
+            IndexKind::Keys
+        };
+
+        let mut options = plan.options.clone();
+        options.insert("target".to_string(), plan.column.clone());
+        if let Some(ref class) = plan.custom_class {
+            options.insert("class_name".to_string(), class.clone());
+        }
+
+        let idx_meta = IndexMetadata::new(
+            plan.index_name.clone(),
+            plan.index_name.clone(),
+            kind,
+            options,
+        );
+
+        // Update schema catalog
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .with_table_index(&plan.table, idx_meta);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+        drop(catalog);
+
+        // Register in storage engine
+        let index_type = if plan
+            .custom_class
+            .as_deref()
+            .map(|c| c.contains("StorageAttachedIndex"))
+            .unwrap_or(false)
+        {
+            IndexType::Sai
+        } else {
+            IndexType::Legacy
+        };
+
+        let def = IndexDefinition {
+            name: plan.index_name.clone(),
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            column: plan.column.clone(),
+            index_type,
+            options: plan.options.clone(),
+        };
+
+        let cf_name = format!("{}.{}", plan.keyspace, plan.table);
+        let _ = self.engine.rebuild_index(&cf_name, def);
+
+        info!(
+            keyspace = %plan.keyspace,
+            table = %plan.table,
+            index = %plan.index_name,
+            "Created index"
+        );
+
+        Ok(QueryResult::SchemaChange {
+            change_type: "CREATED".into(),
+            target: "INDEX".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.index_name.clone()),
+        })
+    }
+
+    fn execute_drop_index(&self, plan: &DropIndexPlan) -> Result<QueryResult, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks_meta = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?;
+
+        let table_name = match ks_meta.find_indexed_table(&plan.index_name) {
+            Some(t) => t.to_string(),
+            None => {
+                if plan.if_exists {
+                    return Ok(QueryResult::Void);
+                }
+                return Err(ExecutorError::InvalidQuery(format!(
+                    "Index '{}' not found in keyspace '{}'",
+                    plan.index_name, plan.keyspace
+                )));
+            }
+        };
+
+        let updated_ks = ks_meta
+            .clone()
+            .without_table_index(&table_name, &plan.index_name);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(updated_ks);
+        drop(catalog);
+
+        // Unregister from storage engine
+        let cf_name = format!("{}.{}", plan.keyspace, table_name);
+        let mgrs = self.engine.index_managers.read();
+        if let Some(mgr) = mgrs.get(&cf_name) {
+            mgr.unregister(&plan.index_name);
+        }
+
+        info!(
+            keyspace = %plan.keyspace,
+            index = %plan.index_name,
+            "Dropped index"
+        );
+
+        Ok(QueryResult::SchemaChange {
+            change_type: "DROPPED".into(),
+            target: "INDEX".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.index_name.clone()),
         })
     }
 

@@ -18,6 +18,7 @@
 //! - [`metrics`] — atomic counters for repair progress
 
 pub mod anti_compaction;
+pub mod repair_config;
 pub mod consistent_coordinator;
 pub mod consistent_local;
 pub mod coordinator;
@@ -43,4 +44,5 @@ pub use messages::{ConsistentSessionState, RepairMessage};
 pub use options::{RepairOption, RepairParallelism, RepairRange};
 pub use sync_task::{LocalSyncTask, RemoteSyncTask, StreamingRepairTask, SyncResult};
 pub use validator::{hash_partition_data, validate, validate_from_hashes};
+pub use repair_config::{MerkleTreeResponseSpec, RepairConfig, RetrySpec};
 pub use virtual_tables::{InMemoryRepairHistory, RepairHistoryEntry};
