@@ -19,14 +19,18 @@
 //! It supports multiple SSTable formats (Big, BTI), all compaction strategies
 //! (STCS, LCS, TWCS, UCS), CDC, snapshots, and incremental backups.
 
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
 
 use crate::backup::{self, IncrementalBackupConfig};
+use crate::cache::row_cache::RowCache;
 use crate::commitlog::{CommitLog, CommitLogConfig, Mutation};
 use crate::compaction::{
     CompactionMetrics, CompactionStrategy, CompactionStrategyType, SSTableMetadata,
@@ -38,6 +42,7 @@ use crate::materialized_views::{MaterializedViewDefinition, ViewManager};
 use crate::memtable::partition::{Cell, PartitionData, Row};
 use crate::memtable::{MemtableManager, MemtableType};
 use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
+use crate::sstable::key_cache::{KeyCache, KeyCacheConfig};
 use crate::sstable::{BtiReader, BtiWriter, SSTableReader, SSTableWriter};
 
 // ─── Configuration ─────────────────────────────────────────────────────────
@@ -217,6 +222,10 @@ pub struct StorageEngine {
     /// Materialized view manager.
     #[cfg(feature = "materialized-views")]
     pub view_manager: std::sync::Arc<ViewManager>,
+    /// Shared key cache for SSTable reads.
+    key_cache: Option<Arc<KeyCache>>,
+    /// Row cache for partition data.
+    row_cache: Option<Arc<RowCache>>,
 }
 
 impl StorageEngine {
@@ -237,8 +246,12 @@ impl StorageEngine {
         // Create compaction strategy
         let compaction_strategy = create_strategy(config.compaction_strategy_type);
 
+        // Create key cache
+        let key_cache = KeyCache::new(KeyCacheConfig::default());
+
         // Load existing SSTables
-        let (sstables, max_gen) = Self::load_existing_sstables(&config.data_directories)?;
+        let (sstables, max_gen) =
+            Self::load_existing_sstables(&config.data_directories, Some(&key_cache))?;
 
         info!(
             sstables = sstables.len(),
@@ -260,7 +273,32 @@ impl StorageEngine {
             index_managers: RwLock::new(std::collections::HashMap::new()),
             #[cfg(feature = "materialized-views")]
             view_manager: std::sync::Arc::new(ViewManager::new()),
+            key_cache: Some(key_cache),
+            row_cache: None,
         })
+    }
+
+    /// Set the row cache for this engine.
+    pub fn set_row_cache(&mut self, cache: Arc<RowCache>) {
+        self.row_cache = Some(cache);
+    }
+
+    /// Get a reference to the key cache.
+    pub fn key_cache(&self) -> Option<&Arc<KeyCache>> {
+        self.key_cache.as_ref()
+    }
+
+    /// Get a reference to the row cache.
+    pub fn row_cache(&self) -> Option<&Arc<RowCache>> {
+        self.row_cache.as_ref()
+    }
+
+    /// Compute a table hash from keyspace and table name.
+    fn table_hash(keyspace: &str, table: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        keyspace.hash(&mut hasher);
+        table.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Apply a mutation (write path).
@@ -363,7 +401,13 @@ impl StorageEngine {
             }
         }
 
-        // 4. Check backpressure
+        // 4. Invalidate row cache for this partition
+        if let Some(ref cache) = self.row_cache {
+            let th = Self::table_hash(&mutation.keyspace, &mutation.table);
+            cache.invalidate_partition(th, &mutation.partition_key);
+        }
+
+        // 5. Check backpressure
         if self.memtable_manager.should_flush() {
             debug!("Backpressure: inline flush triggered");
             self.flush_cf(&cf_name)?;
@@ -380,10 +424,20 @@ impl StorageEngine {
         partition_key: &[u8],
     ) -> Option<PartitionData> {
         let cf_name = format!("{keyspace}.{table}");
+        let th = Self::table_hash(keyspace, table);
 
         // Read from memtable
         let memtable = self.memtable_manager.get_or_create(&cf_name, 0);
         let mut result = memtable.get_partition(partition_key);
+
+        // If memtable had no data, try row cache before going to SSTables
+        if result.is_none() {
+            if let Some(ref cache) = self.row_cache {
+                if let Some(cached) = cache.get(th, partition_key) {
+                    return Some(cached);
+                }
+            }
+        }
 
         // Read from SSTables (newest first)
         let sstables = self.sstables.read();
@@ -406,6 +460,13 @@ impl StorageEngine {
                     }
                     None => result = Some(sst_partition),
                 }
+            }
+        }
+
+        // Populate row cache on SSTable read (only when memtable had no data)
+        if let Some(ref data) = result {
+            if let Some(ref cache) = self.row_cache {
+                cache.put(th, partition_key.to_vec(), data.clone());
             }
         }
 
@@ -502,7 +563,10 @@ impl StorageEngine {
             SSTableFormat::Big => {
                 let writer = SSTableWriter::new(descriptor.clone());
                 writer.write(&partitions)?;
-                let reader = SSTableReader::open(descriptor)?;
+                let mut reader = SSTableReader::open(descriptor)?;
+                if let Some(ref cache) = self.key_cache {
+                    reader = reader.with_key_cache(Arc::clone(cache));
+                }
                 let handle = SSTableHandle::Big(reader);
                 let files = handle.descriptor_component_files();
                 self.maybe_backup(&files);
@@ -936,7 +1000,13 @@ impl StorageEngine {
 
         // Open the new SSTable and replace old ones
         let new_handle = match self.config.sstable_format {
-            SSTableFormat::Big => SSTableHandle::Big(SSTableReader::open(descriptor)?),
+            SSTableFormat::Big => {
+                let mut reader = SSTableReader::open(descriptor)?;
+                if let Some(ref cache) = self.key_cache {
+                    reader = reader.with_key_cache(Arc::clone(cache));
+                }
+                SSTableHandle::Big(reader)
+            }
             SSTableFormat::Bti => SSTableHandle::Bti(BtiReader::open(descriptor)?),
         };
 
@@ -981,6 +1051,7 @@ impl StorageEngine {
 
     fn load_existing_sstables(
         data_dirs: &[PathBuf],
+        key_cache: Option<&Arc<KeyCache>>,
     ) -> Result<(Vec<SSTableHandle>, u64), Box<dyn std::error::Error>> {
         let mut handles = Vec::new();
         let mut max_gen: u64 = 0;
@@ -999,7 +1070,14 @@ impl StorageEngine {
                         max_gen = max_gen.max(generation);
                         match desc.format {
                             SSTableFormat::Big => match SSTableReader::open(desc) {
-                                Ok(reader) => handles.push(SSTableHandle::Big(reader)),
+                                Ok(reader) => {
+                                    let reader = if let Some(cache) = key_cache {
+                                        reader.with_key_cache(Arc::clone(cache))
+                                    } else {
+                                        reader
+                                    };
+                                    handles.push(SSTableHandle::Big(reader));
+                                }
                                 Err(e) => {
                                     warn!(file = %fname, error = %e, "Failed to open Big SSTable")
                                 }

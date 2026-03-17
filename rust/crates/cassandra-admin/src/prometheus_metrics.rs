@@ -27,6 +27,15 @@ pub struct MetricsRegistry {
     pub connected_native_clients: IntGauge,
     pub tombstone_scanned: IntCounter,
     pub key_cache_hit_rate: Gauge,
+    pub key_cache_size: IntGauge,
+    pub key_cache_hits_total: IntCounter,
+    pub key_cache_misses_total: IntCounter,
+    pub row_cache_hit_rate: Gauge,
+    pub row_cache_size: IntGauge,
+    pub counter_cache_hit_rate: Gauge,
+    pub counter_cache_size: IntGauge,
+    pub chunk_cache_hit_rate: Gauge,
+    pub chunk_cache_size: IntGauge,
     pub storage_load_bytes: IntGauge,
     pub exceptions_count: IntCounterVec,
 
@@ -124,6 +133,87 @@ impl MetricsRegistry {
             .register(Box::new(key_cache_hit_rate.clone()))
             .expect("register cache hit rate");
 
+        let key_cache_size = IntGauge::new(
+            "cassandra_key_cache_size",
+            "Number of entries in the key cache",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(key_cache_size.clone()))
+            .expect("register key cache size");
+
+        let key_cache_hits_total = IntCounter::new(
+            "cassandra_key_cache_hits_total",
+            "Total key cache hits",
+        )
+        .expect("counter creation");
+        registry
+            .register(Box::new(key_cache_hits_total.clone()))
+            .expect("register key cache hits");
+
+        let key_cache_misses_total = IntCounter::new(
+            "cassandra_key_cache_misses_total",
+            "Total key cache misses",
+        )
+        .expect("counter creation");
+        registry
+            .register(Box::new(key_cache_misses_total.clone()))
+            .expect("register key cache misses");
+
+        let row_cache_hit_rate = Gauge::new(
+            "cassandra_row_cache_hit_rate",
+            "Row cache hit rate (0.0 - 1.0)",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(row_cache_hit_rate.clone()))
+            .expect("register row cache hit rate");
+
+        let row_cache_size = IntGauge::new(
+            "cassandra_row_cache_size",
+            "Number of entries in the row cache",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(row_cache_size.clone()))
+            .expect("register row cache size");
+
+        let counter_cache_hit_rate = Gauge::new(
+            "cassandra_counter_cache_hit_rate",
+            "Counter cache hit rate (0.0 - 1.0)",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(counter_cache_hit_rate.clone()))
+            .expect("register counter cache hit rate");
+
+        let counter_cache_size = IntGauge::new(
+            "cassandra_counter_cache_size",
+            "Number of entries in the counter cache",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(counter_cache_size.clone()))
+            .expect("register counter cache size");
+
+        let chunk_cache_hit_rate = Gauge::new(
+            "cassandra_chunk_cache_hit_rate",
+            "Chunk cache hit rate (0.0 - 1.0)",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(chunk_cache_hit_rate.clone()))
+            .expect("register chunk cache hit rate");
+
+        let chunk_cache_size = IntGauge::new(
+            "cassandra_chunk_cache_size",
+            "Chunk cache byte usage",
+        )
+        .expect("gauge creation");
+        registry
+            .register(Box::new(chunk_cache_size.clone()))
+            .expect("register chunk cache size");
+
         let storage_load_bytes = IntGauge::new(
             "cassandra_storage_load_bytes",
             "Total data stored on this node in bytes",
@@ -207,6 +297,15 @@ impl MetricsRegistry {
             connected_native_clients,
             tombstone_scanned,
             key_cache_hit_rate,
+            key_cache_size,
+            key_cache_hits_total,
+            key_cache_misses_total,
+            row_cache_hit_rate,
+            row_cache_size,
+            counter_cache_hit_rate,
+            counter_cache_size,
+            chunk_cache_hit_rate,
+            chunk_cache_size,
             storage_load_bytes,
             exceptions_count,
             repair_trees_built,
@@ -254,6 +353,28 @@ impl MetricsRegistry {
             .inc();
     }
 
+    /// Sync cache metrics from cache statistics snapshots.
+    pub fn sync_cache_metrics(
+        &self,
+        key_hit_rate: f64,
+        key_size: usize,
+        row_hit_rate: f64,
+        row_size: usize,
+        counter_hit_rate: f64,
+        counter_size: usize,
+        chunk_hit_rate: f64,
+        chunk_size: usize,
+    ) {
+        self.key_cache_hit_rate.set(key_hit_rate);
+        self.key_cache_size.set(key_size as i64);
+        self.row_cache_hit_rate.set(row_hit_rate);
+        self.row_cache_size.set(row_size as i64);
+        self.counter_cache_hit_rate.set(counter_hit_rate);
+        self.counter_cache_size.set(counter_size as i64);
+        self.chunk_cache_hit_rate.set(chunk_hit_rate);
+        self.chunk_cache_size.set(chunk_size as i64);
+    }
+
     /// Sync from repair metrics snapshot.
     pub fn sync_from_repair_metrics(
         &self,
@@ -289,7 +410,6 @@ mod tests {
     fn registry_creation() {
         let registry = MetricsRegistry::new();
         let text = registry.gather_text();
-        // Should contain metric names even if values are zero
         assert!(text.contains("cassandra_read_count_total"));
         assert!(text.contains("cassandra_write_count_total"));
     }
@@ -328,6 +448,39 @@ mod tests {
         let text = registry.gather_text();
         assert!(text.contains("cassandra_live_sstable_count 42"));
         assert!(text.contains("cassandra_pending_compactions 3"));
+    }
+
+    #[test]
+    fn cache_metrics_sync() {
+        let registry = MetricsRegistry::new();
+        registry.sync_cache_metrics(0.85, 1000, 0.72, 500, 0.60, 200, 0.90, 4096);
+
+        let text = registry.gather_text();
+        assert!(text.contains("cassandra_key_cache_hit_rate 0.85"));
+        assert!(text.contains("cassandra_key_cache_size 1000"));
+        assert!(text.contains("cassandra_row_cache_hit_rate 0.72"));
+        assert!(text.contains("cassandra_row_cache_size 500"));
+        assert!(text.contains("cassandra_counter_cache_hit_rate 0.6"));
+        assert!(text.contains("cassandra_counter_cache_size 200"));
+        assert!(text.contains("cassandra_chunk_cache_hit_rate 0.9"));
+        assert!(text.contains("cassandra_chunk_cache_size 4096"));
+    }
+
+    #[test]
+    fn cache_metrics_in_text_output() {
+        let registry = MetricsRegistry::new();
+        let text = registry.gather_text();
+
+        assert!(text.contains("cassandra_key_cache_hit_rate"));
+        assert!(text.contains("cassandra_key_cache_size"));
+        assert!(text.contains("cassandra_key_cache_hits_total"));
+        assert!(text.contains("cassandra_key_cache_misses_total"));
+        assert!(text.contains("cassandra_row_cache_hit_rate"));
+        assert!(text.contains("cassandra_row_cache_size"));
+        assert!(text.contains("cassandra_counter_cache_hit_rate"));
+        assert!(text.contains("cassandra_counter_cache_size"));
+        assert!(text.contains("cassandra_chunk_cache_hit_rate"));
+        assert!(text.contains("cassandra_chunk_cache_size"));
     }
 
     #[test]

@@ -31,6 +31,7 @@
 //! | `mat-views`  | Materialized views                        |
 
 pub mod backup;
+pub mod cache;
 pub mod cdc;
 pub mod commitlog;
 pub mod compaction;
@@ -38,6 +39,7 @@ pub mod engine;
 pub mod filter;
 pub mod memtable;
 pub mod notifications;
+pub mod notifications_ext;
 pub mod partitions;
 pub mod rows;
 pub mod sstable;

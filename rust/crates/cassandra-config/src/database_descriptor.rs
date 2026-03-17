@@ -174,6 +174,22 @@ impl DatabaseDescriptor {
         self.config.read().row_cache_size
     }
 
+    pub fn counter_cache_size(&self) -> Option<DataSize> {
+        self.config.read().counter_cache_size
+    }
+
+    pub fn counter_cache_save_period(&self) -> Option<Duration> {
+        self.config.read().counter_cache_save_period
+    }
+
+    pub fn chunk_cache_size(&self) -> Option<DataSize> {
+        self.config.read().chunk_cache_size
+    }
+
+    pub fn saved_caches_directory(&self) -> Option<String> {
+        self.config.read().saved_caches_directory.clone()
+    }
+
     // ── Failure policies ─────────────────────────────────────────────────
 
     pub fn disk_failure_policy(&self) -> String {

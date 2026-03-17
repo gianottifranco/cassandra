@@ -149,6 +149,15 @@ pub struct CassandraConfig {
     #[serde(default)]
     pub row_cache_size: Option<DataSize>,
 
+    #[serde(default)]
+    pub counter_cache_size: Option<DataSize>,
+
+    #[serde(default)]
+    pub counter_cache_save_period: Option<Duration>,
+
+    #[serde(default)]
+    pub chunk_cache_size: Option<DataSize>,
+
     // ── CDC ──
     #[serde(default)]
     pub cdc_enabled: Option<bool>,
@@ -572,6 +581,30 @@ native_transport_idle_timeout_seconds: 300
         assert!(cfg.native_transport_rate_limiting_enabled);
         assert_eq!(cfg.native_transport_max_requests_per_second, 10_000);
         assert_eq!(cfg.native_transport_idle_timeout_seconds, 300);
+    }
+
+    #[test]
+    fn cache_config_defaults() {
+        let cfg = CassandraConfig::default();
+        assert!(cfg.key_cache_size.is_none());
+        assert!(cfg.key_cache_save_period.is_none());
+        assert!(cfg.row_cache_size.is_none());
+        assert!(cfg.counter_cache_size.is_none());
+        assert!(cfg.counter_cache_save_period.is_none());
+        assert!(cfg.chunk_cache_size.is_none());
+    }
+
+    #[test]
+    fn deserialize_cache_config() {
+        let yaml = r#"
+counter_cache_size: "50MiB"
+counter_cache_save_period: "7200s"
+chunk_cache_size: "32MiB"
+"#;
+        let cfg: CassandraConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.counter_cache_size.is_some());
+        assert!(cfg.counter_cache_save_period.is_some());
+        assert!(cfg.chunk_cache_size.is_some());
     }
 
     #[test]

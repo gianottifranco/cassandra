@@ -10,10 +10,11 @@
 //! skip the index binary search. The cache is LRU-evicted and safe to share
 //! across reader threads via `Arc<KeyCache>`.
 
-use std::collections::{HashMap, VecDeque};
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use lru::LruCache;
 use parking_lot::Mutex;
 
 use super::format::SSTableId;
@@ -35,75 +36,33 @@ impl Default for KeyCacheConfig {
     }
 }
 
-/// Hit / miss / size statistics.
+/// Hit / miss / size / eviction statistics.
 #[derive(Debug, Clone)]
 pub struct KeyCacheStats {
     pub hits: u64,
     pub misses: u64,
     pub size: usize,
+    pub evictions: u64,
 }
 
-/// Thread-safe LRU key cache backed by `HashMap` + `VecDeque`.
+/// Thread-safe LRU key cache backed by `lru::LruCache`.
 pub struct KeyCache {
-    inner: Mutex<LruMap>,
+    inner: Mutex<LruCache<KeyCacheKey, u64>>,
     hits: AtomicU64,
     misses: AtomicU64,
-}
-
-/// Manual LRU: HashMap for O(1) lookup, VecDeque for eviction order.
-struct LruMap {
-    map: HashMap<KeyCacheKey, u64>,
-    order: VecDeque<KeyCacheKey>,
-    max_entries: usize,
-}
-
-impl LruMap {
-    fn new(max_entries: usize) -> Self {
-        Self {
-            map: HashMap::new(),
-            order: VecDeque::new(),
-            max_entries,
-        }
-    }
-
-    fn get(&mut self, key: &KeyCacheKey) -> Option<u64> {
-        let value = self.map.get(key).copied()?;
-        // Move to back (most recently used)
-        self.order.retain(|k| k != key);
-        self.order.push_back(key.clone());
-        Some(value)
-    }
-
-    fn put(&mut self, key: KeyCacheKey, value: u64) {
-        if self.map.contains_key(&key) {
-            self.order.retain(|k| k != &key);
-        } else if self.map.len() >= self.max_entries {
-            // Evict least recently used (front)
-            if let Some(evicted) = self.order.pop_front() {
-                self.map.remove(&evicted);
-            }
-        }
-        self.map.insert(key.clone(), value);
-        self.order.push_back(key);
-    }
-
-    fn invalidate_sstable(&mut self, sstable_id: SSTableId) {
-        self.order.retain(|k| k.0 != sstable_id);
-        self.map.retain(|k, _| k.0 != sstable_id);
-    }
-
-    fn len(&self) -> usize {
-        self.map.len()
-    }
+    evictions: AtomicU64,
 }
 
 impl KeyCache {
     /// Create a new key cache with the given configuration.
     pub fn new(config: KeyCacheConfig) -> Arc<Self> {
+        let cap = NonZeroUsize::new(config.max_entries)
+            .expect("max_entries must be > 0");
         Arc::new(Self {
-            inner: Mutex::new(LruMap::new(config.max_entries)),
+            inner: Mutex::new(LruCache::new(cap)),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            evictions: AtomicU64::new(0),
         })
     }
 
@@ -111,7 +70,7 @@ impl KeyCache {
     pub fn get(&self, sstable_id: SSTableId, key: &[u8]) -> Option<u64> {
         let cache_key = (sstable_id, key.to_vec());
         let mut inner = self.inner.lock();
-        match inner.get(&cache_key) {
+        match inner.get(&cache_key).copied() {
             Some(offset) => {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 Some(offset)
@@ -126,12 +85,32 @@ impl KeyCache {
     /// Insert or update a cache entry.
     pub fn put(&self, sstable_id: SSTableId, key: Vec<u8>, offset: u64) {
         let cache_key = (sstable_id, key);
-        self.inner.lock().put(cache_key, offset);
+        let mut inner = self.inner.lock();
+        let is_update = inner.contains(&cache_key);
+        if let Some((_evicted_key, _evicted_val)) = inner.push(cache_key, offset) {
+            if !is_update {
+                self.evictions.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Remove all entries for a given SSTable (e.g. after compaction).
     pub fn invalidate_sstable(&self, sstable_id: SSTableId) {
-        self.inner.lock().invalidate_sstable(sstable_id);
+        let mut inner = self.inner.lock();
+        // Collect keys to remove, then pop each.
+        let keys_to_remove: Vec<KeyCacheKey> = inner
+            .iter()
+            .filter(|(k, _)| k.0 == sstable_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in keys_to_remove {
+            inner.pop(&key);
+        }
+    }
+
+    /// Remove all entries.
+    pub fn clear(&self) {
+        self.inner.lock().clear();
     }
 
     /// Snapshot of cache statistics.
@@ -141,6 +120,21 @@ impl KeyCache {
             hits: self.hits.load(Ordering::Relaxed),
             misses: self.misses.load(Ordering::Relaxed),
             size: inner.len(),
+            evictions: self.evictions.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Returns all entries for persistence (iterates the LruCache).
+    pub fn entries(&self) -> Vec<(KeyCacheKey, u64)> {
+        let inner = self.inner.lock();
+        inner.iter().map(|(k, v)| (k.clone(), *v)).collect()
+    }
+
+    /// Bulk insert entries (for loading from disk).
+    pub fn load_entries(&self, entries: Vec<(KeyCacheKey, u64)>) {
+        let mut inner = self.inner.lock();
+        for (key, offset) in entries {
+            inner.put(key, offset);
         }
     }
 }

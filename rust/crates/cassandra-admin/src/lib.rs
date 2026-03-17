@@ -19,12 +19,18 @@
 //! - [`virtual_tables`] — virtual tables framework and built-in system views
 //! - [`http_admin`] — HTTP admin API server
 
+pub mod diagnostics;
 pub mod http_admin;
+pub mod http_diagnostics;
+pub mod http_tracing_audit;
 pub mod metrics;
 pub mod operations;
 pub mod prometheus_metrics;
 pub mod virtual_tables;
+pub mod virtual_tables_metrics;
+pub mod virtual_tables_operations;
 
+pub use diagnostics::{DiagnosticEvent, DiagnosticEventService, DiagnosticEventType};
 pub use http_admin::{AdminState, start_admin_server};
 pub use metrics::AdminMetrics;
 pub use operations::{OperationStatus, OperationTracker, OperationType};

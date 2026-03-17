@@ -38,6 +38,7 @@
 //! - [`fql`] — Full Query Logging (binary format)
 
 pub mod audit;
+pub mod audit_filter;
 pub mod auth;
 pub mod auth_service;
 pub mod authz;
@@ -64,6 +65,7 @@ pub use audit::{
     AsyncAuditLogger, AuditEvent, AuditEventType, AuditLogger, AuditLoggingOptions, AuditStatus,
     FileAuditLogger, NoOpAuditLogger,
 };
+pub use audit_filter::{AuditCategory, AuditFilter, AuditLogContext};
 pub use auth::{
     AllowAllAuthenticator, AuthenticatedUser, Authenticator, Credentials, PasswordAuthenticator,
 };

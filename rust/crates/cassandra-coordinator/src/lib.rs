@@ -47,11 +47,15 @@ pub mod paxos;
 pub mod read;
 pub mod storage_proxy;
 pub mod tracing;
+pub mod tracing_cleanup;
+pub mod tracing_manager;
 pub mod verb_handlers;
 pub mod write;
 pub mod write_response_handler;
 
 pub use self::tracing::TraceSession;
+pub use tracing_cleanup::{ExpirableSessionStore, InMemorySessionStore, TracingCleanupTask};
+pub use tracing_manager::{TracingConfig, TracingManager};
 pub use batch::{
     BatchCoordinator, BatchEntry, BatchGuardrails, BatchLogManager, BatchLogMetrics, BatchType,
 };

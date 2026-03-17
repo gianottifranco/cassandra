@@ -14,11 +14,13 @@
 
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
 use byteorder::{BigEndian, ReadBytesExt};
 
 use super::bloom::BloomFilter;
 use super::format::*;
+use super::key_cache::KeyCache;
 use crate::memtable::partition::{Cell, PartitionData, Row};
 
 /// Index entry loaded from Index.db.
@@ -34,6 +36,7 @@ pub struct SSTableReader {
     bloom: BloomFilter,
     index: Vec<LoadedIndexEntry>,
     stats: Option<SSTableStats>,
+    key_cache: Option<Arc<KeyCache>>,
 }
 
 /// Stats deserialized from Statistics.db.
@@ -60,6 +63,7 @@ impl SSTableReader {
             bloom,
             index,
             stats,
+            key_cache: None,
         })
     }
 
@@ -78,6 +82,12 @@ impl SSTableReader {
         self.descriptor.generation
     }
 
+    /// Attach a shared key cache (builder pattern).
+    pub fn with_key_cache(mut self, cache: Arc<KeyCache>) -> Self {
+        self.key_cache = Some(cache);
+        self
+    }
+
     /// Check bloom filter: does this SSTable potentially contain the key?
     pub fn might_contain_key(&self, partition_key: &[u8]) -> bool {
         self.bloom.might_contain(partition_key)
@@ -90,13 +100,24 @@ impl SSTableReader {
             return Ok(None);
         }
 
-        // 2. Binary search on index
-        let offset = match self
-            .index
-            .binary_search_by(|e| e.partition_key.as_slice().cmp(partition_key))
-        {
-            Ok(pos) => self.index[pos].data_offset,
-            Err(_) => return Ok(None), // Not in index
+        // 2. Try key cache for a direct offset (skip binary search on hit)
+        let sst_id = self.generation();
+        let cached_offset = self
+            .key_cache
+            .as_ref()
+            .and_then(|c| c.get(sst_id, partition_key));
+
+        let offset = if let Some(off) = cached_offset {
+            off
+        } else {
+            // Binary search on index
+            match self
+                .index
+                .binary_search_by(|e| e.partition_key.as_slice().cmp(partition_key))
+            {
+                Ok(pos) => self.index[pos].data_offset,
+                Err(_) => return Ok(None), // Not in index
+            }
         };
 
         // 3. Read from Data.db
@@ -126,6 +147,13 @@ impl SSTableReader {
 
             let row = read_row(&mut reader)?;
             partition.apply_row(row);
+        }
+
+        // Populate key cache on successful read (miss path)
+        if cached_offset.is_none() {
+            if let Some(cache) = &self.key_cache {
+                cache.put(sst_id, partition_key.to_vec(), offset);
+            }
         }
 
         Ok(Some(partition))
