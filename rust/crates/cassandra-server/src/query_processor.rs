@@ -20,6 +20,18 @@ use cassandra_schema::SchemaCatalog;
 
 use crate::executor::{ExecutorError, QueryExecutor, QueryResult};
 
+/// Result of executing a prepared statement, with optional metadata change info.
+///
+/// When the schema has changed since the statement was prepared, `metadata_changed`
+/// is set to `true` and `new_metadata_id` contains the recomputed result metadata ID.
+/// The server layer uses this to set the METADATA_CHANGED flag in the response.
+#[derive(Debug, Clone)]
+pub struct ExecuteResult {
+    pub result: QueryResult,
+    pub metadata_changed: bool,
+    pub new_metadata_id: Option<Vec<u8>>,
+}
+
 /// Central query processing orchestrator.
 ///
 /// Holds references to the executor, prepared statement cache, and schema catalog.
@@ -72,7 +84,7 @@ impl QueryProcessor {
         cql: &str,
         keyspace: Option<&str>,
     ) -> Result<PreparedResult, CassandraError> {
-        let schema_version = 0; // GAP(gap_guard_tcm): track real schema version — tracked in gap_guards.rs
+        let schema_version = self.catalog.read().version();
         let prepared = self
             .prepared_cache
             .prepare_with_keyspace(cql, schema_version, keyspace)
@@ -113,13 +125,19 @@ impl QueryProcessor {
     }
 
     /// Process an EXECUTE message (execute a prepared statement).
+    ///
+    /// Returns an `ExecuteResult` which includes the query result and optional
+    /// metadata change information. If the schema version has changed since the
+    /// statement was prepared, the result metadata ID is recomputed and compared
+    /// with the stored one. A mismatch sets `metadata_changed = true` so the
+    /// server can include the METADATA_CHANGED flag in the response.
     pub fn process_execute(
         &self,
         id: &[u8],
         params: &QueryParams,
         user: Option<&str>,
         keyspace: Option<&str>,
-    ) -> Result<QueryResult, CassandraError> {
+    ) -> Result<ExecuteResult, CassandraError> {
         let id_arr: [u8; 16] = id
             .try_into()
             .map_err(|_| CassandraError::InvalidQuery("Invalid prepared statement ID".into()))?;
@@ -134,7 +152,31 @@ impl QueryProcessor {
         // Use the prepared statement's keyspace context, falling back to connection keyspace
         let effective_keyspace = prepared.keyspace.as_deref().or(keyspace);
 
-        self.process_query(&prepared.query, params, user, effective_keyspace)
+        let result = self.process_query(&prepared.query, params, user, effective_keyspace)?;
+
+        // Detect metadata changes: if schema version advanced since preparation,
+        // recompute the result metadata ID and compare with the stored one.
+        let current_schema_version = self.catalog.read().version();
+        let (metadata_changed, new_metadata_id) =
+            if current_schema_version > prepared.schema_version {
+                let new_id = PreparedCache::compute_result_metadata_id(&prepared.query);
+                let changed = prepared
+                    .result_metadata_id
+                    .map_or(true, |old_id| old_id != new_id);
+                if changed {
+                    (true, Some(new_id.to_vec()))
+                } else {
+                    (false, None)
+                }
+            } else {
+                (false, None)
+            };
+
+        Ok(ExecuteResult {
+            result,
+            metadata_changed,
+            new_metadata_id,
+        })
     }
 
     /// Process a BATCH message.
@@ -147,7 +189,8 @@ impl QueryProcessor {
         for query in &batch.queries {
             if query.is_prepared {
                 let params = QueryParams::default();
-                self.process_execute(&query.query_or_id, &params, user, keyspace)?;
+                // Discard metadata change info for batch; only the final result matters.
+                let _exec = self.process_execute(&query.query_or_id, &params, user, keyspace)?;
             } else {
                 let cql = String::from_utf8(query.query_or_id.clone())
                     .map_err(|_| CassandraError::InvalidQuery("Invalid UTF-8 in batch query".into()))?;

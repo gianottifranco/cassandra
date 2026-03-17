@@ -16,7 +16,7 @@ use cassandra_security::Resource as SecurityResource;
 use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 
 use cassandra_cql::ast::{
-    ClusteringOrder as AstClusteringOrder, Literal, SelectColumns, Selector, Term,
+    ClusteringOrder as AstClusteringOrder, DescribeTarget, Literal, SelectColumns, Selector, Term,
 };
 use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::planner::{
@@ -25,10 +25,14 @@ use cassandra_cql::planner::{
     CreateMaterializedViewPlan, CreateRolePlan, CreateTablePlan, CreateTriggerPlan,
     CreateTypePlan, DeletePlan, DropAggregatePlan, DropFunctionPlan, DropIndexPlan,
     DropKeyspacePlan, DropMaterializedViewPlan, DropRolePlan, DropTablePlan, DropTriggerPlan,
-    DropTypePlan, GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan,
-    UpdatePlan, UsePlan,
+    DescribePlan, DropTypePlan, GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan,
+    SelectPlan, UpdatePlan, UsePlan,
 };
 use cassandra_cql::prepared::PreparedCache;
+use cassandra_cql::triggers::{MutationEvent, MutationType, TriggerRegistry};
+use cassandra_cql::uda::UdaRegistry;
+use cassandra_cql::udf::{UdfMetadata, UdfRegistry};
+use cassandra_cql::udf_wasm::WasmUdfExecutor;
 use cassandra_schema::{
     ClusteringOrder, ColumnKind, ColumnMetadata, KeyspaceMetadata, KeyspaceParams,
     ReplicationParams, SchemaCatalog, TriggerDefinition, UserAggregate, UserFunction, UserType,
@@ -93,6 +97,9 @@ pub struct QueryExecutor {
     role_manager: Arc<dyn RoleManager>,
     authorizer: Arc<dyn Authorizer>,
     prepared_cache: Option<Arc<PreparedCache>>,
+    udf_registry: Arc<UdfRegistry>,
+    uda_registry: Arc<UdaRegistry>,
+    trigger_registry: Arc<TriggerRegistry>,
 }
 
 impl QueryExecutor {
@@ -108,6 +115,9 @@ impl QueryExecutor {
             role_manager,
             authorizer,
             prepared_cache: None,
+            udf_registry: Arc::new(UdfRegistry::new()),
+            uda_registry: Arc::new(UdaRegistry::new()),
+            trigger_registry: Arc::new(TriggerRegistry::new()),
         }
     }
 
@@ -162,6 +172,7 @@ impl QueryExecutor {
             QueryPlan::DropAggregate(da) => self.execute_drop_aggregate(da),
             QueryPlan::CreateTrigger(ct) => self.execute_create_trigger(ct),
             QueryPlan::DropTrigger(dt) => self.execute_drop_trigger(dt),
+            QueryPlan::Describe(desc) => self.execute_describe(desc),
         };
 
         // Invalidate prepared cache after schema-altering DDL
@@ -718,6 +729,52 @@ impl QueryExecutor {
         let mut catalog = self.catalog.write();
         *catalog = catalog.with_keyspace(ks);
 
+        // Wire UDF executor into the runtime registry based on language.
+        match plan.language.as_str() {
+            "wasm" => {
+                let bytecode = plan.body.as_bytes();
+                match WasmUdfExecutor::new(plan.name.clone(), bytecode) {
+                    Ok(executor) => {
+                        let metadata = UdfMetadata {
+                            keyspace: plan.keyspace.clone(),
+                            name: plan.name.clone(),
+                            args: plan.args.clone(),
+                            return_type: plan.return_type.clone(),
+                            language: plan.language.clone(),
+                            body: plan.body.clone(),
+                            called_on_null_input: plan.called_on_null_input,
+                        };
+                        if let Err(e) = self
+                            .udf_registry
+                            .register(metadata, Arc::new(executor))
+                        {
+                            debug!(error = %e, "Failed to register WASM UDF executor");
+                        }
+                    }
+                    Err(e) => {
+                        debug!(
+                            function = %plan.name,
+                            error = %e,
+                            "WASM UDF executor not available; metadata stored but function cannot execute"
+                        );
+                    }
+                }
+            }
+            "rust" => {
+                debug!(
+                    function = %plan.name,
+                    "Native Rust UDF registered in schema; executor must be provided at compile time"
+                );
+            }
+            other => {
+                debug!(
+                    function = %plan.name,
+                    language = %other,
+                    "Unsupported UDF language; metadata stored but function cannot execute"
+                );
+            }
+        }
+
         info!(keyspace = %plan.keyspace, function = %plan.name, "Created function");
         Ok(QueryResult::SchemaChange {
             change_type: "CREATED".into(),
@@ -780,6 +837,61 @@ impl QueryExecutor {
 
         let mut catalog = self.catalog.write();
         *catalog = catalog.with_keyspace(ks);
+
+        // Wire UDA: resolve SFUNC and FINALFUNC from UdfRegistry, register in UdaRegistry.
+        let uda_metadata = cassandra_cql::uda::UdaMetadata {
+            keyspace: plan.keyspace.clone(),
+            name: plan.name.clone(),
+            arg_types: plan.arg_types.clone(),
+            state_type: plan.stype.clone(),
+            sfunc_name: plan.sfunc.clone(),
+            finalfunc_name: plan.finalfunc.clone(),
+            initcond: plan.initcond.clone(),
+        };
+
+        // Attempt to resolve the state function from the UDF registry.
+        // Build a signature for sfunc: it takes (state_type, arg_types...) as arguments.
+        let mut sfunc_args: Vec<(String, String)> = vec![("state".into(), plan.stype.clone())];
+        for (i, arg_type) in plan.arg_types.iter().enumerate() {
+            sfunc_args.push((format!("arg{}", i), arg_type.clone()));
+        }
+        let sfunc_resolved = self.udf_registry.get(&plan.keyspace, &plan.sfunc, &sfunc_args);
+
+        if sfunc_resolved.is_some() {
+            debug!(
+                aggregate = %plan.name,
+                sfunc = %plan.sfunc,
+                "SFUNC resolved from UDF registry for aggregate"
+            );
+        } else {
+            debug!(
+                aggregate = %plan.name,
+                sfunc = %plan.sfunc,
+                "SFUNC not found in UDF registry; aggregate metadata stored but cannot execute yet"
+            );
+        }
+
+        if let Some(ref ff_name) = plan.finalfunc {
+            let finalfunc_args = vec![("state".into(), plan.stype.clone())];
+            let ff_resolved = self.udf_registry.get(&plan.keyspace, ff_name, &finalfunc_args);
+            if ff_resolved.is_some() {
+                debug!(
+                    aggregate = %plan.name,
+                    finalfunc = %ff_name,
+                    "FINALFUNC resolved from UDF registry for aggregate"
+                );
+            } else {
+                debug!(
+                    aggregate = %plan.name,
+                    finalfunc = %ff_name,
+                    "FINALFUNC not found in UDF registry; aggregate may not finalize correctly"
+                );
+            }
+        }
+
+        if let Err(e) = self.uda_registry.register(uda_metadata) {
+            debug!(error = %e, "Failed to register UDA in runtime registry");
+        }
 
         info!(keyspace = %plan.keyspace, aggregate = %plan.name, "Created aggregate");
         Ok(QueryResult::SchemaChange {
@@ -882,6 +994,18 @@ impl QueryExecutor {
     fn execute_insert(&self, plan: &InsertPlan) -> Result<QueryResult, ExecutorError> {
         let now = current_timestamp_micros();
 
+        // Check triggers before applying the mutation.
+        if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
+            let event = MutationEvent {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
+                partition_key: vec![], // Would be filled from actual mutation data
+                mutation_type: MutationType::Insert,
+            };
+            debug!(?event, "Trigger check: triggers registered for table on INSERT");
+            // TODO: Execute triggers via loaded implementations
+        }
+
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
         let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
@@ -893,17 +1017,24 @@ impl QueryExecutor {
         let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
         let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
 
+        // Handle INSERT JSON: parse JSON term into columns/values
+        let (effective_columns, effective_values) = if let Some(ref json_term) = plan.json {
+            parse_json_insert(json_term)?
+        } else {
+            (plan.columns.clone(), plan.values.clone())
+        };
+
         let mut pk_bytes = Vec::new();
         let mut ck_bytes = Vec::new();
         let mut cells = Vec::new();
 
-        for (i, col_name) in plan.columns.iter().enumerate() {
-            let val_bytes = if i < plan.values.len() {
+        for (i, col_name) in effective_columns.iter().enumerate() {
+            let val_bytes = if i < effective_values.len() {
                 // Use typed binding when the column type is known from schema.
                 if let Some(col_meta) = table_meta.column(col_name) {
-                    typed_term_to_bytes(&plan.values[i], &col_meta.column_type)
+                    typed_term_to_bytes(&effective_values[i], &col_meta.column_type)
                 } else {
-                    term_to_bytes(&plan.values[i])
+                    term_to_bytes(&effective_values[i])
                 }
             } else {
                 None
@@ -956,6 +1087,18 @@ impl QueryExecutor {
 
     fn execute_update(&self, plan: &UpdatePlan) -> Result<QueryResult, ExecutorError> {
         let now = current_timestamp_micros();
+
+        // Check triggers before applying the mutation.
+        if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
+            let event = MutationEvent {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
+                partition_key: vec![], // Would be filled from actual mutation data
+                mutation_type: MutationType::Update,
+            };
+            debug!(?event, "Trigger check: triggers registered for table on UPDATE");
+            // TODO: Execute triggers via loaded implementations
+        }
 
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
@@ -1025,6 +1168,18 @@ impl QueryExecutor {
     fn execute_delete(&self, plan: &DeletePlan) -> Result<QueryResult, ExecutorError> {
         let now = current_timestamp_micros();
         let now_secs = (now / 1_000_000) as i32;
+
+        // Check triggers before applying the mutation.
+        if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
+            let event = MutationEvent {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
+                partition_key: vec![], // Would be filled from actual mutation data
+                mutation_type: MutationType::Delete,
+            };
+            debug!(?event, "Trigger check: triggers registered for table on DELETE");
+            // TODO: Execute triggers via loaded implementations
+        }
 
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
@@ -1264,16 +1419,10 @@ impl QueryExecutor {
                     }
                 }
 
-                return Ok(QueryResult::Rows {
-                    columns: result_columns,
-                    rows: result_rows,
-                });
+                return wrap_select_json(plan.json, result_columns, result_rows);
             }
 
-            return Ok(QueryResult::Rows {
-                columns: result_columns,
-                rows: Vec::new(),
-            });
+            return wrap_select_json(plan.json, result_columns, Vec::new());
         }
 
         let partition = self
@@ -1319,10 +1468,7 @@ impl QueryExecutor {
             }
         }
 
-        Ok(QueryResult::Rows {
-            columns: result_columns,
-            rows: result_rows,
-        })
+        wrap_select_json(plan.json, result_columns, result_rows)
     }
 
     fn execute_batch(
@@ -1425,6 +1571,82 @@ impl QueryExecutor {
         let _roles = self.role_manager.list_roles();
         // Return void for now as we don't return virtual tables fully here yet.
         Ok(QueryResult::Void)
+    }
+
+    // ─── DESCRIBE ─────────────────────────────────────────────────────────
+
+    fn execute_describe(&self, plan: &DescribePlan) -> Result<QueryResult, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+
+        let ddl_text = match &plan.target {
+            DescribeTarget::Cluster => {
+                format!("Cluster: cassandra\nPartitioner: Murmur3Partitioner")
+            }
+            DescribeTarget::FullSchema => {
+                let mut output = String::new();
+                for (ks_name, ks_meta) in &snapshot.keyspaces {
+                    output.push_str(&format!(
+                        "CREATE KEYSPACE {} WITH replication = {{}};\n\n",
+                        ks_name
+                    ));
+                    for (table_name, _table_meta) in &ks_meta.tables {
+                        output.push_str(&format!(
+                            "CREATE TABLE {}.{} (...);\n\n",
+                            ks_name, table_name
+                        ));
+                    }
+                }
+                output
+            }
+            DescribeTarget::Keyspace(name) => {
+                if snapshot.keyspace(name).is_some() {
+                    format!("CREATE KEYSPACE {} WITH replication = {{}};", name)
+                } else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Keyspace '{}' not found",
+                        name
+                    )));
+                }
+            }
+            DescribeTarget::Table(ks_opt, table_name) => {
+                let ks = ks_opt.as_deref().unwrap_or("system");
+                if snapshot.table(ks, table_name).is_some() {
+                    format!("CREATE TABLE {}.{} (...);", ks, table_name)
+                } else {
+                    return Err(ExecutorError::TableNotFound(
+                        ks.to_string(),
+                        table_name.clone(),
+                    ));
+                }
+            }
+            DescribeTarget::Type(ks_opt, name) => {
+                let ks = ks_opt.as_deref().unwrap_or("system");
+                format!("CREATE TYPE {}.{} (...);", ks, name)
+            }
+            DescribeTarget::Function(ks_opt, name) => {
+                let ks = ks_opt.as_deref().unwrap_or("system");
+                format!("CREATE FUNCTION {}.{} (...);", ks, name)
+            }
+            DescribeTarget::Aggregate(ks_opt, name) => {
+                let ks = ks_opt.as_deref().unwrap_or("system");
+                format!("CREATE AGGREGATE {}.{} (...);", ks, name)
+            }
+            DescribeTarget::Generic(name) => {
+                format!("DESCRIBE {};", name)
+            }
+        };
+
+        let columns = vec![ResultColumn {
+            keyspace: String::new(),
+            table: String::new(),
+            name: "describe_text".to_string(),
+            cql_type: CqlType::Varchar,
+        }];
+
+        let rows = vec![vec![Some(ddl_text.into_bytes())]];
+
+        Ok(QueryResult::Rows { columns, rows })
     }
 }
 
@@ -1536,4 +1758,227 @@ fn ast_resource_to_security(
         AstRes::MBean(m) => Ok(SecurityResource::Jmx(m.clone())),
         AstRes::MBeanPattern(p) => Ok(SecurityResource::Jmx(p.clone())),
     }
+}
+
+/// Wrap SELECT results as JSON if `json` is true.
+///
+/// When SELECT JSON is used, each row is collapsed into a single `[json]` column
+/// containing a JSON object string where keys are the original column names and
+/// values are the UTF-8-decoded cell bytes (or null).
+fn wrap_select_json(
+    json: bool,
+    columns: Vec<ResultColumn>,
+    rows: Vec<Vec<Option<Vec<u8>>>>,
+) -> Result<QueryResult, ExecutorError> {
+    if !json {
+        return Ok(QueryResult::Rows { columns, rows });
+    }
+
+    let json_column = ResultColumn {
+        keyspace: columns.first().map(|c| c.keyspace.clone()).unwrap_or_default(),
+        table: columns.first().map(|c| c.table.clone()).unwrap_or_default(),
+        name: "[json]".to_string(),
+        cql_type: CqlType::Varchar,
+    };
+
+    let json_rows: Vec<Vec<Option<Vec<u8>>>> = rows
+        .iter()
+        .map(|row| {
+            let mut obj = String::from("{");
+            for (i, (col, val)) in columns.iter().zip(row.iter()).enumerate() {
+                if i > 0 {
+                    obj.push_str(", ");
+                }
+                obj.push('"');
+                obj.push_str(&col.name);
+                obj.push_str("\": ");
+                match val {
+                    Some(bytes) => {
+                        if let Ok(s) = std::str::from_utf8(bytes) {
+                            obj.push('"');
+                            obj.push_str(s);
+                            obj.push('"');
+                        } else {
+                            obj.push_str("\"0x");
+                            for b in bytes {
+                                obj.push_str(&format!("{:02x}", b));
+                            }
+                            obj.push('"');
+                        }
+                    }
+                    None => obj.push_str("null"),
+                }
+            }
+            obj.push('}');
+            vec![Some(obj.into_bytes())]
+        })
+        .collect();
+
+    Ok(QueryResult::Rows {
+        columns: vec![json_column],
+        rows: json_rows,
+    })
+}
+
+/// Parse a JSON string term into column names and values for INSERT JSON.
+fn parse_json_insert(
+    json_term: &Term,
+) -> Result<(Vec<String>, Vec<Term>), ExecutorError> {
+    let json_str = match json_term {
+        Term::Literal(Literal::String(s)) => s.clone(),
+        _ => {
+            return Err(ExecutorError::InvalidQuery(
+                "INSERT JSON requires a string literal".into(),
+            ));
+        }
+    };
+
+    let trimmed = json_str.trim();
+    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+        return Err(ExecutorError::InvalidQuery(
+            "INSERT JSON value must be a JSON object".into(),
+        ));
+    }
+
+    let inner = &trimmed[1..trimmed.len() - 1];
+    let mut columns = Vec::new();
+    let mut values = Vec::new();
+
+    let mut chars = inner.chars().peekable();
+    loop {
+        while chars.peek().map_or(false, |c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek().is_none() {
+            break;
+        }
+
+        if chars.next() != Some('"') {
+            return Err(ExecutorError::InvalidQuery(
+                "Expected quoted key in JSON object".into(),
+            ));
+        }
+        let mut key = String::new();
+        loop {
+            match chars.next() {
+                Some('"') => break,
+                Some(c) => key.push(c),
+                None => {
+                    return Err(ExecutorError::InvalidQuery(
+                        "Unterminated key in JSON".into(),
+                    ))
+                }
+            }
+        }
+
+        while chars.peek().map_or(false, |c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.next() != Some(':') {
+            return Err(ExecutorError::InvalidQuery(
+                "Expected ':' after key in JSON".into(),
+            ));
+        }
+        while chars.peek().map_or(false, |c| c.is_whitespace()) {
+            chars.next();
+        }
+
+        let term = match chars.peek() {
+            Some('"') => {
+                chars.next();
+                let mut val = String::new();
+                loop {
+                    match chars.next() {
+                        Some('\\') => {
+                            if let Some(c) = chars.next() {
+                                val.push(c);
+                            }
+                        }
+                        Some('"') => break,
+                        Some(c) => val.push(c),
+                        None => {
+                            return Err(ExecutorError::InvalidQuery(
+                                "Unterminated string in JSON".into(),
+                            ))
+                        }
+                    }
+                }
+                Term::Literal(Literal::String(val))
+            }
+            Some('n') => {
+                for expected in ['n', 'u', 'l', 'l'] {
+                    if chars.next() != Some(expected) {
+                        return Err(ExecutorError::InvalidQuery(
+                            "Invalid JSON value".into(),
+                        ));
+                    }
+                }
+                Term::Literal(Literal::Null)
+            }
+            Some('t') => {
+                for expected in ['t', 'r', 'u', 'e'] {
+                    if chars.next() != Some(expected) {
+                        return Err(ExecutorError::InvalidQuery(
+                            "Invalid JSON value".into(),
+                        ));
+                    }
+                }
+                Term::Literal(Literal::Boolean(true))
+            }
+            Some('f') => {
+                for expected in ['f', 'a', 'l', 's', 'e'] {
+                    if chars.next() != Some(expected) {
+                        return Err(ExecutorError::InvalidQuery(
+                            "Invalid JSON value".into(),
+                        ));
+                    }
+                }
+                Term::Literal(Literal::Boolean(false))
+            }
+            Some(c) if c.is_ascii_digit() || *c == '-' => {
+                let mut num_str = String::new();
+                let mut is_float = false;
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() || c == '-' || c == '+' || c == 'e' || c == 'E' {
+                        num_str.push(c);
+                        chars.next();
+                    } else if c == '.' {
+                        is_float = true;
+                        num_str.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                if is_float {
+                    let f: f64 = num_str.parse().map_err(|_| {
+                        ExecutorError::InvalidQuery(format!("Invalid float: {}", num_str))
+                    })?;
+                    Term::Literal(Literal::Float(f))
+                } else {
+                    let n: i64 = num_str.parse().map_err(|_| {
+                        ExecutorError::InvalidQuery(format!("Invalid integer: {}", num_str))
+                    })?;
+                    Term::Literal(Literal::Integer(n))
+                }
+            }
+            _ => {
+                return Err(ExecutorError::InvalidQuery(
+                    "Unexpected character in JSON value".into(),
+                ));
+            }
+        };
+
+        columns.push(key);
+        values.push(term);
+
+        while chars.peek().map_or(false, |c| c.is_whitespace()) {
+            chars.next();
+        }
+        if chars.peek() == Some(&',') {
+            chars.next();
+        }
+    }
+
+    Ok((columns, values))
 }

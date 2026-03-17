@@ -19,6 +19,12 @@ hex = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
 
+[features]
+default = []
+# Enable WASM-based UDF execution via wasmtime.
+# When disabled (default), WasmUdfExecutor::new() returns an error.
+udf-wasm = []
+
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }

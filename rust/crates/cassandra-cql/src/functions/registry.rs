@@ -78,6 +78,7 @@ impl FunctionRegistry {
         super::token_cast_blob::register_all(&registry);
         super::math_json::register_all(&registry);
         super::vector_similarity::register_all(&registry);
+        super::masking::register_all(&registry);
         registry
     }
 

@@ -114,6 +114,19 @@ pub fn read_string_map(cursor: &mut &[u8]) -> io::Result<HashMap<String, String>
     Ok(map)
 }
 
+/// Read a protocol [bytes map] (short-length-prefixed map of string → bytes).
+/// Used for custom payloads in the CQL native protocol.
+pub fn read_bytes_map(cursor: &mut &[u8]) -> io::Result<HashMap<String, Vec<u8>>> {
+    let n = read_short(cursor)? as usize;
+    let mut map = HashMap::with_capacity(n);
+    for _ in 0..n {
+        let key = read_string(cursor)?;
+        let value = read_bytes(cursor)?.unwrap_or_default();
+        map.insert(key, value);
+    }
+    Ok(map)
+}
+
 /// Read a protocol [string multimap].
 pub fn read_string_multimap(cursor: &mut &[u8]) -> io::Result<HashMap<String, Vec<String>>> {
     let n = read_short(cursor)? as usize;

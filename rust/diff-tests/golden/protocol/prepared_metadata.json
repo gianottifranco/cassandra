@@ -1,0 +1,137 @@
+{
+  "description": "Golden fixtures for PREPARED result metadata",
+  "fixtures": [
+    {
+      "name": "select_all_from_users",
+      "query": "SELECT * FROM ks.users WHERE id = ?",
+      "bind_metadata": {
+        "columns_count": 1,
+        "columns": [
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "id",
+            "type": "uuid"
+          }
+        ]
+      },
+      "result_metadata": {
+        "columns_count": 3,
+        "columns": [
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "name",
+            "type": "varchar"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "age",
+            "type": "int"
+          }
+        ]
+      }
+    },
+    {
+      "name": "insert_into_users",
+      "query": "INSERT INTO ks.users (id, name, age) VALUES (?, ?, ?)",
+      "bind_metadata": {
+        "columns_count": 3,
+        "columns": [
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "name",
+            "type": "varchar"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "age",
+            "type": "int"
+          }
+        ]
+      },
+      "result_metadata": {
+        "columns_count": 0,
+        "columns": []
+      }
+    },
+    {
+      "name": "update_user_name",
+      "query": "UPDATE ks.users SET name = ? WHERE id = ?",
+      "bind_metadata": {
+        "columns_count": 2,
+        "columns": [
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "name",
+            "type": "varchar"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "id",
+            "type": "uuid"
+          }
+        ]
+      },
+      "result_metadata": {
+        "columns_count": 0,
+        "columns": []
+      }
+    },
+    {
+      "name": "select_with_multiple_binds",
+      "query": "SELECT name, age FROM ks.users WHERE id = ? AND age > ?",
+      "bind_metadata": {
+        "columns_count": 2,
+        "columns": [
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "id",
+            "type": "uuid"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "age",
+            "type": "int"
+          }
+        ]
+      },
+      "result_metadata": {
+        "columns_count": 2,
+        "columns": [
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "name",
+            "type": "varchar"
+          },
+          {
+            "keyspace": "ks",
+            "table": "users",
+            "name": "age",
+            "type": "int"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,108 @@
+{
+  "description": "Golden test fixtures for CQL native protocol frames",
+  "protocol_version": 4,
+  "frames": [
+    {
+      "name": "STARTUP_v4",
+      "description": "STARTUP request with CQL_VERSION=3.4.7",
+      "hex": "04000000010000001600010b43514c5f56455253494f4e0005332e342e37",
+      "opcode": "0x01",
+      "direction": "request",
+      "fields": {
+        "CQL_VERSION": "3.4.7"
+      }
+    },
+    {
+      "name": "OPTIONS_v4",
+      "description": "OPTIONS request (empty body)",
+      "hex": "040000000500000000",
+      "opcode": "0x05",
+      "direction": "request",
+      "fields": {}
+    },
+    {
+      "name": "QUERY_SELECT_v4",
+      "description": "QUERY request: SELECT * FROM system.local with consistency ONE",
+      "hex": "040000000700000023000000195345454c454354202a2046524f4d2073797374656d2e6c6f63616c000100",
+      "opcode": "0x07",
+      "direction": "request",
+      "fields": {
+        "query": "SELECT * FROM system.local",
+        "consistency": "ONE"
+      }
+    },
+    {
+      "name": "READY_v4",
+      "description": "READY response (empty body)",
+      "hex": "840000000200000000",
+      "opcode": "0x02",
+      "direction": "response",
+      "fields": {}
+    },
+    {
+      "name": "ERROR_SYNTAX_v4",
+      "description": "ERROR response: syntax error 0x2000",
+      "hex": "840000000000000016000020000010536f6d652073796e746178206572726f72",
+      "opcode": "0x00",
+      "direction": "response",
+      "fields": {
+        "error_code": "0x2000",
+        "message": "Some syntax error"
+      }
+    },
+    {
+      "name": "ERROR_PROTOCOL_v4",
+      "description": "ERROR response: protocol error 0x000A",
+      "hex": "840000000000000015000a00001050726f746f636f6c206572726f72",
+      "opcode": "0x00",
+      "direction": "response",
+      "fields": {
+        "error_code": "0x000A",
+        "message": "Protocol error"
+      }
+    },
+    {
+      "name": "RESULT_VOID_v4",
+      "description": "RESULT:Void response (kind=0x0001)",
+      "hex": "840000000800000004000000001",
+      "opcode": "0x08",
+      "direction": "response",
+      "fields": {
+        "kind": "VOID"
+      }
+    },
+    {
+      "name": "RESULT_SET_KEYSPACE_v4",
+      "description": "RESULT:SetKeyspace response",
+      "hex": "84000000080000000c00000003000a6d795f6b657973706163",
+      "opcode": "0x08",
+      "direction": "response",
+      "fields": {
+        "kind": "SET_KEYSPACE",
+        "keyspace": "my_ks"
+      }
+    },
+    {
+      "name": "EVENT_SCHEMA_CHANGE_v4",
+      "description": "EVENT:SchemaChange CREATED KEYSPACE",
+      "hex": "84000000000c00000020000d534348454d415f4348414e4745000743524541544544000d4b45595350414345",
+      "opcode": "0x0C",
+      "direction": "response",
+      "fields": {
+        "event_type": "SCHEMA_CHANGE",
+        "change_type": "CREATED",
+        "target": "KEYSPACE"
+      }
+    },
+    {
+      "name": "PREPARE_v4",
+      "description": "PREPARE request for INSERT",
+      "hex": "04000000090000002a00000026494e5345525420494e544f206b732e74202869642c206e616d65292056414c55455320283f2c203f29",
+      "opcode": "0x09",
+      "direction": "request",
+      "fields": {
+        "query": "INSERT INTO ks.t (id, name) VALUES (?, ?)"
+      }
+    }
+  ]
+}

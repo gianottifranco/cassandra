@@ -9,6 +9,13 @@ use crate::ast::Selector;
 use crate::functions::FunctionRegistry;
 use std::collections::HashMap;
 
+/// Cell-level metadata for WRITETIME/TTL selectors.
+#[derive(Debug, Clone, Default)]
+pub struct CellMeta {
+    pub timestamp: Option<i64>,
+    pub ttl: Option<i32>,
+}
+
 /// Evaluates selectors against row data.
 pub struct SelectorEvaluator<'a> {
     registry: &'a FunctionRegistry,
@@ -23,11 +30,14 @@ impl<'a> SelectorEvaluator<'a> {
     ///
     /// `columns` maps column names to their index in the row data.
     /// `row` contains serialized cell values.
+    /// `cell_metadata` optionally maps column names to their cell-level metadata
+    /// (timestamp, TTL) for WRITETIME/TTL selectors.
     pub fn evaluate(
         &self,
         selector: &Selector,
         columns: &HashMap<String, usize>,
         row: &[Option<Vec<u8>>],
+        cell_metadata: Option<&HashMap<String, CellMeta>>,
     ) -> Option<Vec<u8>> {
         match selector {
             Selector::Column(name) => {
@@ -38,7 +48,7 @@ impl<'a> SelectorEvaluator<'a> {
                 let func = self.registry.resolve_by_name(name)?;
                 let mut arg_values: Vec<Option<Vec<u8>>> = Vec::with_capacity(args.len());
                 for arg in args {
-                    arg_values.push(self.evaluate(arg, columns, row));
+                    arg_values.push(self.evaluate(arg, columns, row, cell_metadata));
                 }
 
                 let arg_refs: Vec<Option<&[u8]>> =
@@ -46,15 +56,26 @@ impl<'a> SelectorEvaluator<'a> {
 
                 func.execute(&arg_refs).unwrap_or_default()
             }
-            Selector::Alias { selector, .. } => self.evaluate(selector, columns, row),
+            Selector::Alias { selector, .. } => {
+                self.evaluate(selector, columns, row, cell_metadata)
+            }
             Selector::Count => {
                 // Count returns 1 for each row (aggregation handles the sum)
                 Some(1i64.to_be_bytes().to_vec())
             }
-            Selector::WritetimeOrTtl(_kind, _col) => {
-                // WritetimeOrTtl requires metadata from the storage layer.
-                // For now return None; the executor fills this in.
-                None
+            Selector::WritetimeOrTtl(kind, col) => {
+                let meta = cell_metadata?.get(col.as_str())?;
+                match kind.as_str() {
+                    "writetime" | "maxwritetime" => {
+                        let ts = meta.timestamp?;
+                        Some(ts.to_be_bytes().to_vec())
+                    }
+                    "ttl" => {
+                        let ttl = meta.ttl?;
+                        Some(ttl.to_be_bytes().to_vec())
+                    }
+                    _ => None,
+                }
             }
         }
     }
@@ -65,10 +86,11 @@ impl<'a> SelectorEvaluator<'a> {
         selectors: &[Selector],
         columns: &HashMap<String, usize>,
         row: &[Option<Vec<u8>>],
+        cell_metadata: Option<&HashMap<String, CellMeta>>,
     ) -> Vec<Option<Vec<u8>>> {
         selectors
             .iter()
-            .map(|sel| self.evaluate(sel, columns, row))
+            .map(|sel| self.evaluate(sel, columns, row, cell_metadata))
             .collect()
     }
 
@@ -112,7 +134,7 @@ mod tests {
         let cols = make_columns();
         let row = make_row();
 
-        let result = eval.evaluate(&Selector::Column("name".into()), &cols, &row);
+        let result = eval.evaluate(&Selector::Column("name".into()), &cols, &row, None);
         assert_eq!(result, Some(b"Alice".to_vec()));
     }
 
@@ -123,7 +145,7 @@ mod tests {
         let cols = make_columns();
         let row = make_row();
 
-        let result = eval.evaluate(&Selector::Column("nonexistent".into()), &cols, &row);
+        let result = eval.evaluate(&Selector::Column("nonexistent".into()), &cols, &row, None);
         assert!(result.is_none());
     }
 
@@ -138,7 +160,7 @@ mod tests {
             selector: Box::new(Selector::Column("name".into())),
             alias: "user_name".into(),
         };
-        let result = eval.evaluate(&sel, &cols, &row);
+        let result = eval.evaluate(&sel, &cols, &row, None);
         assert_eq!(result, Some(b"Alice".to_vec()));
     }
 
@@ -149,7 +171,7 @@ mod tests {
         let cols = make_columns();
         let row = make_row();
 
-        let result = eval.evaluate(&Selector::Count, &cols, &row);
+        let result = eval.evaluate(&Selector::Count, &cols, &row, None);
         assert_eq!(result, Some(1i64.to_be_bytes().to_vec()));
     }
 
@@ -162,7 +184,7 @@ mod tests {
 
         // Call now() which takes no args from the row
         let sel = Selector::Function("now".into(), vec![]);
-        let result = eval.evaluate(&sel, &cols, &row);
+        let result = eval.evaluate(&sel, &cols, &row, None);
         assert!(result.is_some());
         assert_eq!(result.unwrap().len(), 16); // timeuuid = 16 bytes
     }
@@ -178,7 +200,7 @@ mod tests {
             Selector::Column("id".into()),
             Selector::Column("name".into()),
         ];
-        let results = eval.evaluate_row(&selectors, &cols, &row);
+        let results = eval.evaluate_row(&selectors, &cols, &row, None);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], Some(1i32.to_be_bytes().to_vec()));
         assert_eq!(results[1], Some(b"Alice".to_vec()));

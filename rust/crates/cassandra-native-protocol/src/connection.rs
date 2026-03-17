@@ -29,7 +29,7 @@
 //! ```
 
 use crate::auth::{AuthResult, Authenticator};
-use crate::frame::{Frame, PROTOCOL_V4, RESPONSE_FLAG, flags};
+use crate::frame::{Frame, PROTOCOL_V4, PROTOCOL_V5, flags};
 use crate::message::*;
 use crate::request;
 use crate::response;
@@ -100,9 +100,11 @@ impl ConnectionContext {
         let stream_id = frame.header.stream_id;
 
         // Version negotiation: reject unsupported versions.
+        // Per spec, the error response uses the highest supported version (v5)
+        // in the frame header so the client can downgrade.
         if version != 4 && version != 5 {
             let err = response::error_frame(
-                version | RESPONSE_FLAG,
+                PROTOCOL_V5,
                 stream_id,
                 0x000A, // PROTOCOL_ERROR
                 &format!(
@@ -112,6 +114,18 @@ impl ConnectionContext {
             );
             return Ok(Some(err));
         }
+
+        // v5 is a beta protocol: the USE_BETA flag must be set on the frame.
+        if version == 5 && (frame.header.flags & flags::USE_BETA == 0) {
+            let err = response::error_frame(
+                PROTOCOL_V5,
+                stream_id,
+                0x000A, // PROTOCOL_ERROR
+                "Beta version of the protocol used (5/v5-beta), but USE_BETA flag is not set",
+            );
+            return Ok(Some(err));
+        }
+
         self.protocol_version = version;
 
         let msg = request::decode_request(frame)?;
@@ -265,7 +279,7 @@ impl ConnectionContext {
 mod tests {
     use super::*;
     use crate::auth::{AllowAllAuthenticator, PasswordAuthenticator};
-    use crate::frame::{FrameHeader, Opcode, PROTOCOL_V4};
+    use crate::frame::{FrameHeader, Opcode, PROTOCOL_V4, PROTOCOL_V5, RESPONSE_FLAG};
     use crate::types;
     use bytes::{Bytes, BytesMut};
 
@@ -434,5 +448,114 @@ mod tests {
         let warnings = vec!["test warning".to_string()];
         let wrapped = ctx.wrap_response(frame, None, &warnings, None);
         assert_ne!(wrapped.header.flags & flags::WARNING, 0);
+    }
+
+    // ── WU-01: v5 beta flag validation ──────────────────────────────────
+
+    #[test]
+    fn lifecycle_v5_without_beta_flag_rejected() {
+        let mut ctx = ConnectionContext::new();
+        let body = startup_body();
+        let frame = Frame {
+            header: FrameHeader {
+                version: PROTOCOL_V5,
+                flags: 0, // USE_BETA not set
+                stream_id: 0,
+                opcode: Opcode::Startup,
+                length: body.len() as u32,
+            },
+            body: Bytes::copy_from_slice(&body),
+        };
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
+        assert!(resp.is_some());
+        let resp_frame = resp.unwrap();
+        assert_eq!(resp_frame.header.opcode, Opcode::Error);
+        // Should mention USE_BETA in the error.
+        let mut resp_body: &[u8] = &resp_frame.body;
+        let _code = types::read_int(&mut resp_body).unwrap();
+        let msg = types::read_string(&mut resp_body).unwrap();
+        assert!(msg.contains("USE_BETA"), "error message should mention USE_BETA: {}", msg);
+    }
+
+    #[test]
+    fn lifecycle_v5_with_beta_flag_accepted() {
+        let mut ctx = ConnectionContext::new();
+        let body = startup_body();
+        let frame = Frame {
+            header: FrameHeader {
+                version: PROTOCOL_V5,
+                flags: flags::USE_BETA, // USE_BETA set
+                stream_id: 0,
+                opcode: Opcode::Startup,
+                length: body.len() as u32,
+            },
+            body: Bytes::copy_from_slice(&body),
+        };
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
+        assert!(resp.is_some());
+        assert_eq!(resp.unwrap().header.opcode, Opcode::Ready);
+        assert_eq!(ctx.state, ConnectionState::Ready);
+        assert_eq!(ctx.protocol_version, 5);
+    }
+
+    // ── WU-03: Version negotiation error format ─────────────────────────
+
+    #[test]
+    fn lifecycle_v6_negotiation_produces_v5_error_frame() {
+        let mut ctx = ConnectionContext::new();
+        let frame = Frame {
+            header: FrameHeader {
+                version: 0x06, // v6 not supported
+                flags: 0,
+                stream_id: 42,
+                opcode: Opcode::Startup,
+                length: 0,
+            },
+            body: Bytes::new(),
+        };
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
+        assert!(resp.is_some());
+        let resp_frame = resp.unwrap();
+        assert_eq!(resp_frame.header.opcode, Opcode::Error);
+        // The response frame version should be PROTOCOL_V5 | RESPONSE_FLAG.
+        assert_eq!(
+            resp_frame.header.version,
+            PROTOCOL_V5 | RESPONSE_FLAG,
+            "error response should use highest supported version (v5)"
+        );
+        assert_eq!(resp_frame.header.stream_id, 42);
+    }
+
+    #[test]
+    fn lifecycle_v3_negotiation_produces_v5_error_frame() {
+        let mut ctx = ConnectionContext::new();
+        let frame = Frame {
+            header: FrameHeader {
+                version: 0x03, // v3 not supported
+                flags: 0,
+                stream_id: 7,
+                opcode: Opcode::Startup,
+                length: 0,
+            },
+            body: Bytes::new(),
+        };
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap();
+        assert!(resp.is_some());
+        let resp_frame = resp.unwrap();
+        assert_eq!(resp_frame.header.opcode, Opcode::Error);
+        // Must use v5 (highest supported), not the rejected v3.
+        assert_eq!(
+            resp_frame.header.version,
+            PROTOCOL_V5 | RESPONSE_FLAG,
+            "error response should use v5, not the rejected version"
+        );
     }
 }

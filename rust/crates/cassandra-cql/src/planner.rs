@@ -47,6 +47,7 @@ pub enum QueryPlan {
     DropAggregate(DropAggregatePlan),
     CreateTrigger(CreateTriggerPlan),
     DropTrigger(DropTriggerPlan),
+    Describe(DescribePlan),
 }
 
 impl QueryPlan {
@@ -166,6 +167,8 @@ pub struct InsertPlan {
     pub columns: Vec<String>,
     pub values: Vec<Term>,
     pub if_not_exists: bool,
+    /// INSERT JSON term, if present.
+    pub json: Option<Term>,
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +378,11 @@ pub struct DropTriggerPlan {
     pub table: String,
     pub name: String,
     pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct DescribePlan {
+    pub target: DescribeTarget,
 }
 
 /// Plan a parsed statement against the current schema.
@@ -592,6 +600,7 @@ pub fn plan(
                 columns: i.columns.clone(),
                 values: i.values.clone(),
                 if_not_exists: i.if_not_exists,
+                json: i.json.clone(),
             }))
         }
 
@@ -951,6 +960,10 @@ pub fn plan(
                 if_exists: dt.if_exists,
             }))
         }
+
+        Statement::Describe(desc) => Ok(QueryPlan::Describe(DescribePlan {
+            target: desc.target.clone(),
+        })),
 
         // Statement types not yet fully plannable
         _ => Err(PlanError::InvalidQuery(

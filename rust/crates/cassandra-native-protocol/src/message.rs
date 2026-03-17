@@ -68,6 +68,8 @@ impl StartupMessage {
 pub struct QueryMessage {
     pub query: String,
     pub params: QueryParams,
+    /// Custom payload sent by the client (frame flag CUSTOM_PAYLOAD).
+    pub custom_payload: Option<HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +124,8 @@ pub struct ExecuteMessage {
     pub id: Vec<u8>,
     pub result_metadata_id: Option<Vec<u8>>,
     pub params: QueryParams,
+    /// Custom payload sent by the client (frame flag CUSTOM_PAYLOAD).
+    pub custom_payload: Option<HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -131,6 +135,8 @@ pub struct BatchMessage {
     pub consistency: Consistency,
     pub serial_consistency: Option<Consistency>,
     pub timestamp: Option<i64>,
+    /// Custom payload sent by the client (frame flag CUSTOM_PAYLOAD).
+    pub custom_payload: Option<HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

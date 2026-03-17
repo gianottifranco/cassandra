@@ -7,6 +7,7 @@
 //! - `org.apache.cassandra.cql3.functions.FunctionResolver`
 
 pub mod aggregates;
+pub mod masking;
 pub mod math_json;
 pub mod registry;
 pub mod time_uuid;

@@ -29,10 +29,12 @@ verifying Rust output against the Java oracle.
 
 [dependencies]
 cassandra-common = { path = "../cassandra-common" }
+cassandra-cql = { path = "../cassandra-cql" }
 cassandra-native-protocol = { path = "../cassandra-native-protocol" }
 cassandra-storage = { path = "../cassandra-storage" }
 cassandra-types = { path = "../cassandra-types" }
 
+bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

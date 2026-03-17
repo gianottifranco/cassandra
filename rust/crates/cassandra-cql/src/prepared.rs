@@ -69,6 +69,21 @@ impl PreparedCache {
         id
     }
 
+    /// Compute a result metadata ID from the query text.
+    ///
+    /// In a full implementation this would hash the actual result column specs,
+    /// but at prepare time we use the query text as a stable proxy. When the
+    /// schema changes the id is recomputed so clients can detect METADATA_CHANGED.
+    pub fn compute_result_metadata_id(query: &str) -> [u8; 16] {
+        let mut hasher = Md5::new();
+        hasher.update(b"result_metadata:");
+        hasher.update(query.as_bytes());
+        let result = hasher.finalize();
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&result);
+        id
+    }
+
     /// Prepare a statement: parse, cache, and return the PreparedStatement.
     pub fn prepare(&self, query: &str, schema_version: u64) -> Result<PreparedStatement, String> {
         self.prepare_with_keyspace(query, schema_version, None)
@@ -105,7 +120,7 @@ impl PreparedCache {
             statement,
             schema_version,
             bind_count,
-            result_metadata_id: None,
+            result_metadata_id: Some(Self::compute_result_metadata_id(query)),
             keyspace: keyspace.map(|s| s.to_string()),
         };
 

@@ -10,4 +10,4 @@ pub mod aggregation;
 pub mod post_process;
 pub mod selector_eval;
 
-pub use selector_eval::SelectorEvaluator;
+pub use selector_eval::{CellMeta, SelectorEvaluator};

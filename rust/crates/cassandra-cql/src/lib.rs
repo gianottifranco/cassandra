@@ -45,4 +45,5 @@ pub mod selection;
 pub mod triggers;
 pub mod uda;
 pub mod udf;
+pub mod udf_wasm;
 pub mod untyped_result_set;

@@ -26,7 +26,7 @@ use cassandra_cql::prepared::PreparedCache;
 
 use crate::client_state::ClientState;
 use crate::executor::{QueryExecutor, QueryResult};
-use crate::query_processor::QueryProcessor;
+use crate::query_processor::{ExecuteResult, QueryProcessor};
 use crate::resource_limits::ResourceLimits;
 use crate::shutdown::ShutdownCoordinator;
 use crate::transport_metrics::TransportMetrics;
@@ -184,18 +184,32 @@ impl NativeServer {
                         client_state.increment_request_count();
                         self.metrics.request_processed(Some(&addr.ip()));
 
+                        let request_tracing = frame.header.flags & cassandra_native_protocol::frame::flags::TRACING != 0;
+                        let trace_session = if request_tracing {
+                            Some(cassandra_coordinator::tracing::TraceSession::new())
+                        } else {
+                            None
+                        };
+
                         let response_frame = {
                             let mut resp_opt =
                                 ctx.process_lifecycle(&frame, self.authenticator.as_ref())?;
                             if resp_opt.is_none() {
                                 // Protocol lifecycle didn't handle it, must be a query.
+                                if let Some(ref session) = trace_session {
+                                    session.trace("server", "Dispatching query to executor");
+                                }
                                 resp_opt = self.handle_query(&mut ctx, &mut client_state, &frame).await?;
+                                if let Some(ref session) = trace_session {
+                                    session.trace("server", "Query execution completed");
+                                }
                             }
                             resp_opt
                         };
 
                         if let Some(mut r_frame) = response_frame {
-                            r_frame = ctx.wrap_response(r_frame, None, &[], None);
+                            let tracing_id = trace_session.as_ref().map(|s| s.session_id);
+                            r_frame = ctx.wrap_response(r_frame, tracing_id, &[], None);
 
                             let mut out_buf = bytes::BytesMut::new();
                             let mut codec = FrameCodec;
@@ -307,13 +321,23 @@ impl NativeServer {
                     ctx.authenticated_user.as_deref(),
                     ctx.keyspace.as_deref(),
                 ) {
-                    Ok(qr) => Ok(Some(self.encode_query_result(
-                        qr,
-                        ctx,
-                        client_state,
-                        version,
-                        stream_id,
-                    ))),
+                    Ok(exec_result) => {
+                        if exec_result.metadata_changed {
+                            debug!(
+                                "METADATA_CHANGED detected for execute; new_metadata_id present={}",
+                                exec_result.new_metadata_id.is_some()
+                            );
+                        }
+                        // TODO: propagate metadata_changed and new_metadata_id into the
+                        // response frame flags once the protocol encoder supports it.
+                        Ok(Some(self.encode_query_result(
+                            exec_result.result,
+                            ctx,
+                            client_state,
+                            version,
+                            stream_id,
+                        )))
+                    }
                     Err(err) => Ok(Some(self.cassandra_error_to_frame(err, version, stream_id))),
                 }
             }

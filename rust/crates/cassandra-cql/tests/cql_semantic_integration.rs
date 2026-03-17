@@ -206,7 +206,7 @@ fn selector_eval_column() {
         Some(30i32.to_be_bytes().to_vec()),
     ];
 
-    let result = eval.evaluate(&Selector::Column("name".into()), &columns, &row);
+    let result = eval.evaluate(&Selector::Column("name".into()), &columns, &row, None);
     assert_eq!(result, Some(b"Alice".to_vec()));
 }
 
@@ -223,7 +223,7 @@ fn selector_eval_alias() {
         selector: Box::new(Selector::Column("name".into())),
         alias: "user_name".into(),
     };
-    let result = eval.evaluate(&sel, &columns, &row);
+    let result = eval.evaluate(&sel, &columns, &row, None);
     assert_eq!(result, Some(b"Bob".to_vec()));
 }
 
@@ -235,7 +235,7 @@ fn selector_eval_function() {
     let row = vec![];
 
     let sel = Selector::Function("now".into(), vec![]);
-    let result = eval.evaluate(&sel, &columns, &row);
+    let result = eval.evaluate(&sel, &columns, &row, None);
     assert!(result.is_some());
 }
 
@@ -368,9 +368,10 @@ fn parse_describe_table() {
 }
 
 #[test]
-fn new_statements_not_plannable() {
+fn describe_is_plannable() {
     let schema = test_schema();
     let stmt = parser::parse("DESCRIBE CLUSTER").unwrap();
     let result = planner::plan(&stmt, &schema, None);
-    assert!(result.is_err(), "DESCRIBE should not be plannable yet");
+    assert!(result.is_ok(), "DESCRIBE should be plannable");
+    assert!(matches!(result.unwrap(), planner::QueryPlan::Describe(_)));
 }
