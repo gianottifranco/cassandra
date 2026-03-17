@@ -45,6 +45,9 @@ fn make_mutation(ks: &str, tbl: &str, pk: &[u8], val: &[u8], ts: i64) -> Mutatio
         }],
         timestamp: ts,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     }
 }
 

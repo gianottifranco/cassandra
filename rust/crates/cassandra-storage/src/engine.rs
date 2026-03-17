@@ -350,6 +350,48 @@ impl StorageEngine {
             memtable.apply(mutation.partition_key.clone(), row);
         }
 
+        // 2b. Apply static cells as a row with empty clustering key.
+        if !mutation.static_cells.is_empty() {
+            let static_row = Row {
+                clustering_key: Vec::new(), // static row has no clustering key
+                cells: mutation
+                    .static_cells
+                    .iter()
+                    .map(|c| Cell {
+                        column: c.column.clone(),
+                        value: c.value.clone(),
+                        timestamp: c.timestamp,
+                        ttl: c.ttl,
+                        local_deletion_time: c.local_deletion_time,
+                        is_tombstone: c.is_tombstone,
+                    })
+                    .collect(),
+                is_tombstone: false,
+                local_deletion_time: None,
+            };
+            memtable.apply(mutation.partition_key.clone(), static_row);
+        }
+
+        // 2c. Apply partition-level tombstone.
+        if let Some(ref pt) = mutation.partition_tombstone {
+            memtable.set_partition_tombstone(
+                mutation.partition_key.clone(),
+                pt.timestamp,
+                pt.local_deletion_time,
+            );
+        }
+
+        // 2d. Apply range tombstones as tombstone rows covering the range start.
+        for rt in &mutation.range_tombstones {
+            let tombstone_row = Row {
+                clustering_key: rt.start.clone(),
+                cells: Vec::new(),
+                is_tombstone: true,
+                local_deletion_time: Some(rt.local_deletion_time),
+            };
+            memtable.apply(mutation.partition_key.clone(), tombstone_row);
+        }
+
         // 3. Generate and apply materialized view mutations
         #[cfg(feature = "materialized-views")]
         if self
@@ -395,6 +437,9 @@ impl StorageEngine {
                         }],
                         timestamp,
                         cdc_enabled: false,
+                        static_cells: Vec::new(),
+                        partition_tombstone: None,
+                        range_tombstones: Vec::new(),
                     };
                     let _ = self.apply_mutation(&m);
                 }
@@ -907,6 +952,9 @@ impl StorageEngine {
                                     }],
                                     timestamp: ts,
                                     cdc_enabled: false,
+                                    static_cells: Vec::new(),
+                                    partition_tombstone: None,
+                                    range_tombstones: Vec::new(),
                                 };
                                 let _ = self.apply_mutation(&m);
                                 count += 1;
@@ -1168,6 +1216,9 @@ mod tests {
             }],
             timestamp: 1000,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         }
     }
 
@@ -1326,5 +1377,141 @@ mod tests {
         let (desc2, generation2) = parse_toc_filename("ks-t1-bti-99-TOC.txt", dir).unwrap();
         assert_eq!(generation2, 99);
         assert_eq!(desc2.format, SSTableFormat::Bti);
+    }
+
+    // ── WU-15: Static cells in Mutation ──
+
+    #[test]
+    fn apply_mutation_with_static_cells() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        let mutation = Mutation {
+            keyspace: "ks".to_string(),
+            table: "t1".to_string(),
+            partition_key: b"pk1".to_vec(),
+            rows: vec![MutationRow {
+                clustering_key: b"ck1".to_vec(),
+                cells: vec![CellMutation {
+                    column: "regular_col".to_string(),
+                    value: Some(b"regular_val".to_vec()),
+                    timestamp: 1000,
+                    ttl: 0,
+                    local_deletion_time: None,
+                    is_tombstone: false,
+                }],
+                is_tombstone: false,
+                local_deletion_time: None,
+            }],
+            timestamp: 1000,
+            cdc_enabled: false,
+            static_cells: vec![CellMutation {
+                column: "static_col".to_string(),
+                value: Some(b"static_val".to_vec()),
+                timestamp: 1000,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        };
+
+        engine.apply_mutation(&mutation).unwrap();
+
+        let pd = engine.read_partition("ks", "t1", b"pk1").unwrap();
+        // Should have 2 rows: one regular (ck1) and one static (empty ck)
+        assert!(pd.rows.contains_key(&b"ck1".to_vec()));
+        assert!(pd.rows.contains_key(&Vec::<u8>::new()));
+        let static_row = pd.rows.get(&Vec::<u8>::new()).unwrap();
+        assert_eq!(static_row.cells.len(), 1);
+        assert_eq!(static_row.cells[0].column, "static_col");
+    }
+
+    // ── WU-17: Partition tombstone in Mutation ──
+
+    #[test]
+    fn apply_mutation_partition_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        // First insert a row
+        let insert = test_mutation("ks", "t1", b"pk1", "col", b"val");
+        engine.apply_mutation(&insert).unwrap();
+
+        // Verify the row exists
+        let pd = engine.read_partition("ks", "t1", b"pk1").unwrap();
+        assert!(!pd.rows.is_empty());
+
+        // Now apply a partition tombstone
+        let tombstone = Mutation {
+            keyspace: "ks".to_string(),
+            table: "t1".to_string(),
+            partition_key: b"pk1".to_vec(),
+            rows: Vec::new(),
+            timestamp: 2000,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: Some(crate::commitlog::TombstoneMarker {
+                timestamp: 2000,
+                local_deletion_time: 2,
+            }),
+            range_tombstones: Vec::new(),
+        };
+
+        engine.apply_mutation(&tombstone).unwrap();
+
+        // Verify partition tombstone was set
+        let pd = engine.read_partition("ks", "t1", b"pk1").unwrap();
+        assert_eq!(pd.tombstone_timestamp, Some(2000));
+        assert_eq!(pd.tombstone_local_deletion_time, Some(2));
+    }
+
+    // ── WU-17: Range tombstone in Mutation ──
+
+    #[test]
+    fn apply_mutation_range_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        // Insert two rows
+        let mut m1 = test_mutation("ks", "t1", b"pk1", "col", b"val1");
+        m1.rows[0].clustering_key = b"ck_a".to_vec();
+        engine.apply_mutation(&m1).unwrap();
+
+        let mut m2 = test_mutation("ks", "t1", b"pk1", "col", b"val2");
+        m2.rows[0].clustering_key = b"ck_b".to_vec();
+        engine.apply_mutation(&m2).unwrap();
+
+        // Apply a range tombstone covering ck_a
+        let range_ts = Mutation {
+            keyspace: "ks".to_string(),
+            table: "t1".to_string(),
+            partition_key: b"pk1".to_vec(),
+            rows: Vec::new(),
+            timestamp: 3000,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: vec![crate::commitlog::RangeTombstoneMarker {
+                start: b"ck_a".to_vec(),
+                end: b"ck_a".to_vec(),
+                timestamp: 3000,
+                local_deletion_time: 3,
+            }],
+        };
+
+        engine.apply_mutation(&range_ts).unwrap();
+
+        // The range tombstone creates a tombstone row at ck_a
+        let pd = engine.read_partition("ks", "t1", b"pk1").unwrap();
+        let row_a = pd.rows.get(&b"ck_a".to_vec()).unwrap();
+        assert!(row_a.is_tombstone);
+        // ck_b should still exist and not be a tombstone
+        let row_b = pd.rows.get(&b"ck_b".to_vec()).unwrap();
+        assert!(!row_b.is_tombstone);
     }
 }

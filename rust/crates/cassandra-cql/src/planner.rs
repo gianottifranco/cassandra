@@ -169,6 +169,10 @@ pub struct InsertPlan {
     pub if_not_exists: bool,
     /// INSERT JSON term, if present.
     pub json: Option<Term>,
+    /// Client-supplied timestamp from USING TIMESTAMP clause.
+    pub using_timestamp: Option<i64>,
+    /// Client-supplied TTL from USING TTL clause.
+    pub using_ttl: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +182,10 @@ pub struct UpdatePlan {
     pub assignments: Vec<Assignment>,
     pub where_clause: Vec<Relation>,
     pub if_exists: bool,
+    /// Client-supplied timestamp from USING TIMESTAMP clause.
+    pub using_timestamp: Option<i64>,
+    /// Client-supplied TTL from USING TTL clause.
+    pub using_ttl: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,6 +195,10 @@ pub struct DeletePlan {
     pub columns: Vec<String>,
     pub where_clause: Vec<Relation>,
     pub if_exists: bool,
+    /// Client-supplied timestamp from USING TIMESTAMP clause.
+    pub using_timestamp: Option<i64>,
+    /// Client-supplied TTL from USING TTL clause.
+    pub using_ttl: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -594,6 +606,7 @@ pub fn plan(
                 )));
             }
 
+            let (using_timestamp, using_ttl) = extract_using(&i.using);
             Ok(QueryPlan::Insert(InsertPlan {
                 keyspace: ks,
                 table: i.table.clone(),
@@ -601,28 +614,36 @@ pub fn plan(
                 values: i.values.clone(),
                 if_not_exists: i.if_not_exists,
                 json: i.json.clone(),
+                using_timestamp,
+                using_ttl,
             }))
         }
 
         Statement::Update(u) => {
             let ks = resolve_keyspace(u.keyspace.as_deref(), active_keyspace)?;
+            let (using_timestamp, using_ttl) = extract_using(&u.using);
             Ok(QueryPlan::Update(UpdatePlan {
                 keyspace: ks,
                 table: u.table.clone(),
                 assignments: u.assignments.clone(),
                 where_clause: u.where_clause.clone(),
                 if_exists: u.if_exists,
+                using_timestamp,
+                using_ttl,
             }))
         }
 
         Statement::Delete(d) => {
             let ks = resolve_keyspace(d.keyspace.as_deref(), active_keyspace)?;
+            let (using_timestamp, using_ttl) = extract_using(&d.using);
             Ok(QueryPlan::Delete(DeletePlan {
                 keyspace: ks,
                 table: d.table.clone(),
                 columns: d.columns.clone(),
                 where_clause: d.where_clause.clone(),
                 if_exists: d.if_exists,
+                using_timestamp,
+                using_ttl,
             }))
         }
 
@@ -1009,6 +1030,27 @@ fn validate_selector(
     Ok(())
 }
 
+/// Extract timestamp and TTL from a USING clause list.
+fn extract_using(using: &[UsingClause]) -> (Option<i64>, Option<i32>) {
+    let mut ts = None;
+    let mut ttl = None;
+    for clause in using {
+        match clause {
+            UsingClause::Timestamp(term) => {
+                if let Term::Literal(Literal::Integer(v)) = term {
+                    ts = Some(*v);
+                }
+            }
+            UsingClause::Ttl(term) => {
+                if let Term::Literal(Literal::Integer(v)) = term {
+                    ttl = Some(*v as i32);
+                }
+            }
+        }
+    }
+    (ts, ttl)
+}
+
 fn resolve_keyspace(explicit: Option<&str>, active: Option<&str>) -> Result<String, PlanError> {
     match explicit.or(active) {
         Some(ks) => Ok(ks.to_string()),
@@ -1275,5 +1317,145 @@ mod tests {
         let stmt =
             parser::parse("DROP INDEX test_ks.nonexistent_idx").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    // ── WU-14: Client timestamps and TTL from USING clause ──
+
+    #[test]
+    fn plan_insert_using_timestamp() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com') USING TIMESTAMP 12345",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::Insert(ip) => {
+                assert_eq!(ip.using_timestamp, Some(12345));
+                assert_eq!(ip.using_ttl, None);
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn plan_insert_using_ttl() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com') USING TTL 3600",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::Insert(ip) => {
+                assert_eq!(ip.using_timestamp, None);
+                assert_eq!(ip.using_ttl, Some(3600));
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn plan_insert_using_timestamp_and_ttl() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com') USING TIMESTAMP 999 AND TTL 60",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::Insert(ip) => {
+                assert_eq!(ip.using_timestamp, Some(999));
+                assert_eq!(ip.using_ttl, Some(60));
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn plan_update_using_timestamp() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "UPDATE test_ks.users USING TIMESTAMP 5000 SET email = 'x@y' WHERE id = 1",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::Update(up) => {
+                assert_eq!(up.using_timestamp, Some(5000));
+                assert_eq!(up.using_ttl, None);
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn plan_delete_using_timestamp() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "DELETE FROM test_ks.users USING TIMESTAMP 7000 WHERE id = 1",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::Delete(dp) => {
+                assert_eq!(dp.using_timestamp, Some(7000));
+                assert_eq!(dp.using_ttl, None);
+            }
+            _ => panic!("expected Delete"),
+        }
+    }
+
+    #[test]
+    fn plan_insert_no_using_clause() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com')",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::Insert(ip) => {
+                assert_eq!(ip.using_timestamp, None);
+                assert_eq!(ip.using_ttl, None);
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    // ── WU-14: extract_using helper ──
+
+    #[test]
+    fn extract_using_empty() {
+        let (ts, ttl) = super::extract_using(&[]);
+        assert_eq!(ts, None);
+        assert_eq!(ttl, None);
+    }
+
+    #[test]
+    fn extract_using_timestamp_only() {
+        let clauses = vec![UsingClause::Timestamp(Term::Literal(Literal::Integer(42)))];
+        let (ts, ttl) = super::extract_using(&clauses);
+        assert_eq!(ts, Some(42));
+        assert_eq!(ttl, None);
+    }
+
+    #[test]
+    fn extract_using_ttl_only() {
+        let clauses = vec![UsingClause::Ttl(Term::Literal(Literal::Integer(300)))];
+        let (ts, ttl) = super::extract_using(&clauses);
+        assert_eq!(ts, None);
+        assert_eq!(ttl, Some(300));
+    }
+
+    #[test]
+    fn extract_using_both() {
+        let clauses = vec![
+            UsingClause::Timestamp(Term::Literal(Literal::Integer(100))),
+            UsingClause::Ttl(Term::Literal(Literal::Integer(60))),
+        ];
+        let (ts, ttl) = super::extract_using(&clauses);
+        assert_eq!(ts, Some(100));
+        assert_eq!(ttl, Some(60));
     }
 }

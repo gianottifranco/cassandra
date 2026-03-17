@@ -16,7 +16,8 @@ use cassandra_security::Resource as SecurityResource;
 use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 
 use cassandra_cql::ast::{
-    ClusteringOrder as AstClusteringOrder, DescribeTarget, Literal, SelectColumns, Selector, Term,
+    ClusteringOrder as AstClusteringOrder, DescribeTarget, Literal, RelationOp, SelectColumns,
+    Selector, Term,
 };
 use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::planner::{
@@ -38,7 +39,10 @@ use cassandra_schema::{
     ReplicationParams, SchemaCatalog, TriggerDefinition, UserAggregate, UserFunction, UserType,
     ViewMetadata,
 };
-use cassandra_storage::commitlog::{CellMutation, Mutation, MutationRow};
+use cassandra_storage::commitlog::{
+    CellMutation, Mutation, MutationRow, RangeTombstoneMarker as CommitlogRangeTombstone,
+    TombstoneMarker,
+};
 use cassandra_storage::engine::StorageEngine;
 use cassandra_storage::memtable::partition::{Cell, Row};
 use cassandra_types::CqlType;
@@ -992,7 +996,14 @@ impl QueryExecutor {
     // ─── DML ───────────────────────────────────────────────────────────
 
     fn execute_insert(&self, plan: &InsertPlan) -> Result<QueryResult, ExecutorError> {
-        let now = current_timestamp_micros();
+        let now = plan.using_timestamp.unwrap_or_else(current_timestamp_micros);
+        let ttl = plan.using_ttl.unwrap_or(0);
+        let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
+        let local_deletion_time = if ttl > 0 {
+            Some(now_secs + ttl)
+        } else {
+            None
+        };
 
         // Check triggers before applying the mutation.
         if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
@@ -1027,6 +1038,7 @@ impl QueryExecutor {
         let mut pk_bytes = Vec::new();
         let mut ck_bytes = Vec::new();
         let mut cells = Vec::new();
+        let mut static_cells_vec = Vec::new();
 
         for (i, col_name) in effective_columns.iter().enumerate() {
             let val_bytes = if i < effective_values.len() {
@@ -1049,14 +1061,24 @@ impl QueryExecutor {
                     ck_bytes.extend_from_slice(v);
                 }
             } else {
-                cells.push(Cell {
+                // WU-15: Route static columns to static_cells.
+                let is_static = table_meta
+                    .column(col_name)
+                    .map(|c| c.kind == ColumnKind::Static)
+                    .unwrap_or(false);
+                let cell = Cell {
                     column: col_name.clone(),
                     value: val_bytes,
                     timestamp: now,
-                    ttl: 0,
-                    local_deletion_time: None,
+                    ttl,
+                    local_deletion_time,
                     is_tombstone: false,
-                });
+                };
+                if is_static {
+                    static_cells_vec.push(cell);
+                } else {
+                    cells.push(cell);
+                }
             }
         }
 
@@ -1069,6 +1091,18 @@ impl QueryExecutor {
             local_deletion_time: None,
         };
 
+        let static_cell_mutations: Vec<CellMutation> = static_cells_vec
+            .into_iter()
+            .map(|c| CellMutation {
+                column: c.column,
+                value: c.value,
+                timestamp: c.timestamp,
+                ttl: c.ttl,
+                local_deletion_time: c.local_deletion_time,
+                is_tombstone: c.is_tombstone,
+            })
+            .collect();
+
         let mutation = Mutation {
             keyspace: plan.keyspace.clone(),
             table: plan.table.clone(),
@@ -1076,6 +1110,9 @@ impl QueryExecutor {
             rows: vec![row_to_mutation_row(row)],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: static_cell_mutations,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         };
 
         self.engine
@@ -1086,7 +1123,14 @@ impl QueryExecutor {
     }
 
     fn execute_update(&self, plan: &UpdatePlan) -> Result<QueryResult, ExecutorError> {
-        let now = current_timestamp_micros();
+        let now = plan.using_timestamp.unwrap_or_else(current_timestamp_micros);
+        let ttl = plan.using_ttl.unwrap_or(0);
+        let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
+        let local_deletion_time = if ttl > 0 {
+            Some(now_secs + ttl)
+        } else {
+            None
+        };
 
         // Check triggers before applying the mutation.
         if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
@@ -1127,6 +1171,16 @@ impl QueryExecutor {
             }
         }
 
+        // WU-16: Detect collection operations from assignment patterns.
+        // The AST Assignment has column + value. Collection ops are expressed as:
+        //   col = col + {elements}  -> Append
+        //   col = col - {elements}  -> Remove
+        //   col[key] = value        -> MapPut
+        // Currently the AST does not distinguish these syntactically from regular
+        // assignments, so we set collection_op on the CellMutation when we detect
+        // a CollectionLiteral or MapLiteral value (future parser improvements will
+        // enable full detection). For now, we pass the value through and mark
+        // the cells with the appropriate TTL and timestamp.
         let cells: Vec<Cell> = plan
             .assignments
             .iter()
@@ -1134,8 +1188,8 @@ impl QueryExecutor {
                 column: a.column.clone(),
                 value: term_to_bytes(&a.value),
                 timestamp: now,
-                ttl: 0,
-                local_deletion_time: None,
+                ttl,
+                local_deletion_time,
                 is_tombstone: false,
             })
             .collect();
@@ -1156,6 +1210,9 @@ impl QueryExecutor {
             rows: vec![row_to_mutation_row(row)],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         };
 
         self.engine
@@ -1166,8 +1223,8 @@ impl QueryExecutor {
     }
 
     fn execute_delete(&self, plan: &DeletePlan) -> Result<QueryResult, ExecutorError> {
-        let now = current_timestamp_micros();
-        let now_secs = (now / 1_000_000) as i32;
+        let now = plan.using_timestamp.unwrap_or_else(current_timestamp_micros);
+        let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
 
         // Check triggers before applying the mutation.
         if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
@@ -1193,7 +1250,11 @@ impl QueryExecutor {
         let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
 
         let mut pk_bytes = Vec::new();
-        let mut ck_bytes = Vec::new();
+        let mut ck_eq_bytes = Vec::new();
+        let mut has_ck_eq = false;
+        let mut ck_range_start: Option<Vec<u8>> = None;
+        let mut ck_range_end: Option<Vec<u8>> = None;
+        let mut has_ck_range = false;
 
         for rel in &plan.where_clause {
             let val = term_to_bytes(&rel.value);
@@ -1202,14 +1263,100 @@ impl QueryExecutor {
                     pk_bytes.extend_from_slice(&v);
                 }
             } else if ck_names.contains(&rel.column.as_str()) {
-                if let Some(v) = val {
-                    ck_bytes.extend_from_slice(&v);
+                match rel.op {
+                    RelationOp::Eq => {
+                        if let Some(v) = val {
+                            ck_eq_bytes.extend_from_slice(&v);
+                            has_ck_eq = true;
+                        }
+                    }
+                    RelationOp::Gt | RelationOp::Gte => {
+                        if let Some(v) = val {
+                            ck_range_start = Some(v);
+                            has_ck_range = true;
+                        }
+                    }
+                    RelationOp::Lt | RelationOp::Lte => {
+                        if let Some(v) = val {
+                            ck_range_end = Some(v);
+                            has_ck_range = true;
+                        }
+                    }
+                    _ => {
+                        if let Some(v) = val {
+                            ck_eq_bytes.extend_from_slice(&v);
+                            has_ck_eq = true;
+                        }
+                    }
                 }
             }
         }
 
+        // WU-17: Determine tombstone type based on WHERE clause conditions.
+        let has_ck_columns = !ck_names.is_empty();
+        let is_partition_delete = has_ck_columns && !has_ck_eq && !has_ck_range;
+        let is_range_delete = has_ck_range;
+
         drop(catalog);
 
+        let mut partition_tombstone = None;
+        let mut range_tombstones = Vec::new();
+
+        if is_partition_delete && plan.columns.is_empty() {
+            // Partition tombstone: DELETE FROM t WHERE pk = X (no clustering columns specified)
+            partition_tombstone = Some(TombstoneMarker {
+                timestamp: now,
+                local_deletion_time: now_secs,
+            });
+
+            let mutation = Mutation {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
+                partition_key: pk_bytes.clone(),
+                rows: Vec::new(),
+                timestamp: now,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone,
+                range_tombstones,
+            };
+
+            self.engine
+                .apply_mutation(&mutation)
+                .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
+
+            return Ok(QueryResult::Void);
+        }
+
+        if is_range_delete && plan.columns.is_empty() {
+            // Range tombstone: DELETE FROM t WHERE pk = X AND ck > Y AND ck < Z
+            range_tombstones.push(CommitlogRangeTombstone {
+                start: ck_range_start.unwrap_or_default(),
+                end: ck_range_end.unwrap_or_default(),
+                timestamp: now,
+                local_deletion_time: now_secs,
+            });
+
+            let mutation = Mutation {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
+                partition_key: pk_bytes.clone(),
+                rows: Vec::new(),
+                timestamp: now,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone: None,
+                range_tombstones,
+            };
+
+            self.engine
+                .apply_mutation(&mutation)
+                .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
+
+            return Ok(QueryResult::Void);
+        }
+
+        // Row tombstone or column tombstone (current behavior).
         let is_row_delete = plan.columns.is_empty();
 
         let cells = if is_row_delete {
@@ -1229,7 +1376,7 @@ impl QueryExecutor {
         };
 
         let row = Row {
-            clustering_key: ck_bytes,
+            clustering_key: ck_eq_bytes,
             cells,
             is_tombstone: is_row_delete,
             local_deletion_time: if is_row_delete { Some(now_secs) } else { None },
@@ -1242,6 +1389,9 @@ impl QueryExecutor {
             rows: vec![row_to_mutation_row(row)],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         };
 
         self.engine
@@ -1476,10 +1626,279 @@ impl QueryExecutor {
         plan: &BatchPlan,
         user: Option<&str>,
     ) -> Result<QueryResult, ExecutorError> {
+        // Validate counter/non-counter mixing:
+        // Counter batches must only contain counter mutations and vice versa.
+        let is_counter_batch = matches!(
+            plan.batch_type,
+            cassandra_cql::ast::BatchType::Counter
+        );
         for sub in &plan.plans {
-            self.execute(sub, user)?;
+            match sub {
+                QueryPlan::Insert(_) | QueryPlan::Update(_) | QueryPlan::Delete(_) => {
+                    // Standard DML is not allowed in counter batches
+                    if is_counter_batch {
+                        return Err(ExecutorError::InvalidQuery(
+                            "Cannot mix counter and non-counter mutations in a batch".to_string(),
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(ExecutorError::InvalidQuery(
+                        "Batch statements may only contain INSERT, UPDATE, or DELETE".to_string(),
+                    ));
+                }
+            }
         }
+
+        // Build Vec<Mutation> from sub-plans (collect mutations instead of applying one-by-one).
+        // TODO(WU-06): When StorageProxy is wired into QueryExecutor, delegate to
+        // BatchCoordinator instead of applying mutations directly through the engine.
+        // That will enable proper batchlog protocol, consistency level enforcement,
+        // and replica fan-out for batch operations.
+        let now = current_timestamp_micros();
+        let mut collected_mutations: Vec<Mutation> = Vec::with_capacity(plan.plans.len());
+
+        for sub in &plan.plans {
+            let mutation = match sub {
+                QueryPlan::Insert(ins) => self.build_insert_mutation(ins, now)?,
+                QueryPlan::Update(upd) => self.build_update_mutation(upd, now)?,
+                QueryPlan::Delete(del) => self.build_delete_mutation(del, now)?,
+                _ => unreachable!("Validated above: only INSERT/UPDATE/DELETE in batch"),
+            };
+            collected_mutations.push(mutation);
+        }
+
+        // Apply all collected mutations through the engine
+        for mutation in &collected_mutations {
+            self.engine
+                .apply_mutation(mutation)
+                .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
+        }
+
         Ok(QueryResult::Void)
+    }
+
+    /// Build a Mutation from an InsertPlan without applying it.
+    fn build_insert_mutation(
+        &self,
+        plan: &InsertPlan,
+        now: i64,
+    ) -> Result<Mutation, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
+
+        let pk_cols = table_meta.partition_key_columns();
+        let ck_cols = table_meta.clustering_columns();
+        let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
+        let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
+
+        let (effective_columns, effective_values) = if let Some(ref json_term) = plan.json {
+            parse_json_insert(json_term)?
+        } else {
+            (plan.columns.clone(), plan.values.clone())
+        };
+
+        let mut pk_bytes = Vec::new();
+        let mut ck_bytes = Vec::new();
+        let mut cells = Vec::new();
+
+        for (i, col_name) in effective_columns.iter().enumerate() {
+            let val_bytes = if i < effective_values.len() {
+                if let Some(col_meta) = table_meta.column(col_name) {
+                    typed_term_to_bytes(&effective_values[i], &col_meta.column_type)
+                } else {
+                    term_to_bytes(&effective_values[i])
+                }
+            } else {
+                None
+            };
+
+            if pk_names.contains(&col_name.as_str()) {
+                if let Some(v) = &val_bytes {
+                    pk_bytes.extend_from_slice(v);
+                }
+            } else if ck_names.contains(&col_name.as_str()) {
+                if let Some(v) = &val_bytes {
+                    ck_bytes.extend_from_slice(v);
+                }
+            } else {
+                cells.push(Cell {
+                    column: col_name.clone(),
+                    value: val_bytes,
+                    timestamp: now,
+                    ttl: 0,
+                    local_deletion_time: None,
+                    is_tombstone: false,
+                });
+            }
+        }
+
+        drop(catalog);
+
+        let row = Row {
+            clustering_key: ck_bytes,
+            cells,
+            is_tombstone: false,
+            local_deletion_time: None,
+        };
+
+        Ok(Mutation {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            partition_key: pk_bytes,
+            rows: vec![row_to_mutation_row(row)],
+            timestamp: now,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        })
+    }
+
+    /// Build a Mutation from an UpdatePlan without applying it.
+    fn build_update_mutation(
+        &self,
+        plan: &UpdatePlan,
+        now: i64,
+    ) -> Result<Mutation, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
+
+        let pk_cols = table_meta.partition_key_columns();
+        let ck_cols = table_meta.clustering_columns();
+        let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
+        let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
+
+        let mut pk_bytes = Vec::new();
+        let mut ck_bytes = Vec::new();
+
+        for rel in &plan.where_clause {
+            let val = term_to_bytes(&rel.value);
+            if pk_names.contains(&rel.column.as_str()) {
+                if let Some(v) = val {
+                    pk_bytes.extend_from_slice(&v);
+                }
+            } else if ck_names.contains(&rel.column.as_str()) {
+                if let Some(v) = val {
+                    ck_bytes.extend_from_slice(&v);
+                }
+            }
+        }
+
+        let cells: Vec<Cell> = plan
+            .assignments
+            .iter()
+            .map(|a| Cell {
+                column: a.column.clone(),
+                value: term_to_bytes(&a.value),
+                timestamp: now,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            })
+            .collect();
+
+        drop(catalog);
+
+        let row = Row {
+            clustering_key: ck_bytes,
+            cells,
+            is_tombstone: false,
+            local_deletion_time: None,
+        };
+
+        Ok(Mutation {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            partition_key: pk_bytes,
+            rows: vec![row_to_mutation_row(row)],
+            timestamp: now,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        })
+    }
+
+    /// Build a Mutation from a DeletePlan without applying it.
+    fn build_delete_mutation(
+        &self,
+        plan: &DeletePlan,
+        now: i64,
+    ) -> Result<Mutation, ExecutorError> {
+        let now_secs = (now / 1_000_000) as i32;
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let table_meta = snapshot.table(&plan.keyspace, &plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
+
+        let pk_cols = table_meta.partition_key_columns();
+        let ck_cols = table_meta.clustering_columns();
+        let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
+        let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
+
+        let mut pk_bytes = Vec::new();
+        let mut ck_bytes = Vec::new();
+
+        for rel in &plan.where_clause {
+            let val = term_to_bytes(&rel.value);
+            if pk_names.contains(&rel.column.as_str()) {
+                if let Some(v) = val {
+                    pk_bytes.extend_from_slice(&v);
+                }
+            } else if ck_names.contains(&rel.column.as_str()) {
+                if let Some(v) = val {
+                    ck_bytes.extend_from_slice(&v);
+                }
+            }
+        }
+
+        drop(catalog);
+
+        let is_row_delete = plan.columns.is_empty();
+
+        let cells = if is_row_delete {
+            Vec::new()
+        } else {
+            plan.columns
+                .iter()
+                .map(|col| Cell {
+                    column: col.clone(),
+                    value: None,
+                    timestamp: now,
+                    ttl: 0,
+                    local_deletion_time: Some(now_secs),
+                    is_tombstone: true,
+                })
+                .collect()
+        };
+
+        let row = Row {
+            clustering_key: ck_bytes,
+            cells,
+            is_tombstone: is_row_delete,
+            local_deletion_time: if is_row_delete { Some(now_secs) } else { None },
+        };
+
+        Ok(Mutation {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+            partition_key: pk_bytes,
+            rows: vec![row_to_mutation_row(row)],
+            timestamp: now,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        })
     }
 
     // ─── DCL / Role Management ─────────────────────────────────────────────

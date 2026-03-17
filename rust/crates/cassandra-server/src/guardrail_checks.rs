@@ -135,6 +135,129 @@ fn check_feature(config: &GuardrailsConfig, feature: &str, display: &str) -> Gua
     }
 }
 
+// ─── Write Guardrails (WU-04) ─────────────────────────────────────
+
+/// Check write-path guardrails at the server layer.
+///
+/// Wraps coordinator-level `WriteGuardrails` for use in the CQL query
+/// execution layer. Returns a `GuardrailResult` suitable for warning
+/// or rejecting before the write reaches the coordinator.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.db.guardrails.Guardrails` — write-path hooks
+pub fn check_write_guardrails(
+    guardrails: &cassandra_coordinator::WriteGuardrails,
+    mutation: &cassandra_coordinator::CoordinatedMutation,
+) -> GuardrailResult {
+    // Check mutation size
+    let size = mutation.estimated_size();
+    if size > guardrails.max_mutation_size {
+        return GuardrailResult::Rejected(format!(
+            "Mutation of {} bytes exceeds maximum of {} bytes",
+            size, guardrails.max_mutation_size
+        ));
+    }
+
+    // Check partition size warning
+    if size > guardrails.partition_size_warn {
+        return GuardrailResult::Warned(format!(
+            "Mutation of {} bytes exceeds partition size warn threshold of {} bytes",
+            size, guardrails.partition_size_warn
+        ));
+    }
+
+    // Check tombstone count
+    let tombstone_count = count_tombstones(mutation);
+    if tombstone_count > guardrails.tombstone_warn_threshold {
+        return GuardrailResult::Warned(format!(
+            "Mutation contains {} tombstones, exceeds warn threshold of {}",
+            tombstone_count, guardrails.tombstone_warn_threshold
+        ));
+    }
+
+    // Check collection sizes
+    let max_collection = max_collection_size(mutation);
+    if max_collection > guardrails.collection_size_warn {
+        return GuardrailResult::Warned(format!(
+            "Collection of {} elements exceeds warn threshold of {}",
+            max_collection, guardrails.collection_size_warn
+        ));
+    }
+
+    // Check columns per query
+    let column_count = count_columns(mutation);
+    if column_count > guardrails.columns_per_query_warn {
+        return GuardrailResult::Warned(format!(
+            "Query touches {} columns, exceeds warn threshold of {}",
+            column_count, guardrails.columns_per_query_warn
+        ));
+    }
+
+    GuardrailResult::Allowed
+}
+
+fn count_tombstones(mutation: &cassandra_coordinator::CoordinatedMutation) -> usize {
+    let mut count = 0;
+    if mutation.partition_tombstone.is_some() {
+        count += 1;
+    }
+    for row in &mutation.rows {
+        if row.is_tombstone {
+            count += 1;
+        }
+        if row.range_tombstone.is_some() {
+            count += 1;
+        }
+        for cell in &row.cells {
+            if cell.is_tombstone {
+                count += 1;
+            }
+        }
+    }
+    for cell in &mutation.static_cells {
+        if cell.is_tombstone {
+            count += 1;
+        }
+    }
+    count
+}
+
+fn max_collection_size(mutation: &cassandra_coordinator::CoordinatedMutation) -> usize {
+    let all_cells = mutation
+        .rows
+        .iter()
+        .flat_map(|r| r.cells.iter())
+        .chain(mutation.static_cells.iter());
+    let mut max_size = 0usize;
+    for cell in all_cells {
+        if let Some(ref op) = cell.collection_op {
+            let sz = match op {
+                cassandra_coordinator::CollectionOp::Append(elems)
+                | cassandra_coordinator::CollectionOp::Remove(elems) => elems.len(),
+                cassandra_coordinator::CollectionOp::MapPut(entries) => entries.len(),
+            };
+            if sz > max_size {
+                max_size = sz;
+            }
+        }
+    }
+    max_size
+}
+
+fn count_columns(mutation: &cassandra_coordinator::CoordinatedMutation) -> usize {
+    let mut columns = std::collections::HashSet::new();
+    for row in &mutation.rows {
+        for cell in &row.cells {
+            columns.insert(cell.column.as_str());
+        }
+    }
+    for cell in &mutation.static_cells {
+        columns.insert(cell.column.as_str());
+    }
+    columns.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +345,85 @@ mod tests {
         let mut config = GuardrailsConfig::default();
         config.drop_keyspace_enabled = false;
         assert!(check_drop_keyspace(&config).is_rejected());
+    }
+
+    // ── WU-04: Write guardrails at server layer ──────────────────
+
+    fn test_mutation() -> cassandra_coordinator::CoordinatedMutation {
+        cassandra_coordinator::CoordinatedMutation::simple(
+            "ks".to_string(),
+            "tbl".to_string(),
+            b"pk1".to_vec(),
+            vec![cassandra_coordinator::MutationRow {
+                clustering_key: vec![],
+                cells: vec![cassandra_coordinator::CellMutation {
+                    column: "col1".to_string(),
+                    value: Some(b"val".to_vec()),
+                    timestamp: 1000,
+                    ttl: 0,
+                    is_tombstone: false,
+                    collection_op: None,
+                }],
+                is_tombstone: false,
+                range_tombstone: None,
+            }],
+            1000,
+        )
+    }
+
+    #[test]
+    fn write_guardrail_allowed() {
+        let guardrails = cassandra_coordinator::WriteGuardrails::default();
+        let result = check_write_guardrails(&guardrails, &test_mutation());
+        assert!(!result.is_rejected());
+        assert!(matches!(result, GuardrailResult::Allowed));
+    }
+
+    #[test]
+    fn write_guardrail_rejects_oversized_mutation() {
+        let guardrails = cassandra_coordinator::WriteGuardrails {
+            max_mutation_size: 10, // very small
+            ..Default::default()
+        };
+        let result = check_write_guardrails(&guardrails, &test_mutation());
+        assert!(result.is_rejected());
+    }
+
+    #[test]
+    fn write_guardrail_warns_tombstones() {
+        let guardrails = cassandra_coordinator::WriteGuardrails {
+            tombstone_warn_threshold: 0,
+            ..Default::default()
+        };
+        let mut m = test_mutation();
+        m.rows[0].is_tombstone = true;
+        let result = check_write_guardrails(&guardrails, &m);
+        assert!(matches!(result, GuardrailResult::Warned(_)));
+    }
+
+    #[test]
+    fn write_guardrail_warns_columns() {
+        let guardrails = cassandra_coordinator::WriteGuardrails {
+            columns_per_query_warn: 0,
+            ..Default::default()
+        };
+        let result = check_write_guardrails(&guardrails, &test_mutation());
+        assert!(matches!(result, GuardrailResult::Warned(_)));
+    }
+
+    #[test]
+    fn write_guardrail_warns_collection_size() {
+        let guardrails = cassandra_coordinator::WriteGuardrails {
+            collection_size_warn: 1,
+            ..Default::default()
+        };
+        let mut m = test_mutation();
+        m.rows[0].cells[0].collection_op =
+            Some(cassandra_coordinator::CollectionOp::Append(vec![
+                b"a".to_vec(),
+                b"b".to_vec(),
+            ]));
+        let result = check_write_guardrails(&guardrails, &m);
+        assert!(matches!(result, GuardrailResult::Warned(_)));
     }
 }

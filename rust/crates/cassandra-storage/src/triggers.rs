@@ -56,6 +56,76 @@ pub trait Trigger: Send + Sync + std::fmt::Debug {
     fn definition(&self) -> &TriggerDefinition;
 }
 
+/// Trigger executor: invokes registered trigger implementations on mutations.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.triggers.TriggerExecutor` — singleton that loads
+/// trigger classes and calls `ITrigger.augment()` for each registered trigger.
+///
+/// ## Status
+///
+/// Behind `#[cfg(feature = "triggers")]`. The executor holds `Box<dyn Trigger>`
+/// instances. Until a plugin system (WASM/FFI) is implemented, no triggers
+/// can actually be loaded at runtime.
+#[cfg(feature = "triggers")]
+#[derive(Debug, Default)]
+pub struct TriggerExecutor {
+    /// Loaded trigger implementations, keyed by (keyspace, table).
+    triggers: std::collections::HashMap<(String, String), Vec<Box<dyn Trigger>>>,
+}
+
+#[cfg(feature = "triggers")]
+impl TriggerExecutor {
+    /// Create a new empty executor.
+    pub fn new() -> Self {
+        Self {
+            triggers: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Register a trigger implementation for a table.
+    pub fn register(&mut self, trigger: Box<dyn Trigger>) {
+        let def = trigger.definition();
+        let key = (def.keyspace.clone(), def.table.clone());
+        self.triggers.entry(key).or_default().push(trigger);
+    }
+
+    /// Execute all triggers for a (keyspace, table) against the given mutation bytes.
+    ///
+    /// Returns a vec of augmented mutation byte blobs produced by the triggers.
+    /// If a trigger returns an error, it is logged and skipped (non-fatal).
+    pub fn execute(
+        &self,
+        keyspace: &str,
+        table: &str,
+        mutation: &[u8],
+    ) -> Vec<Vec<u8>> {
+        let key = (keyspace.to_string(), table.to_string());
+        let Some(triggers) = self.triggers.get(&key) else {
+            return Vec::new();
+        };
+
+        let mut augmented = Vec::new();
+        for trigger in triggers {
+            match trigger.augment(mutation) {
+                Ok(mutations) => augmented.extend(mutations),
+                Err(_e) => {
+                    // Non-fatal: log and continue (matches Java behavior where
+                    // a failing trigger does not abort the write).
+                }
+            }
+        }
+        augmented
+    }
+
+    /// Check if any triggers are registered for the given table.
+    pub fn has_triggers_for(&self, keyspace: &str, table: &str) -> bool {
+        let key = (keyspace.to_string(), table.to_string());
+        self.triggers.get(&key).is_some_and(|v| !v.is_empty())
+    }
+}
+
 /// Stub trigger manager.
 #[derive(Debug, Default)]
 pub struct TriggerManager {
@@ -81,6 +151,27 @@ impl TriggerManager {
     pub fn has_triggers_for(&self, _keyspace: &str, _table: &str) -> bool {
         false
     }
+
+    /// Augment a mutation by iterating all triggers for the given table (WU-19).
+    ///
+    /// Returns a vec of augmented mutation byte blobs. Since no triggers can
+    /// currently be registered (stub), this always returns an empty vec.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `TriggerExecutor.execute()` — iterates triggers, calls `augment()`,
+    /// collects additional mutations.
+    #[cfg(feature = "triggers")]
+    pub fn augment_mutation(
+        &self,
+        _keyspace: &str,
+        _table: &str,
+        _mutation: &[u8],
+    ) -> Vec<Vec<u8>> {
+        // No triggers can be registered via the stub manager, so this is a no-op.
+        // When the plugin system is implemented, this will delegate to TriggerExecutor.
+        Vec::new()
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +189,22 @@ mod tests {
         };
         assert!(mgr.register(def).is_err());
         assert!(!mgr.has_triggers_for("ks", "users"));
+    }
+
+    #[cfg(feature = "triggers")]
+    #[test]
+    fn trigger_executor_empty() {
+        let executor = TriggerExecutor::new();
+        assert!(!executor.has_triggers_for("ks", "users"));
+        let result = executor.execute("ks", "users", b"mutation_bytes");
+        assert!(result.is_empty());
+    }
+
+    #[cfg(feature = "triggers")]
+    #[test]
+    fn trigger_manager_augment_empty() {
+        let mgr = TriggerManager::new();
+        let result = mgr.augment_mutation("ks", "users", b"mutation_bytes");
+        assert!(result.is_empty());
     }
 }

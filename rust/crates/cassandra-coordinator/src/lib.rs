@@ -58,6 +58,7 @@ pub use tracing_cleanup::{ExpirableSessionStore, InMemorySessionStore, TracingCl
 pub use tracing_manager::{TracingConfig, TracingManager};
 pub use batch::{
     BatchCoordinator, BatchEntry, BatchGuardrails, BatchLogManager, BatchLogMetrics, BatchType,
+    ReplayResult,
 };
 pub use consensus::ConsensusRouter;
 pub use consistency::ConsistencyLevel;
@@ -79,7 +80,9 @@ pub use write::{
     ViewFanoutResult, WriteCoordinator, WriteError, WriteGuardrails, WriteMetrics, WritePlan,
     WriteResult, WriteType,
 };
-pub use write_response_handler::{RequestFailureReason, WriteResponseHandler};
+pub use write_response_handler::{
+    DatacenterWriteResponseHandler, RequestFailureReason, WriteResponseHandler,
+};
 
 pub use hint_delivery::{DeliveryResult, HintDeliveryMetrics, HintDeliveryService};
 pub use storage_proxy::{StorageProxy, StorageProxyConfig};

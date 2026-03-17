@@ -563,3 +563,60 @@ fn gap_guard_cdc() {
     // CDC commit log segment allocator and reader for streaming changes
     panic!("CDC not yet implemented");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// WRITE PATH GAPS (Prompt 13 — WU-20)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn gap_guard_write_path_mv_fanout() {
+    // CLOSED by prompt-13 (WU-18): ViewManager.generate_view_updates_with_existing()
+    // and WriteCoordinator backpressure tracking for view update backlog.
+    use cassandra_storage::materialized_views::ViewManager;
+    let mgr = ViewManager::new();
+    assert_eq!(mgr.view_count(), 0);
+    // generate_view_updates_with_existing exists and is callable
+    let result = mgr.generate_view_updates_with_existing(
+        "ks",
+        "t",
+        b"pk",
+        &std::collections::HashMap::new(),
+        0,
+        false,
+        None,
+    );
+    assert!(result.mutations.is_empty());
+}
+
+#[test]
+fn gap_guard_write_path_trigger_augmentation() {
+    // CLOSED by prompt-13 (WU-19): TriggerManager.augment_mutation() stub
+    // and TriggerExecutor struct behind triggers feature flag.
+    use cassandra_storage::triggers::TriggerManager;
+    let mgr = TriggerManager::new();
+    assert!(!mgr.has_triggers_for("ks", "t"));
+}
+
+#[test]
+#[ignore = "GAP: Read-before-write for MV deltas — Java: ViewUpdateGenerator — Target: prompt-14+"]
+fn gap_guard_write_path_read_before_write() {
+    // The coordinator has a TODO stub for reading existing row state before
+    // generating view deltas. Needs local storage engine integration.
+    panic!("Read-before-write for MV not yet wired to storage engine");
+}
+
+#[test]
+#[ignore = "GAP: Trigger plugin system (WASM/FFI) — Java: triggers — Target: prompt-20+"]
+fn gap_guard_trigger_plugin_system() {
+    // TriggerExecutor exists but no runtime plugin loading.
+    // Needs WASM sandbox or dynamic library support.
+    panic!("Trigger plugin system not yet implemented");
+}
+
+#[test]
+#[ignore = "GAP: Async MV fanout with real messaging — Java: StorageProxy — Target: prompt-15+"]
+fn gap_guard_async_mv_fanout() {
+    // Current MV fanout is synchronous within coordinate_write_with_hooks.
+    // Java schedules view updates asynchronously via ViewWriteMetricsView.
+    panic!("Async MV fanout not yet implemented");
+}

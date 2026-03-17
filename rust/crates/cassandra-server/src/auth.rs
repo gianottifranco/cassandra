@@ -128,6 +128,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: Self::now(),
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         if let Err(e) = self.engine.apply_mutation(&mutation) {
@@ -188,6 +191,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: Self::now(),
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -211,6 +217,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -284,6 +293,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: Self::now(),
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -310,6 +322,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: Self::now(),
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -334,6 +349,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -360,6 +378,9 @@ impl RoleManager for SystemAuthRoleManager {
             }],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -519,6 +540,9 @@ impl Authorizer for SystemAuthAuthorizer {
             }],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -538,6 +562,9 @@ impl Authorizer for SystemAuthAuthorizer {
             }],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine
@@ -576,6 +603,9 @@ impl Authorizer for SystemAuthAuthorizer {
             }],
             timestamp: now,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         self.engine

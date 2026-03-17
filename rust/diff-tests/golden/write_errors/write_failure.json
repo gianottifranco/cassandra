@@ -1,0 +1,18 @@
+{
+  "error_code": "0x1500",
+  "error_name": "WRITE_FAILURE",
+  "description": "Write request failed on one or more replicas",
+  "fields": {
+    "cl": "ALL",
+    "write_type": "BATCH",
+    "required": 3,
+    "received": 2,
+    "block_for": 3,
+    "num_failures": 1,
+    "failure_map": {
+      "127.0.0.1:7003": 1
+    }
+  },
+  "java_class": "org.apache.cassandra.exceptions.WriteFailureException",
+  "protocol_version": 4
+}

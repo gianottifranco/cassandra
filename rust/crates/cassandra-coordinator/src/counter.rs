@@ -106,6 +106,8 @@ impl CounterReplica {
 pub struct CounterCoordinator {
     write_coordinator: Arc<WriteCoordinator>,
     replicas: Arc<DashMap<Endpoint, CounterReplica>>,
+    /// Local endpoint for counter leader selection proximity.
+    local_endpoint: Option<Endpoint>,
 }
 
 impl CounterCoordinator {
@@ -116,7 +118,47 @@ impl CounterCoordinator {
         Self {
             write_coordinator,
             replicas,
+            local_endpoint: None,
         }
+    }
+
+    pub fn with_local_endpoint(mut self, endpoint: Endpoint) -> Self {
+        self.local_endpoint = Some(endpoint);
+        self
+    }
+
+    /// Select the counter leader from a set of replicas.
+    ///
+    /// Picks the replica with the lowest latency (closest by proximity)
+    /// or the local node if it is among the replicas.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.findSuitableEndpoint()` — counter leader selection
+    /// picks the closest replica using the snitch's proximity sort.
+    pub fn select_counter_leader(
+        &self,
+        replicas: &[Endpoint],
+        snitch: &dyn Snitch,
+    ) -> Option<Endpoint> {
+        if replicas.is_empty() {
+            return None;
+        }
+
+        // If we have a local endpoint and it's among the replicas, prefer it
+        if let Some(ref local) = self.local_endpoint {
+            if replicas.contains(local) {
+                return Some(*local);
+            }
+        }
+
+        // Otherwise, sort by proximity to any known local endpoint and pick the closest
+        let mut sorted = replicas.to_vec();
+        if let Some(ref local) = self.local_endpoint {
+            snitch.sort_by_proximity(local, &mut sorted);
+        }
+
+        Some(sorted[0])
     }
 
     /// Coordinate a counter mutation.
@@ -309,5 +351,73 @@ mod tests {
             let ctx = cassandra_storage::counter::CounterContext::deserialize(&data).unwrap();
             assert_eq!(ctx.total(), 15);
         }
+    }
+
+    // ── WU-09: Counter leader selection tests ───────────────────
+
+    #[test]
+    fn select_counter_leader_prefers_local() {
+        let (write_coord, replicas) = setup_env();
+        let counter_coord = CounterCoordinator::new(write_coord, replicas)
+            .with_local_endpoint(ep(7002));
+
+        struct DummySnitch;
+        impl Snitch for DummySnitch {
+            fn datacenter(&self, _endpoint: &Endpoint) -> String {
+                "dc1".to_string()
+            }
+            fn rack(&self, _endpoint: &Endpoint) -> String {
+                "rack1".to_string()
+            }
+        }
+
+        let replicas_list = vec![ep(7001), ep(7002), ep(7003)];
+        let leader = counter_coord.select_counter_leader(&replicas_list, &DummySnitch);
+
+        // Should prefer local endpoint
+        assert_eq!(leader, Some(ep(7002)));
+    }
+
+    #[test]
+    fn select_counter_leader_falls_back_to_closest() {
+        let (write_coord, replicas) = setup_env();
+        let counter_coord = CounterCoordinator::new(write_coord, replicas)
+            .with_local_endpoint(ep(9999)); // Not in replicas
+
+        struct DummySnitch;
+        impl Snitch for DummySnitch {
+            fn datacenter(&self, _endpoint: &Endpoint) -> String {
+                "dc1".to_string()
+            }
+            fn rack(&self, _endpoint: &Endpoint) -> String {
+                "rack1".to_string()
+            }
+        }
+
+        let replicas_list = vec![ep(7001), ep(7002), ep(7003)];
+        let leader = counter_coord.select_counter_leader(&replicas_list, &DummySnitch);
+
+        // Should return some endpoint (first after proximity sort)
+        assert!(leader.is_some());
+        assert!(replicas_list.contains(&leader.unwrap()));
+    }
+
+    #[test]
+    fn select_counter_leader_empty_replicas() {
+        let (write_coord, replicas) = setup_env();
+        let counter_coord = CounterCoordinator::new(write_coord, replicas);
+
+        struct DummySnitch;
+        impl Snitch for DummySnitch {
+            fn datacenter(&self, _endpoint: &Endpoint) -> String {
+                "dc1".to_string()
+            }
+            fn rack(&self, _endpoint: &Endpoint) -> String {
+                "rack1".to_string()
+            }
+        }
+
+        let leader = counter_coord.select_counter_leader(&[], &DummySnitch);
+        assert_eq!(leader, None);
     }
 }

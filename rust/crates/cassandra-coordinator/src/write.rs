@@ -28,6 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use dashmap::DashSet;
 use tracing::{debug, warn};
 
 use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
@@ -369,6 +370,14 @@ pub struct WriteGuardrails {
     pub max_mutation_size: usize,
     /// Threshold for timestamp drift warning (client vs server).
     pub timestamp_drift_threshold: Duration,
+    /// Warn when partition size exceeds this (bytes, default 100 MiB).
+    pub partition_size_warn: usize,
+    /// Warn when tombstone count in a single mutation exceeds this (default 1000).
+    pub tombstone_warn_threshold: usize,
+    /// Warn when collection size exceeds this (default 65535 elements).
+    pub collection_size_warn: usize,
+    /// Warn when the number of columns touched in a single query exceeds this (default 100).
+    pub columns_per_query_warn: usize,
 }
 
 impl Default for WriteGuardrails {
@@ -376,6 +385,10 @@ impl Default for WriteGuardrails {
         Self {
             max_mutation_size: DEFAULT_MAX_MUTATION_SIZE,
             timestamp_drift_threshold: DEFAULT_TIMESTAMP_DRIFT_THRESHOLD,
+            partition_size_warn: 100 * 1024 * 1024,
+            tombstone_warn_threshold: 1000,
+            collection_size_warn: 65535,
+            columns_per_query_warn: 100,
         }
     }
 }
@@ -428,6 +441,13 @@ impl Default for WriteMetrics {
 /// ## Java Oracle
 ///
 /// `org.apache.cassandra.service.StorageProxy.performWrite()`
+
+/// Default backpressure threshold for view update backlog.
+///
+/// When the number of pending view mutations exceeds this, the coordinator
+/// logs a warning. Java uses `max_pending_view_updates` in cassandra.yaml.
+pub const DEFAULT_VIEW_UPDATE_BACKLOG_THRESHOLD: u64 = 10_000;
+
 pub struct WriteCoordinator {
     /// Cluster metadata for replica lookups.
     cluster: Arc<ClusterMetadata>,
@@ -447,6 +467,19 @@ pub struct WriteCoordinator {
     guardrails: WriteGuardrails,
     /// MV fanout metrics.
     pub view_fanout_metrics: Arc<ViewFanoutMetrics>,
+    /// Semaphore limiting max concurrent writes (WU-05).
+    write_semaphore: Arc<tokio::sync::Semaphore>,
+    /// Tables currently being truncated (WU-05).
+    truncating_tables: Arc<DashSet<String>>,
+    /// Backpressure counter: tracks pending MV update mutations (WU-18).
+    ///
+    /// ## Java Oracle
+    ///
+    /// `ViewManager.getViewUpdateBacklog()` — used by StorageProxy to apply
+    /// backpressure when view updates fall behind.
+    pub view_update_backlog: Arc<AtomicU64>,
+    /// Threshold for view update backlog warning (WU-18).
+    view_update_backlog_threshold: u64,
 }
 
 /// Metrics for MV fanout tracking.
@@ -488,6 +521,10 @@ impl WriteCoordinator {
             local_datacenter: "dc1".to_string(),
             guardrails: WriteGuardrails::default(),
             view_fanout_metrics: Arc::new(ViewFanoutMetrics::new()),
+            write_semaphore: Arc::new(tokio::sync::Semaphore::new(1024)),
+            truncating_tables: Arc::new(DashSet::new()),
+            view_update_backlog: Arc::new(AtomicU64::new(0)),
+            view_update_backlog_threshold: DEFAULT_VIEW_UPDATE_BACKLOG_THRESHOLD,
         }
     }
 
@@ -601,7 +638,158 @@ impl WriteCoordinator {
             );
         }
 
+        // Partition size warning (WU-04)
+        if size > self.guardrails.partition_size_warn {
+            warn!(
+                size,
+                threshold = self.guardrails.partition_size_warn,
+                keyspace = %mutation.keyspace,
+                table = %mutation.table,
+                "Mutation exceeds partition size warn threshold"
+            );
+        }
+
+        // Tombstone count warning (WU-04)
+        let tombstone_count = Self::count_tombstones(mutation);
+        if tombstone_count > self.guardrails.tombstone_warn_threshold {
+            warn!(
+                tombstones = tombstone_count,
+                threshold = self.guardrails.tombstone_warn_threshold,
+                keyspace = %mutation.keyspace,
+                table = %mutation.table,
+                "Mutation contains excessive tombstones"
+            );
+        }
+
+        // Collection size warning (WU-04)
+        let max_collection_size = Self::max_collection_size(mutation);
+        if max_collection_size > self.guardrails.collection_size_warn {
+            warn!(
+                collection_elements = max_collection_size,
+                threshold = self.guardrails.collection_size_warn,
+                keyspace = %mutation.keyspace,
+                table = %mutation.table,
+                "Collection size exceeds warn threshold"
+            );
+        }
+
+        // Columns per query warning (WU-04)
+        let column_count = Self::count_columns(mutation);
+        if column_count > self.guardrails.columns_per_query_warn {
+            warn!(
+                columns = column_count,
+                threshold = self.guardrails.columns_per_query_warn,
+                keyspace = %mutation.keyspace,
+                table = %mutation.table,
+                "Column count per query exceeds warn threshold"
+            );
+        }
+
         Ok(())
+    }
+
+    /// Count tombstones in a mutation (rows + cells + partition + range).
+    fn count_tombstones(mutation: &CoordinatedMutation) -> usize {
+        let mut count = 0;
+        if mutation.partition_tombstone.is_some() {
+            count += 1;
+        }
+        for row in &mutation.rows {
+            if row.is_tombstone {
+                count += 1;
+            }
+            if row.range_tombstone.is_some() {
+                count += 1;
+            }
+            for cell in &row.cells {
+                if cell.is_tombstone {
+                    count += 1;
+                }
+            }
+        }
+        for cell in &mutation.static_cells {
+            if cell.is_tombstone {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Return the largest collection operation size in the mutation.
+    fn max_collection_size(mutation: &CoordinatedMutation) -> usize {
+        let all_cells = mutation
+            .rows
+            .iter()
+            .flat_map(|r| r.cells.iter())
+            .chain(mutation.static_cells.iter());
+        let mut max_size = 0usize;
+        for cell in all_cells {
+            if let Some(ref op) = cell.collection_op {
+                let sz = match op {
+                    CollectionOp::Append(elems) | CollectionOp::Remove(elems) => elems.len(),
+                    CollectionOp::MapPut(entries) => entries.len(),
+                };
+                if sz > max_size {
+                    max_size = sz;
+                }
+            }
+        }
+        max_size
+    }
+
+    /// Count distinct columns touched by a mutation.
+    fn count_columns(mutation: &CoordinatedMutation) -> usize {
+        let mut columns = std::collections::HashSet::new();
+        for row in &mutation.rows {
+            for cell in &row.cells {
+                columns.insert(cell.column.as_str());
+            }
+        }
+        for cell in &mutation.static_cells {
+            columns.insert(cell.column.as_str());
+        }
+        columns.len()
+    }
+
+    /// Check pre-write preconditions (WU-05).
+    ///
+    /// 1. Reject if bootstrapping
+    /// 2. Reject if write semaphore is full (Overloaded)
+    /// 3. Reject if table is currently being truncated
+    fn check_preconditions(&self, mutation: &CoordinatedMutation) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, WriteError> {
+        if self.is_bootstrapping {
+            return Err(WriteError::IsBootstrapping);
+        }
+
+        // Try to acquire write semaphore without blocking
+        let permit = Arc::clone(&self.write_semaphore)
+            .try_acquire_owned()
+            .map_err(|_| WriteError::Overloaded)?;
+
+        // Check truncation in progress
+        let table_key = format!("{}.{}", mutation.keyspace, mutation.table);
+        if self.truncating_tables.contains(&table_key) {
+            return Err(WriteError::TruncateInProgress);
+        }
+
+        Ok(Some(permit))
+    }
+
+    /// Mark a table as being truncated (blocks writes to that table).
+    pub fn begin_truncation(&self, keyspace: &str, table: &str) {
+        self.truncating_tables
+            .insert(format!("{}.{}", keyspace, table));
+    }
+
+    /// Mark a table truncation as complete (unblocks writes).
+    pub fn end_truncation(&self, keyspace: &str, table: &str) {
+        self.truncating_tables
+            .remove(&format!("{}.{}", keyspace, table));
+    }
+
+    /// Access the write guardrails (for server-layer checks).
+    pub fn guardrails(&self) -> &WriteGuardrails {
+        &self.guardrails
     }
 
     /// Coordinate a write at the given consistency level.
@@ -628,10 +816,9 @@ impl WriteCoordinator {
         let start = std::time::Instant::now();
         self.metrics.writes_total.fetch_add(1, Ordering::Relaxed);
 
-        // Precondition checks
-        if self.is_bootstrapping {
-            return Err(WriteError::IsBootstrapping);
-        }
+        // Precondition checks (WU-05): bootstrapping, semaphore, truncation
+        let _permit = self.check_preconditions(mutation)?;
+
         if cl.is_serial() {
             return Err(WriteError::Internal(
                 "Serial consistency levels require CAS path".to_string(),
@@ -902,6 +1089,81 @@ impl WriteCoordinator {
         Ok((plan, handler))
     }
 
+    /// Coordinate a write asynchronously using a WriteResponseHandler (WU-01).
+    ///
+    /// Returns the plan and handler. The caller (e.g., StorageProxy) is responsible
+    /// for sending mutations to replicas via messaging and recording acks.
+    /// Call `handler.await_completion()` to wait for CL satisfaction.
+    ///
+    /// The synchronous `coordinate_write()` remains available for batch/testing use.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.performWrite()` — creates handler, sends messages, awaits
+    pub fn coordinate_write_async(
+        &self,
+        mutation: &CoordinatedMutation,
+        cl: ConsistencyLevel,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Result<(WritePlan, Arc<WriteResponseHandler>), WriteError> {
+        self.metrics.writes_total.fetch_add(1, Ordering::Relaxed);
+
+        // Precondition checks (WU-05)
+        let _permit = self.check_preconditions(mutation)?;
+
+        if cl.is_serial() {
+            return Err(WriteError::Internal(
+                "Serial consistency levels require CAS path".to_string(),
+            ));
+        }
+
+        // Check guardrails
+        self.check_guardrails(mutation)?;
+
+        // For DC-aware CLs, use DC-aware plan (WU-02)
+        if matches!(
+            cl,
+            ConsistencyLevel::EachQuorum
+                | ConsistencyLevel::LocalQuorum
+                | ConsistencyLevel::LocalOne
+        ) {
+            let dc_plan = self.compute_dc_aware_write_plan(mutation, cl, strategy, snitch)?;
+            return self.prepare_async_write_from_plan(mutation, &dc_plan.base);
+        }
+
+        self.prepare_async_write(mutation, cl, strategy, snitch)
+    }
+
+    /// Build a WriteResponseHandler from an existing WritePlan.
+    fn prepare_async_write_from_plan(
+        &self,
+        mutation: &CoordinatedMutation,
+        plan: &WritePlan,
+    ) -> Result<(WritePlan, Arc<WriteResponseHandler>), WriteError> {
+        let write_type = match mutation.kind {
+            MutationKind::Standard => WriteType::Simple,
+            MutationKind::Counter => WriteType::Counter,
+            MutationKind::View => WriteType::View,
+        };
+
+        let handler = Arc::new(WriteResponseHandler::new(
+            plan.cl,
+            write_type,
+            plan.block_for,
+            plan.live_replicas.clone(),
+            self.timeout,
+        ));
+
+        // Store hints for known-dead replicas immediately
+        for dead in &plan.dead_replicas {
+            self.hint_store.store_hint(*dead, mutation.clone());
+            handler.on_hint_stored();
+        }
+
+        Ok((plan.clone(), handler))
+    }
+
     /// Check if a write at the given CL can be satisfied with current topology.
     pub fn can_satisfy_cl(
         &self,
@@ -976,9 +1238,32 @@ impl WriteCoordinator {
         view_manager: Option<&cassandra_storage::materialized_views::ViewManager>,
         _trigger_manager: Option<&cassandra_storage::triggers::TriggerManager>,
     ) -> Result<(WriteResult, ViewFanoutResult), WriteError> {
-        // Step 1: Trigger augmentation (currently stub — no triggers fire)
-        // If triggers existed and augment() returned additional mutations,
-        // they'd be merged into the base mutation set here.
+        // Step 1: Trigger augmentation (WU-19)
+        // Behind cfg(feature = "triggers"), call trigger_manager.augment_mutation()
+        // if triggers exist for this table. Merge augmented mutations into the base
+        // mutation set before coordinating.
+        #[cfg(feature = "triggers")]
+        if let Some(tm) = _trigger_manager {
+            if tm.has_triggers_for(&mutation.keyspace, &mutation.table) {
+                let mutation_bytes = serde_json::to_vec(mutation).unwrap_or_default();
+                let augmented = tm.augment_mutation(
+                    &mutation.keyspace,
+                    &mutation.table,
+                    &mutation_bytes,
+                );
+                if !augmented.is_empty() {
+                    debug!(
+                        keyspace = %mutation.keyspace,
+                        table = %mutation.table,
+                        augmented_count = augmented.len(),
+                        "Trigger augmented mutations merged"
+                    );
+                    // TODO(WU-19): Deserialize augmented mutations and merge into
+                    // the base mutation set. For now, augmented bytes are logged
+                    // but not applied until the trigger executor is fully wired.
+                }
+            }
+        }
 
         // Step 2: Coordinate the base mutation
         let result = self.coordinate_write(mutation, cl, strategy, snitch)?;
@@ -987,6 +1272,13 @@ impl WriteCoordinator {
         let mut fanout = ViewFanoutResult::default();
         if let Some(vm) = view_manager {
             if vm.has_views_for(&mutation.keyspace, &mutation.table) {
+                // TODO(WU-18): Read-before-write — read the existing row state from
+                // the local storage engine before generating view deltas. This is
+                // needed for proper delta computation (old vs new column values).
+                // Java does this in ViewUpdateGenerator.generateViewUpdates() by
+                // reading the current partition via SinglePartitionReadCommand.
+                let existing_row: Option<HashMap<String, Option<Vec<u8>>>> = None;
+
                 let columns: HashMap<String, Option<Vec<u8>>> = mutation
                     .rows
                     .iter()
@@ -997,19 +1289,50 @@ impl WriteCoordinator {
                 let is_delete = mutation.partition_tombstone.is_some()
                     || mutation.rows.iter().all(|r| r.is_tombstone);
 
-                let view_result = vm.generate_view_updates(
-                    &mutation.keyspace,
-                    &mutation.table,
-                    &mutation.partition_key,
-                    &columns,
-                    mutation.timestamp,
-                    is_delete,
-                );
+                // Use the existing-row-aware method when we have prior state,
+                // otherwise fall back to the simple method (WU-18).
+                let view_result = if existing_row.is_some() {
+                    vm.generate_view_updates_with_existing(
+                        &mutation.keyspace,
+                        &mutation.table,
+                        &mutation.partition_key,
+                        &columns,
+                        mutation.timestamp,
+                        is_delete,
+                        existing_row,
+                    )
+                } else {
+                    vm.generate_view_updates(
+                        &mutation.keyspace,
+                        &mutation.table,
+                        &mutation.partition_key,
+                        &columns,
+                        mutation.timestamp,
+                        is_delete,
+                    )
+                };
 
                 fanout.mutations_generated = view_result.mutations.len();
                 self.view_fanout_metrics
                     .view_mutations_generated
                     .fetch_add(view_result.mutations.len() as u64, Ordering::Relaxed);
+
+                // Backpressure check (WU-18): increment backlog before scheduling
+                let pending = self.view_update_backlog.fetch_add(
+                    view_result.mutations.len() as u64,
+                    Ordering::Relaxed,
+                );
+                if pending + view_result.mutations.len() as u64
+                    > self.view_update_backlog_threshold
+                {
+                    warn!(
+                        backlog = pending + view_result.mutations.len() as u64,
+                        threshold = self.view_update_backlog_threshold,
+                        keyspace = %mutation.keyspace,
+                        table = %mutation.table,
+                        "View update backlog exceeds threshold — backpressure warning"
+                    );
+                }
 
                 // Apply each view mutation at CL=ONE (best-effort)
                 for vm_mutation in &view_result.mutations {
@@ -1056,6 +1379,12 @@ impl WriteCoordinator {
                         }
                     }
                 }
+
+                // Decrement backlog after view mutations are processed (WU-18)
+                self.view_update_backlog.fetch_sub(
+                    view_result.mutations.len() as u64,
+                    Ordering::Relaxed,
+                );
             }
         }
 
@@ -1617,5 +1946,226 @@ mod tests {
         assert_eq!(m.view_mutations_generated.load(Ordering::Relaxed), 0);
         assert_eq!(m.view_mutations_applied.load(Ordering::Relaxed), 0);
         assert_eq!(m.view_mutations_failed.load(Ordering::Relaxed), 0);
+    }
+
+    // ── WU-18: View update backlog backpressure ────────────────────
+
+    #[test]
+    fn view_update_backlog_tracks_pending() {
+        use cassandra_storage::materialized_views::{MaterializedViewDefinition, ViewManager};
+
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+        let vm = ViewManager::new();
+
+        vm.register(MaterializedViewDefinition {
+            name: "users_by_name".to_string(),
+            keyspace: "ks".to_string(),
+            base_table: "users".to_string(),
+            view_table: "users_by_name".to_string(),
+            included_columns: vec!["name".to_string()],
+            where_clause: String::new(),
+            include_all_columns: false,
+            view_pk_columns: Vec::new(),
+        })
+        .unwrap();
+
+        // Before the write, backlog should be 0
+        assert_eq!(
+            coordinator.view_update_backlog.load(Ordering::Relaxed),
+            0
+        );
+
+        let (_result, _fanout) = coordinator
+            .coordinate_write_with_hooks(
+                &test_mutation(),
+                ConsistencyLevel::One,
+                &strategy,
+                &snitch,
+                Some(&vm),
+                None,
+            )
+            .unwrap();
+
+        // After the write completes, backlog should return to 0
+        // (incremented then decremented during processing)
+        assert_eq!(
+            coordinator.view_update_backlog.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    // ── WU-01: coordinate_write_async ─────────────────────────────
+
+    #[test]
+    fn coordinate_write_async_returns_handler_and_plan() {
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let result = coordinator.coordinate_write_async(
+            &test_mutation(),
+            ConsistencyLevel::One,
+            &strategy,
+            &snitch,
+        );
+        assert!(result.is_ok());
+        let (plan, handler) = result.unwrap();
+        assert!(!plan.live_replicas.is_empty());
+        assert_eq!(handler.current_acks(), 0);
+    }
+
+    #[test]
+    fn coordinate_write_async_rejects_serial_cl() {
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let result = coordinator.coordinate_write_async(
+            &test_mutation(),
+            ConsistencyLevel::Serial,
+            &strategy,
+            &snitch,
+        );
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn coordinate_write_async_handler_completes() {
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let (plan, handler) = coordinator
+            .coordinate_write_async(
+                &test_mutation(),
+                ConsistencyLevel::One,
+                &strategy,
+                &snitch,
+            )
+            .unwrap();
+
+        // Simulate one ack
+        handler.on_response(&plan.live_replicas[0]);
+
+        let result = handler.await_completion().await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().acks_received, 1);
+    }
+
+    // ── WU-04: Expanded write guardrails ──────────────────────────
+
+    #[test]
+    fn guardrails_default_values() {
+        let g = WriteGuardrails::default();
+        assert_eq!(g.partition_size_warn, 100 * 1024 * 1024);
+        assert_eq!(g.tombstone_warn_threshold, 1000);
+        assert_eq!(g.collection_size_warn, 65535);
+        assert_eq!(g.columns_per_query_warn, 100);
+    }
+
+    #[test]
+    fn count_tombstones_in_mutation() {
+        let mut m = test_mutation();
+        // No tombstones initially
+        assert_eq!(WriteCoordinator::count_tombstones(&m), 0);
+
+        // Add tombstones
+        m.rows[0].is_tombstone = true;
+        m.partition_tombstone = Some(TombstoneMarker {
+            deletion_time: 1000,
+            local_deletion_time: 0,
+        });
+        assert_eq!(WriteCoordinator::count_tombstones(&m), 2);
+    }
+
+    #[test]
+    fn count_columns_in_mutation() {
+        let m = test_mutation();
+        assert_eq!(WriteCoordinator::count_columns(&m), 1); // "name" only
+
+        let mut m2 = test_mutation();
+        m2.rows[0].cells.push(CellMutation {
+            column: "age".to_string(),
+            value: Some(b"25".to_vec()),
+            timestamp: 1000,
+            ttl: 0,
+            is_tombstone: false,
+            collection_op: None,
+        });
+        assert_eq!(WriteCoordinator::count_columns(&m2), 2);
+    }
+
+    #[test]
+    fn max_collection_size_in_mutation() {
+        let mut m = test_mutation();
+        assert_eq!(WriteCoordinator::max_collection_size(&m), 0);
+
+        m.rows[0].cells[0].collection_op =
+            Some(CollectionOp::Append(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]));
+        assert_eq!(WriteCoordinator::max_collection_size(&m), 3);
+    }
+
+    // ── WU-05: Pre-write precondition checks ──────────────────────
+
+    #[test]
+    fn precondition_rejects_bootstrapping() {
+        let (_cm, mut coordinator) = setup_cluster();
+        coordinator.set_bootstrapping(true);
+
+        let result = coordinator.check_preconditions(&test_mutation());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WriteError::IsBootstrapping => {}
+            e => panic!("Expected IsBootstrapping, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn precondition_rejects_truncating_table() {
+        let (_cm, coordinator) = setup_cluster();
+        coordinator.begin_truncation("ks", "users");
+
+        let result = coordinator.check_preconditions(&test_mutation());
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WriteError::TruncateInProgress => {}
+            e => panic!("Expected TruncateInProgress, got {e:?}"),
+        }
+
+        // End truncation and verify writes work again
+        coordinator.end_truncation("ks", "users");
+        assert!(coordinator.check_preconditions(&test_mutation()).is_ok());
+    }
+
+    #[test]
+    fn precondition_passes_normally() {
+        let (_cm, coordinator) = setup_cluster();
+        let result = coordinator.check_preconditions(&test_mutation());
+        assert!(result.is_ok());
+        // The returned permit is Some
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn coordinate_write_rejects_truncating_table() {
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        coordinator.begin_truncation("ks", "users");
+
+        let result = coordinator.coordinate_write(
+            &test_mutation(),
+            ConsistencyLevel::One,
+            &strategy,
+            &snitch,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            WriteError::TruncateInProgress => {}
+            e => panic!("Expected TruncateInProgress, got {e:?}"),
+        }
     }
 }

@@ -1,0 +1,8 @@
+{
+  "error_code": "0x1002",
+  "error_name": "IS_BOOTSTRAPPING",
+  "description": "Coordinator node is bootstrapping and cannot serve requests",
+  "fields": {},
+  "java_class": "org.apache.cassandra.exceptions.IsBootstrappingException",
+  "protocol_version": 4
+}

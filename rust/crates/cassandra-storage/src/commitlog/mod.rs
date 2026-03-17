@@ -178,6 +178,31 @@ pub struct Mutation {
     /// If true, this mutation is for a CDC-enabled table.
     #[serde(default)]
     pub cdc_enabled: bool,
+    /// Static-column cells (one value per partition, independent of clustering key).
+    #[serde(default)]
+    pub static_cells: Vec<CellMutation>,
+    /// Partition-level tombstone: deletes the entire partition.
+    #[serde(default)]
+    pub partition_tombstone: Option<TombstoneMarker>,
+    /// Range tombstones: delete rows within a clustering key range.
+    #[serde(default)]
+    pub range_tombstones: Vec<RangeTombstoneMarker>,
+}
+
+/// A tombstone marker with timestamp and local deletion time.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TombstoneMarker {
+    pub timestamp: i64,
+    pub local_deletion_time: i32,
+}
+
+/// A range tombstone that deletes all rows with clustering keys in [start, end].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RangeTombstoneMarker {
+    pub start: Vec<u8>,
+    pub end: Vec<u8>,
+    pub timestamp: i64,
+    pub local_deletion_time: i32,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -711,6 +736,9 @@ mod tests {
             }],
             timestamp: 1000,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         }
     }
 

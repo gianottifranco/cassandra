@@ -45,6 +45,16 @@ impl TrieNode {
         }
     }
 
+    fn set_tombstone(&mut self, key: &[u8], timestamp: i64, local_deletion_time: i32) {
+        if key.is_empty() {
+            let pd = self.data.get_or_insert_with(PartitionData::new);
+            pd.set_tombstone(timestamp, local_deletion_time);
+        } else {
+            let child = self.children.entry(key[0]).or_insert_with(TrieNode::new);
+            child.set_tombstone(&key[1..], timestamp, local_deletion_time);
+        }
+    }
+
     fn get(&self, key: &[u8]) -> Option<&PartitionData> {
         if key.is_empty() {
             self.data.as_ref()
@@ -134,6 +144,17 @@ impl MemtableBackend for TrieMemtable {
         let mut root = self.root.write();
         root.insert(&partition_key, row);
         self.approx_size.fetch_add(row_size, Ordering::Relaxed);
+        self.op_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn set_partition_tombstone(
+        &self,
+        partition_key: Vec<u8>,
+        timestamp: i64,
+        local_deletion_time: i32,
+    ) {
+        let mut root = self.root.write();
+        root.set_tombstone(&partition_key, timestamp, local_deletion_time);
         self.op_count.fetch_add(1, Ordering::Relaxed);
     }
 

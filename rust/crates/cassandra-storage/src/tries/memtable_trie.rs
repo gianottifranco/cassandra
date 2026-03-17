@@ -51,6 +51,20 @@ impl MemtableBackend for MemtableTrie {
         self.approx_size.fetch_add(row_size, Ordering::Relaxed);
     }
 
+    fn set_partition_tombstone(
+        &self,
+        partition_key: Vec<u8>,
+        timestamp: i64,
+        local_deletion_time: i32,
+    ) {
+        let mut trie = self.data.write();
+        trie.apply(&partition_key, |existing| {
+            let mut pd = existing.cloned().unwrap_or_default();
+            pd.set_tombstone(timestamp, local_deletion_time);
+            pd
+        });
+    }
+
     fn get_partition(&self, partition_key: &[u8]) -> Option<PartitionData> {
         let trie = self.data.read();
         trie.get(partition_key).cloned()

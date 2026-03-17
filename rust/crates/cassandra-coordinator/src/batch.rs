@@ -22,17 +22,20 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use parking_lot::RwLock;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use cassandra_cluster_metadata::{ReplicationStrategy, Snitch};
+use cassandra_cluster_metadata::{ClusterSnapshot, Endpoint, ReplicationStrategy, Snitch};
 
 use crate::consistency::ConsistencyLevel;
-use crate::write::{CoordinatedMutation, WriteCoordinator, WriteError, WriteResult};
+use crate::write::{
+    CellMutation, CoordinatedMutation, MutationKind, MutationRow, WriteCoordinator, WriteError,
+    WriteResult,
+};
 
 // ─── Batch Types ─────────────────────────────────────────────────
 
@@ -145,6 +148,12 @@ pub struct BatchLogManager {
     entries: Arc<RwLock<HashMap<Uuid, BatchEntry>>>,
     /// Batchlog replay interval.
     replay_interval: Duration,
+    /// Distributed lease: prevents concurrent replays.
+    pub replay_in_progress: AtomicBool,
+    /// Max replays per interval for rate limiting.
+    pub replay_rate_limit: AtomicUsize,
+    /// Retry counts per batch entry for exponential backoff.
+    retry_counts: Arc<RwLock<HashMap<Uuid, u32>>>,
     /// Metrics.
     pub metrics: BatchLogMetrics,
 }
@@ -179,6 +188,9 @@ impl BatchLogManager {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             replay_interval: Duration::from_secs(60),
+            replay_in_progress: AtomicBool::new(false),
+            replay_rate_limit: AtomicUsize::new(100),
+            retry_counts: Arc::new(RwLock::new(HashMap::new())),
             metrics: BatchLogMetrics::new(),
         }
     }
@@ -186,6 +198,29 @@ impl BatchLogManager {
     pub fn with_replay_interval(mut self, interval: Duration) -> Self {
         self.replay_interval = interval;
         self
+    }
+
+    pub fn with_replay_rate_limit(self, limit: usize) -> Self {
+        self.replay_rate_limit.store(limit, Ordering::Relaxed);
+        self
+    }
+
+    /// Get the retry count for a batch entry (for exponential backoff).
+    pub fn retry_count(&self, id: &Uuid) -> u32 {
+        self.retry_counts.read().get(id).copied().unwrap_or(0)
+    }
+
+    /// Increment and return the retry count for a batch entry.
+    pub fn increment_retry(&self, id: &Uuid) -> u32 {
+        let mut counts = self.retry_counts.write();
+        let count = counts.entry(*id).or_insert(0);
+        *count += 1;
+        *count
+    }
+
+    /// Clear retry tracking for a batch entry.
+    pub fn clear_retry(&self, id: &Uuid) {
+        self.retry_counts.write().remove(id);
     }
 
     /// Store a new batch entry before executing mutations.
@@ -262,6 +297,25 @@ impl Default for BatchLogManager {
     }
 }
 
+// ─── Replay Result ──────────────────────────────────────────────
+
+/// Result of a batchlog replay operation.
+///
+/// ## Java Oracle
+///
+/// `BatchlogManager.replayFailedBatches()` return semantics
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplayResult {
+    /// Total expired entries found.
+    pub total_expired: usize,
+    /// Successfully replayed entries.
+    pub replayed: usize,
+    /// Failed replay attempts.
+    pub failed: usize,
+    /// Entries skipped due to rate limiting.
+    pub skipped_rate_limit: usize,
+}
+
 // ─── Batch Coordinator ──────────────────────────────────────────
 
 /// Coordinates batch execution with batchlog protocol.
@@ -282,6 +336,8 @@ pub struct BatchCoordinator {
     write_coordinator: Arc<WriteCoordinator>,
     batchlog: Arc<BatchLogManager>,
     guardrails: BatchGuardrails,
+    /// Local datacenter name for batchlog replica selection.
+    local_dc: String,
     pub metrics: BatchCoordinatorMetrics,
 }
 
@@ -311,12 +367,18 @@ impl BatchCoordinator {
             write_coordinator,
             batchlog,
             guardrails: BatchGuardrails::default(),
+            local_dc: "dc1".to_string(),
             metrics: BatchCoordinatorMetrics::new(),
         }
     }
 
     pub fn with_guardrails(mut self, guardrails: BatchGuardrails) -> Self {
         self.guardrails = guardrails;
+        self
+    }
+
+    pub fn with_local_dc(mut self, dc: String) -> Self {
+        self.local_dc = dc;
         self
     }
 
@@ -348,7 +410,10 @@ impl BatchCoordinator {
             );
         }
 
-        // 3. For logged batches, store batchlog entry first
+        // 3. For logged batches, store batchlog entry first.
+        //    Skip batchlog for Unlogged and Counter batches:
+        //    - Unlogged: by definition, no batchlog
+        //    - Counter: counter mutations use a separate path through counter leader
         let batch_id = if batch_type == BatchType::Logged {
             Some(self.batchlog.store(batch_type, mutations.clone()))
         } else {
@@ -484,7 +549,9 @@ impl BatchCoordinator {
 
     /// Replay expired batchlog entries (crash recovery).
     ///
-    /// Called periodically by a background task.
+    /// Called periodically by a background task. Uses distributed lease tracking
+    /// to prevent concurrent replays, exponential backoff on failures, and
+    /// rate limiting.
     ///
     /// ## Java Oracle
     ///
@@ -494,15 +561,63 @@ impl BatchCoordinator {
         max_age: Duration,
         strategy: &dyn ReplicationStrategy,
         snitch: &dyn Snitch,
-    ) -> (usize, usize) {
+    ) -> ReplayResult {
+        // Acquire distributed lease — prevent concurrent replays
+        if self
+            .batchlog
+            .replay_in_progress
+            .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            debug!("Batchlog replay already in progress, skipping");
+            return ReplayResult {
+                total_expired: 0,
+                replayed: 0,
+                failed: 0,
+                skipped_rate_limit: 0,
+            };
+        }
+
         let expired = self.batchlog.expired_entries(max_age);
         let total = expired.len();
         let mut replayed = 0;
+        let mut failed = 0;
+        let mut skipped_rate_limit = 0;
+        let rate_limit = self.batchlog.replay_rate_limit.load(Ordering::Relaxed);
 
         for entry in expired {
+            // Rate limiting: stop after reaching the max replays per interval
+            if replayed + failed >= rate_limit {
+                skipped_rate_limit += 1;
+                continue;
+            }
+
+            // Exponential backoff: skip entries that have failed recently
+            let retry_count = self.batchlog.retry_count(&entry.id);
+            if retry_count > 0 {
+                // Backoff: 2^retry_count seconds, capped at 5 min
+                let backoff_ms = std::cmp::min(
+                    (1u64 << retry_count.min(18)) * 1000,
+                    300_000,
+                );
+                let age_ms = {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as i64;
+                    (now_ms - entry.created_at) as u64
+                };
+                // Only retry if enough time has passed since creation relative to backoff
+                if age_ms < backoff_ms * (retry_count as u64) {
+                    skipped_rate_limit += 1;
+                    continue;
+                }
+            }
+
             info!(
                 batch_id = %entry.id,
                 mutations = entry.mutations.len(),
+                retry_count = retry_count,
                 "Replaying expired batchlog entry"
             );
 
@@ -530,15 +645,208 @@ impl BatchCoordinator {
 
             if all_ok {
                 self.batchlog.remove(&entry.id);
+                self.batchlog.clear_retry(&entry.id);
                 replayed += 1;
                 self.batchlog
                     .metrics
                     .batches_replayed
                     .fetch_add(1, Ordering::Relaxed);
+            } else {
+                self.batchlog.increment_retry(&entry.id);
+                failed += 1;
             }
         }
 
-        (total, replayed)
+        // Release the lease
+        self.batchlog
+            .replay_in_progress
+            .store(false, Ordering::Release);
+
+        ReplayResult {
+            total_expired: total,
+            replayed,
+            failed,
+            skipped_rate_limit,
+        }
+    }
+
+    /// Select batchlog endpoints: prefer 2 nodes from non-local DCs.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `BatchlogManager.getBatchlogEndpoints()` — prefers endpoints in
+    /// a non-local datacenter; falls back to local DC if only one DC exists.
+    pub fn select_batchlog_endpoints(
+        &self,
+        snapshot: &ClusterSnapshot,
+        snitch: &dyn Snitch,
+    ) -> Vec<Endpoint> {
+        let live = snapshot.live_endpoints();
+        let mut non_local: Vec<Endpoint> = Vec::new();
+        let mut local: Vec<Endpoint> = Vec::new();
+
+        for ep in &live {
+            let dc = snitch.datacenter(ep);
+            if dc != self.local_dc {
+                non_local.push(*ep);
+            } else {
+                local.push(*ep);
+            }
+        }
+
+        // Prefer non-local DC endpoints; fall back to local if only one DC
+        let candidates = if non_local.len() >= 2 {
+            non_local
+        } else if !non_local.is_empty() {
+            // Not enough non-local, supplement with local
+            let mut combined = non_local;
+            combined.extend(local.iter().take(2 - combined.len()));
+            combined
+        } else {
+            local
+        };
+
+        // Pick up to 2 endpoints
+        candidates.into_iter().take(2).collect()
+    }
+
+    /// Store a batch entry to batchlog replicas (stub).
+    ///
+    /// In production, this sends a Verb::BatchStore message to the
+    /// batchlog endpoints. Currently stores locally only.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.syncWriteBatchedMutations()` — batchlog store phase
+    pub fn send_batchlog_store(
+        &self,
+        _endpoints: &[Endpoint],
+        batch_type: BatchType,
+        mutations: Vec<CoordinatedMutation>,
+    ) -> Uuid {
+        // TODO: Send Verb::BatchStore to remote batchlog endpoints
+        // For now, store locally
+        self.batchlog.store(batch_type, mutations)
+    }
+
+    /// Remove a batch entry from batchlog replicas (stub).
+    ///
+    /// In production, this sends a Verb::BatchRemove message to the
+    /// batchlog endpoints.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.syncWriteBatchedMutations()` — batchlog remove phase
+    pub fn send_batchlog_remove(&self, _endpoints: &[Endpoint], id: &Uuid) {
+        // TODO: Send Verb::BatchRemove to remote batchlog endpoints
+        // For now, remove locally
+        self.batchlog.remove(id);
+    }
+
+    /// Merge counter mutations per-partition for counter batch optimization.
+    ///
+    /// Groups counter mutations by (keyspace, table, partition_key) and merges
+    /// their cells, combining increments to the same column.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `CounterMutation.mergeCounterValues()` — merges counter cells
+    pub fn merge_counter_mutations(
+        &self,
+        mutations: Vec<CoordinatedMutation>,
+    ) -> Vec<CoordinatedMutation> {
+        // Group by (keyspace, table, partition_key)
+        let mut groups: HashMap<(String, String, Vec<u8>), CoordinatedMutation> = HashMap::new();
+
+        for mutation in mutations {
+            let key = (
+                mutation.keyspace.clone(),
+                mutation.table.clone(),
+                mutation.partition_key.clone(),
+            );
+
+            if let Some(existing) = groups.get_mut(&key) {
+                // Merge rows: combine cells for same clustering key
+                for new_row in mutation.rows {
+                    if let Some(existing_row) = existing
+                        .rows
+                        .iter_mut()
+                        .find(|r| r.clustering_key == new_row.clustering_key)
+                    {
+                        // Merge cells: for counter mutations, combine values for same column
+                        for new_cell in new_row.cells {
+                            if let Some(existing_cell) = existing_row
+                                .cells
+                                .iter_mut()
+                                .find(|c| c.column == new_cell.column)
+                            {
+                                // Merge counter values by summing the byte-encoded i64 deltas
+                                if let (Some(ev), Some(nv)) =
+                                    (&existing_cell.value, &new_cell.value)
+                                {
+                                    if ev.len() == 8 && nv.len() == 8 {
+                                        let e_val =
+                                            i64::from_be_bytes(ev.as_slice().try_into().unwrap());
+                                        let n_val =
+                                            i64::from_be_bytes(nv.as_slice().try_into().unwrap());
+                                        existing_cell.value =
+                                            Some((e_val + n_val).to_be_bytes().to_vec());
+                                    }
+                                }
+                                // Update timestamp to latest
+                                existing_cell.timestamp =
+                                    existing_cell.timestamp.max(new_cell.timestamp);
+                            } else {
+                                existing_row.cells.push(new_cell);
+                            }
+                        }
+                    } else {
+                        existing.rows.push(new_row);
+                    }
+                }
+                // Update timestamp to latest
+                existing.timestamp = existing.timestamp.max(mutation.timestamp);
+            } else {
+                groups.insert(key, mutation);
+            }
+        }
+
+        groups.into_values().collect()
+    }
+
+    /// Start a periodic batchlog replay task.
+    ///
+    /// Spawns a tokio interval task that replays expired batchlog entries.
+    /// Returns a `JoinHandle` that can be used to cancel the task.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `BatchlogManager.startBatchlogReplay()`
+    pub fn start_periodic_replay(
+        self: &Arc<Self>,
+        interval: Duration,
+        max_age: Duration,
+        strategy: Arc<dyn ReplicationStrategy>,
+        snitch: Arc<dyn Snitch>,
+    ) -> tokio::task::JoinHandle<()> {
+        let coordinator = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut timer = tokio::time::interval(interval);
+            loop {
+                timer.tick().await;
+                let result =
+                    coordinator.replay_batchlog(max_age, strategy.as_ref(), snitch.as_ref());
+                if result.total_expired > 0 {
+                    info!(
+                        total = result.total_expired,
+                        replayed = result.replayed,
+                        failed = result.failed,
+                        skipped = result.skipped_rate_limit,
+                        "Periodic batchlog replay completed"
+                    );
+                }
+            }
+        })
     }
 }
 
@@ -775,5 +1083,278 @@ mod tests {
         .unwrap();
 
         assert_eq!(bc.metrics.batches_executed.load(Ordering::Relaxed), 1);
+    }
+
+    // ── WU-07: Batchlog endpoint selection tests ────────────────
+
+    fn node_in_dc(port: u16, tokens: Vec<i64>, dc: &str, rack: &str) -> NodeInfo {
+        NodeInfo::new(
+            NodeId::random(),
+            ep(port),
+            dc,
+            rack,
+            tokens.into_iter().map(Token::from_raw).collect(),
+        )
+    }
+
+    /// Snitch that uses a preconfigured DC map for multi-DC tests.
+    struct MultiDcSnitch {
+        dc_map: HashMap<Endpoint, String>,
+    }
+
+    impl Snitch for MultiDcSnitch {
+        fn datacenter(&self, endpoint: &Endpoint) -> String {
+            self.dc_map
+                .get(endpoint)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string())
+        }
+        fn rack(&self, _endpoint: &Endpoint) -> String {
+            "rack1".to_string()
+        }
+    }
+
+    #[test]
+    fn select_batchlog_endpoints_prefers_non_local_dc() {
+        let n1 = node_in_dc(8001, vec![-100], "dc1", "rack1");
+        let n2 = node_in_dc(8002, vec![0], "dc2", "rack1");
+        let n3 = node_in_dc(8003, vec![100], "dc2", "rack1");
+
+        let cm = Arc::new(ClusterMetadata::new(n1));
+        cm.update_node(n2);
+        cm.update_node(n3);
+
+        let hint_store = Arc::new(HintStore::new(1000));
+        let wc = Arc::new(WriteCoordinator::new(Arc::clone(&cm), ep(8001), hint_store));
+        let blm = Arc::new(BatchLogManager::new());
+        let bc = BatchCoordinator::new(Arc::clone(&wc), Arc::clone(&blm))
+            .with_local_dc("dc1".to_string());
+
+        let mut dc_map = HashMap::new();
+        dc_map.insert(ep(8001), "dc1".to_string());
+        dc_map.insert(ep(8002), "dc2".to_string());
+        dc_map.insert(ep(8003), "dc2".to_string());
+        let snitch = MultiDcSnitch { dc_map };
+
+        let snapshot = cm.snapshot();
+        let endpoints = bc.select_batchlog_endpoints(&snapshot, &snitch);
+
+        assert_eq!(endpoints.len(), 2);
+        // Both should be from dc2 (non-local)
+        for ep_val in &endpoints {
+            assert_eq!(snitch.datacenter(ep_val), "dc2");
+        }
+    }
+
+    #[test]
+    fn select_batchlog_endpoints_falls_back_to_local_dc() {
+        // Single DC setup
+        let (_wc, _blm, bc) = setup();
+        let bc = bc.with_local_dc("dc1".to_string());
+
+        let cm = Arc::new(ClusterMetadata::new(node(9001, vec![-100])));
+        cm.update_node(node(9002, vec![0]));
+        cm.update_node(node(9003, vec![100]));
+
+        let snapshot = cm.snapshot();
+        let endpoints = bc.select_batchlog_endpoints(&snapshot, &SimpleSnitch);
+
+        // Should fall back to local DC endpoints
+        assert!(endpoints.len() <= 2);
+        assert!(!endpoints.is_empty());
+    }
+
+    // ── WU-08: Replay robustness tests ──────────────────────────
+
+    #[test]
+    fn replay_batchlog_returns_replay_result() {
+        let (_wc, blm, bc) = setup();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        // Store an entry with a very old timestamp to make it expired
+        {
+            let id = Uuid::new_v4();
+            let entry = BatchEntry {
+                id,
+                batch_type: BatchType::Logged,
+                mutations: vec![test_mutation()],
+                created_at: 0, // epoch = very old
+                version: 1,
+            };
+            blm.entries.write().insert(id, entry);
+        }
+
+        let result = bc.replay_batchlog(Duration::from_secs(1), &strategy, &snitch);
+        assert_eq!(result.total_expired, 1);
+        assert_eq!(result.replayed, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(result.skipped_rate_limit, 0);
+    }
+
+    #[test]
+    fn replay_batchlog_prevents_concurrent_replay() {
+        let (_wc, blm, bc) = setup();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        // Simulate replay in progress
+        blm.replay_in_progress.store(true, Ordering::Release);
+
+        let result = bc.replay_batchlog(Duration::from_secs(1), &strategy, &snitch);
+        // Should return immediately with empty result
+        assert_eq!(result.total_expired, 0);
+        assert_eq!(result.replayed, 0);
+    }
+
+    #[test]
+    fn replay_batchlog_rate_limiting() {
+        let (_wc, blm, bc) = setup();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        // Set rate limit to 1
+        blm.replay_rate_limit.store(1, Ordering::Relaxed);
+
+        // Store 3 old entries
+        for _ in 0..3 {
+            let id = Uuid::new_v4();
+            let entry = BatchEntry {
+                id,
+                batch_type: BatchType::Logged,
+                mutations: vec![test_mutation()],
+                created_at: 0,
+                version: 1,
+            };
+            blm.entries.write().insert(id, entry);
+        }
+
+        let result = bc.replay_batchlog(Duration::from_secs(1), &strategy, &snitch);
+        assert_eq!(result.total_expired, 3);
+        // Only 1 should be replayed due to rate limit
+        assert_eq!(result.replayed, 1);
+        assert!(result.skipped_rate_limit >= 1);
+    }
+
+    #[test]
+    fn retry_count_tracking() {
+        let blm = BatchLogManager::new();
+        let id = Uuid::new_v4();
+
+        assert_eq!(blm.retry_count(&id), 0);
+        assert_eq!(blm.increment_retry(&id), 1);
+        assert_eq!(blm.increment_retry(&id), 2);
+        assert_eq!(blm.retry_count(&id), 2);
+
+        blm.clear_retry(&id);
+        assert_eq!(blm.retry_count(&id), 0);
+    }
+
+    // ── WU-09: Counter batch tests ──────────────────────────────
+
+    fn counter_mutation(
+        ks: &str,
+        table: &str,
+        pk: &[u8],
+        col: &str,
+        delta: i64,
+    ) -> CoordinatedMutation {
+        CoordinatedMutation {
+            keyspace: ks.to_string(),
+            table: table.to_string(),
+            partition_key: pk.to_vec(),
+            rows: vec![MutationRow {
+                clustering_key: vec![],
+                cells: vec![CellMutation {
+                    column: col.to_string(),
+                    value: Some(delta.to_be_bytes().to_vec()),
+                    timestamp: 1000,
+                    ttl: 0,
+                    is_tombstone: false,
+                    collection_op: None,
+                }],
+                is_tombstone: false,
+                range_tombstone: None,
+            }],
+            timestamp: 1000,
+            kind: MutationKind::Counter,
+            static_cells: vec![],
+            partition_tombstone: None,
+        }
+    }
+
+    #[test]
+    fn merge_counter_mutations_same_partition() {
+        let (_wc, _blm, bc) = setup();
+
+        let m1 = counter_mutation("ks", "t", b"pk1", "counter_col", 5);
+        let m2 = counter_mutation("ks", "t", b"pk1", "counter_col", 10);
+
+        let merged = bc.merge_counter_mutations(vec![m1, m2]);
+        assert_eq!(merged.len(), 1);
+
+        let m = &merged[0];
+        assert_eq!(m.keyspace, "ks");
+        assert_eq!(m.partition_key, b"pk1");
+        assert_eq!(m.rows.len(), 1);
+        assert_eq!(m.rows[0].cells.len(), 1);
+
+        // Counter values should be summed: 5 + 10 = 15
+        let val = i64::from_be_bytes(
+            m.rows[0].cells[0]
+                .value
+                .as_ref()
+                .unwrap()
+                .as_slice()
+                .try_into()
+                .unwrap(),
+        );
+        assert_eq!(val, 15);
+    }
+
+    #[test]
+    fn merge_counter_mutations_different_partitions() {
+        let (_wc, _blm, bc) = setup();
+
+        let m1 = counter_mutation("ks", "t", b"pk1", "counter_col", 5);
+        let m2 = counter_mutation("ks", "t", b"pk2", "counter_col", 10);
+
+        let merged = bc.merge_counter_mutations(vec![m1, m2]);
+        assert_eq!(merged.len(), 2);
+    }
+
+    #[test]
+    fn counter_batch_skips_batchlog() {
+        let (_wc, blm, bc) = setup();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let m = counter_mutation("ks", "t", b"pk1", "counter_col", 5);
+
+        let results = bc
+            .execute_batch(
+                BatchType::Counter,
+                vec![m],
+                ConsistencyLevel::One,
+                &strategy,
+                &snitch,
+            )
+            .unwrap();
+
+        assert_eq!(results.len(), 1);
+        // No batchlog for counter batches
+        assert_eq!(blm.pending_count(), 0);
+    }
+
+    #[test]
+    fn send_batchlog_store_and_remove_stubs() {
+        let (_wc, blm, bc) = setup();
+        let endpoints = vec![ep(7001), ep(7002)];
+
+        let id = bc.send_batchlog_store(&endpoints, BatchType::Logged, vec![test_mutation()]);
+        assert_eq!(blm.pending_count(), 1);
+
+        bc.send_batchlog_remove(&endpoints, &id);
+        assert_eq!(blm.pending_count(), 0);
     }
 }

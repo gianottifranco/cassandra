@@ -51,6 +51,9 @@ fn make_mutation(
         }],
         timestamp: ts,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     }
 }
 
@@ -67,6 +70,9 @@ fn make_tombstone(ks: &str, tbl: &str, pk: &[u8], ck: &[u8], ts: i64) -> Mutatio
         }],
         timestamp: ts,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     }
 }
 
@@ -151,6 +157,9 @@ fn large_partition_stress() {
         rows,
         timestamp: 0,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     };
     engine.apply_mutation(&m).unwrap();
 

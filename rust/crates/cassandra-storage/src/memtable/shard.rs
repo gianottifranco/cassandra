@@ -80,6 +80,16 @@ impl MemtableBackend for ShardedMemtable {
         self.shards[idx].apply(partition_key, row);
     }
 
+    fn set_partition_tombstone(
+        &self,
+        partition_key: Vec<u8>,
+        timestamp: i64,
+        local_deletion_time: i32,
+    ) {
+        let idx = self.shard_index(&partition_key);
+        self.shards[idx].set_partition_tombstone(partition_key, timestamp, local_deletion_time);
+    }
+
     fn get_partition(&self, partition_key: &[u8]) -> Option<PartitionData> {
         let idx = self.shard_index(partition_key);
         self.shards[idx].get_partition(partition_key)

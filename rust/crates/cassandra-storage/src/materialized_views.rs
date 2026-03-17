@@ -283,6 +283,144 @@ impl ViewManager {
         }))
     }
 
+    /// Generate view mutations considering existing row state (WU-18).
+    ///
+    /// This method enables proper delta computation by comparing old vs new
+    /// column values. When `existing` is Some, updates and deletes can produce
+    /// correct view mutations (e.g., delete old view row, insert new one when
+    /// a view PK column changes).
+    ///
+    /// ## Java Oracle
+    ///
+    /// `ViewUpdateGenerator.generateViewUpdates()` reads the current partition
+    /// state via `SinglePartitionReadCommand` before computing deltas.
+    ///
+    /// ## Arguments
+    /// - `existing`: The current row state, or None for pure inserts.
+    pub fn generate_view_updates_with_existing(
+        &self,
+        keyspace: &str,
+        table: &str,
+        partition_key: &[u8],
+        columns: &HashMap<String, Option<Vec<u8>>>,
+        timestamp: i64,
+        is_delete: bool,
+        existing: Option<HashMap<String, Option<Vec<u8>>>>,
+    ) -> ViewUpdateResult {
+        let view_defs = self.get_views_for(keyspace, table);
+
+        if view_defs.is_empty() {
+            return ViewUpdateResult {
+                mutations: Vec::new(),
+                had_errors: false,
+            };
+        }
+
+        let mut mutations = Vec::new();
+        let mut had_errors = false;
+
+        for view_def in &view_defs {
+            match existing {
+                Some(ref old_row) => {
+                    // Delta computation: compare old and new state
+                    if is_delete {
+                        // Deletion with existing state: generate delete for the view
+                        match self.generate_single_view_update(
+                            view_def,
+                            partition_key,
+                            old_row,
+                            timestamp,
+                            true, // delete in view
+                        ) {
+                            Ok(Some(m)) => mutations.push(m),
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(view = %view_def.name, error = %e, "Failed to generate view delete");
+                                had_errors = true;
+                            }
+                        }
+                    } else {
+                        // Update: check if view-relevant columns changed
+                        let old_pk = compute_view_pk(
+                            &view_def.view_pk_columns,
+                            old_row,
+                            partition_key,
+                        );
+                        let new_pk = compute_view_pk(
+                            &view_def.view_pk_columns,
+                            columns,
+                            partition_key,
+                        );
+
+                        // If PK changed, delete old row and insert new one
+                        if old_pk != new_pk {
+                            match self.generate_single_view_update(
+                                view_def,
+                                partition_key,
+                                old_row,
+                                timestamp,
+                                true,
+                            ) {
+                                Ok(Some(m)) => mutations.push(m),
+                                Ok(None) => {}
+                                Err(e) => {
+                                    warn!(view = %view_def.name, error = %e, "Failed to generate view delete for PK change");
+                                    had_errors = true;
+                                }
+                            }
+                        }
+
+                        // Insert the new row
+                        match self.generate_single_view_update(
+                            view_def,
+                            partition_key,
+                            columns,
+                            timestamp,
+                            false,
+                        ) {
+                            Ok(Some(m)) => mutations.push(m),
+                            Ok(None) => {}
+                            Err(e) => {
+                                warn!(view = %view_def.name, error = %e, "Failed to generate view update");
+                                had_errors = true;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    // No existing state: treat as pure insert
+                    match self.generate_single_view_update(
+                        view_def,
+                        partition_key,
+                        columns,
+                        timestamp,
+                        is_delete,
+                    ) {
+                        Ok(Some(m)) => mutations.push(m),
+                        Ok(None) => {}
+                        Err(e) => {
+                            warn!(view = %view_def.name, error = %e, "Failed to generate view update");
+                            had_errors = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        debug!(
+            keyspace = %keyspace,
+            table = %table,
+            view_updates = mutations.len(),
+            has_existing = existing.is_some(),
+            "Generated view mutations with existing row state"
+        );
+
+        ViewUpdateResult {
+            mutations,
+            had_errors,
+        }
+    }
+
     /// Total number of view definitions.
     pub fn view_count(&self) -> usize {
         self.views.read().values().map(|v| v.len()).sum()
@@ -622,5 +760,95 @@ mod tests {
         let result = mgr.generate_view_updates("ks", "users", b"base_pk", &columns, 1000, false);
         assert_eq!(result.mutations.len(), 1);
         assert_eq!(result.mutations[0].partition_key, b"alice@example.com");
+    }
+
+    // ─── WU-18: generate_view_updates_with_existing tests ────────────
+
+    #[test]
+    fn generate_with_existing_none_acts_as_insert() {
+        let mgr = ViewManager::new();
+        mgr.register(test_view_def()).unwrap();
+
+        let mut columns = HashMap::new();
+        columns.insert("email".to_string(), Some(b"a@b.com".to_vec()));
+        columns.insert("name".to_string(), Some(b"Alice".to_vec()));
+
+        let result = mgr.generate_view_updates_with_existing(
+            "ks", "users", b"user1", &columns, 1000, false, None,
+        );
+        assert!(!result.had_errors);
+        assert_eq!(result.mutations.len(), 1);
+        assert!(!result.mutations[0].is_delete);
+    }
+
+    #[test]
+    fn generate_with_existing_delete_generates_view_delete() {
+        let mgr = ViewManager::new();
+        mgr.register(test_view_def()).unwrap();
+
+        let mut existing = HashMap::new();
+        existing.insert("email".to_string(), Some(b"old@b.com".to_vec()));
+        existing.insert("name".to_string(), Some(b"OldName".to_vec()));
+
+        let columns = HashMap::new();
+        let result = mgr.generate_view_updates_with_existing(
+            "ks", "users", b"user1", &columns, 1000, true, Some(existing),
+        );
+        assert!(!result.had_errors);
+        assert_eq!(result.mutations.len(), 1);
+        assert!(result.mutations[0].is_delete);
+    }
+
+    #[test]
+    fn generate_with_existing_pk_change_produces_delete_and_insert() {
+        let mgr = ViewManager::new();
+        let mut def = test_view_def();
+        def.name = "by_email".to_string();
+        def.view_table = "by_email".to_string();
+        def.view_pk_columns = vec!["email".to_string()];
+        mgr.register(def).unwrap();
+
+        let mut existing = HashMap::new();
+        existing.insert("email".to_string(), Some(b"old@b.com".to_vec()));
+        existing.insert("name".to_string(), Some(b"Alice".to_vec()));
+
+        let mut columns = HashMap::new();
+        columns.insert("email".to_string(), Some(b"new@b.com".to_vec()));
+        columns.insert("name".to_string(), Some(b"Alice".to_vec()));
+
+        let result = mgr.generate_view_updates_with_existing(
+            "ks", "users", b"user1", &columns, 1000, false, Some(existing),
+        );
+        assert!(!result.had_errors);
+        // Should produce 2 mutations: delete old PK row + insert new PK row
+        assert_eq!(result.mutations.len(), 2);
+        assert!(result.mutations[0].is_delete);
+        assert!(!result.mutations[1].is_delete);
+    }
+
+    #[test]
+    fn generate_with_existing_same_pk_produces_update_only() {
+        let mgr = ViewManager::new();
+        let mut def = test_view_def();
+        def.name = "by_email2".to_string();
+        def.view_table = "by_email2".to_string();
+        def.view_pk_columns = vec!["email".to_string()];
+        mgr.register(def).unwrap();
+
+        let mut existing = HashMap::new();
+        existing.insert("email".to_string(), Some(b"same@b.com".to_vec()));
+        existing.insert("name".to_string(), Some(b"OldName".to_vec()));
+
+        let mut columns = HashMap::new();
+        columns.insert("email".to_string(), Some(b"same@b.com".to_vec()));
+        columns.insert("name".to_string(), Some(b"NewName".to_vec()));
+
+        let result = mgr.generate_view_updates_with_existing(
+            "ks", "users", b"user1", &columns, 1000, false, Some(existing),
+        );
+        assert!(!result.had_errors);
+        // Same PK: only 1 mutation (the update/insert)
+        assert_eq!(result.mutations.len(), 1);
+        assert!(!result.mutations[0].is_delete);
     }
 }

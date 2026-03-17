@@ -72,6 +72,14 @@ pub trait MemtableBackend: Send + Sync {
     /// Insert or merge a row into the given partition.
     fn apply(&self, partition_key: Vec<u8>, row: Row);
 
+    /// Set a partition-level tombstone.
+    fn set_partition_tombstone(
+        &self,
+        partition_key: Vec<u8>,
+        timestamp: i64,
+        local_deletion_time: i32,
+    );
+
     /// Read a partition by key. Returns None if absent.
     fn get_partition(&self, partition_key: &[u8]) -> Option<PartitionData>;
 
@@ -121,6 +129,18 @@ impl MemtableBackend for SkipListMemtable {
         let partition = data.entry(partition_key).or_default();
         partition.apply_row(row);
         self.approx_size.fetch_add(row_size, Ordering::Relaxed);
+        self.op_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn set_partition_tombstone(
+        &self,
+        partition_key: Vec<u8>,
+        timestamp: i64,
+        local_deletion_time: i32,
+    ) {
+        let mut data = self.data.write();
+        let partition = data.entry(partition_key).or_default();
+        partition.set_tombstone(timestamp, local_deletion_time);
         self.op_count.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -179,6 +199,16 @@ impl Memtable {
 
     pub fn apply(&self, partition_key: Vec<u8>, row: Row) {
         self.backend.apply(partition_key, row);
+    }
+
+    pub fn set_partition_tombstone(
+        &self,
+        partition_key: Vec<u8>,
+        timestamp: i64,
+        local_deletion_time: i32,
+    ) {
+        self.backend
+            .set_partition_tombstone(partition_key, timestamp, local_deletion_time);
     }
 
     pub fn get_partition(&self, partition_key: &[u8]) -> Option<PartitionData> {

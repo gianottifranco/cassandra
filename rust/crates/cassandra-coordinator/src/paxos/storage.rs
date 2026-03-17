@@ -192,6 +192,9 @@ impl PaxosStorage {
             }],
             timestamp: ts,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         };
 
         self.engine.apply_mutation(&mutation)
@@ -245,6 +248,9 @@ impl PaxosStorage {
             }],
             timestamp: ts,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         };
 
         self.engine.apply_mutation(&mutation)
@@ -339,6 +345,9 @@ impl PaxosStorage {
             }],
             timestamp: ts,
             cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         };
 
         self.engine.apply_mutation(&mutation)

@@ -74,6 +74,9 @@ fn make_mutation(
         }],
         timestamp: ts,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     }
 }
 

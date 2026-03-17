@@ -1,0 +1,8 @@
+{
+  "error_code": "0x1001",
+  "error_name": "OVERLOADED",
+  "description": "Coordinator node is overloaded and cannot accept more requests",
+  "fields": {},
+  "java_class": "org.apache.cassandra.exceptions.OverloadedException",
+  "protocol_version": 4
+}

@@ -311,6 +311,11 @@ impl HintSegmentManager {
         self
     }
 
+    /// Get the base directory for hint segments.
+    pub fn hints_dir(&self) -> &Path {
+        &self.hints_dir
+    }
+
     /// Create a new writer for the given target.
     pub fn writer_for(&self, target_id: &str) -> io::Result<HintSegmentWriter> {
         let descriptor = HintSegmentDescriptor::new(target_id.to_string());

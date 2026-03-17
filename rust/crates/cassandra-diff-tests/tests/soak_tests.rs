@@ -66,6 +66,9 @@ fn make_mutation(
         }],
         timestamp: ts,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     }
 }
 
@@ -82,6 +85,9 @@ fn make_tombstone_mutation(ks: &str, tbl: &str, pk: &[u8], ck: &[u8], ts: i64) -
         }],
         timestamp: ts,
         cdc_enabled: false,
+        static_cells: vec![],
+        partition_tombstone: None,
+        range_tombstones: vec![],
     }
 }
 

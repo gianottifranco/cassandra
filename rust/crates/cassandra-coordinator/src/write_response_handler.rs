@@ -296,6 +296,245 @@ impl WriteResponseHandler {
     }
 }
 
+/// DC-aware write response handler for EACH_QUORUM (WU-02).
+///
+/// Tracks per-datacenter ack counts and determines when all DCs have
+/// independently reached their quorum requirement.
+///
+/// ## Java Oracle
+///
+/// `org.apache.cassandra.service.DatacenterWriteResponseHandler`
+pub struct DatacenterWriteResponseHandler {
+    /// Consistency level being enforced.
+    cl: ConsistencyLevel,
+    /// Write type for error reporting.
+    write_type: WriteType,
+    /// Per-DC ack counts.
+    dc_acks: Mutex<HashMap<String, usize>>,
+    /// Per-DC required acks.
+    dc_required: HashMap<String, usize>,
+    /// Per-DC failure counts.
+    dc_failures: Mutex<HashMap<String, usize>>,
+    /// Total number of contacted replicas.
+    total_replicas: usize,
+    /// Contacted replicas.
+    contacted: Vec<Endpoint>,
+    /// Mapping from endpoint to datacenter.
+    endpoint_dc: HashMap<Endpoint, String>,
+    /// Creation instant for timeout tracking.
+    created_at: Instant,
+    /// Write timeout.
+    timeout: Duration,
+    /// Notifier signaled on ack/failure.
+    notify: Arc<Notify>,
+    /// Number of hints stored.
+    hints_stored: AtomicUsize,
+}
+
+impl DatacenterWriteResponseHandler {
+    /// Create a new DC-aware handler.
+    ///
+    /// # Arguments
+    /// - `cl`: target consistency level (typically EachQuorum)
+    /// - `write_type`: type of write
+    /// - `dc_required`: map of DC name to required ack count
+    /// - `contacted`: list of all contacted replicas
+    /// - `endpoint_dc`: mapping from endpoint to its datacenter
+    /// - `timeout`: maximum wait duration
+    pub fn new_dc_aware(
+        cl: ConsistencyLevel,
+        write_type: WriteType,
+        dc_required: HashMap<String, usize>,
+        contacted: Vec<Endpoint>,
+        endpoint_dc: HashMap<Endpoint, String>,
+        timeout: Duration,
+    ) -> Self {
+        let total_replicas = contacted.len();
+        let dc_acks: HashMap<String, usize> =
+            dc_required.keys().map(|dc| (dc.clone(), 0)).collect();
+        let dc_failures: HashMap<String, usize> =
+            dc_required.keys().map(|dc| (dc.clone(), 0)).collect();
+        Self {
+            cl,
+            write_type,
+            dc_acks: Mutex::new(dc_acks),
+            dc_required,
+            dc_failures: Mutex::new(dc_failures),
+            total_replicas,
+            contacted,
+            endpoint_dc,
+            created_at: Instant::now(),
+            timeout,
+            notify: Arc::new(Notify::new()),
+            hints_stored: AtomicUsize::new(0),
+        }
+    }
+
+    /// Record a successful ack from a replica in its datacenter.
+    ///
+    /// Returns `true` if all DCs have now met their CL.
+    pub fn on_response_from_dc(&self, from: &Endpoint) -> bool {
+        let dc = self
+            .endpoint_dc
+            .get(from)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        {
+            let mut acks = self.dc_acks.lock();
+            let entry = acks.entry(dc.clone()).or_insert(0);
+            *entry += 1;
+        }
+
+        debug!(
+            dc = %dc,
+            cl = %self.cl,
+            "DC-aware write ack received"
+        );
+
+        if self.is_dc_cl_met() {
+            self.notify.notify_waiters();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Record a failure from a replica in its datacenter.
+    pub fn on_failure_from_dc(&self, from: &Endpoint, _reason: RequestFailureReason) {
+        let dc = self
+            .endpoint_dc
+            .get(from)
+            .cloned()
+            .unwrap_or_else(|| "unknown".to_string());
+
+        {
+            let mut failures = self.dc_failures.lock();
+            let entry = failures.entry(dc).or_insert(0);
+            *entry += 1;
+        }
+
+        // Check if any DC can no longer meet its CL
+        if self.is_dc_cl_impossible() {
+            self.notify.notify_waiters();
+        }
+    }
+
+    /// Record that a hint was stored.
+    pub fn on_hint_stored(&self) {
+        self.hints_stored.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Check whether all DCs have met their per-DC quorum.
+    pub fn is_dc_cl_met(&self) -> bool {
+        let acks = self.dc_acks.lock();
+        for (dc, &required) in &self.dc_required {
+            let got = acks.get(dc).copied().unwrap_or(0);
+            if got < required {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Check whether any DC can no longer meet its CL.
+    fn is_dc_cl_impossible(&self) -> bool {
+        let acks = self.dc_acks.lock();
+        let failures = self.dc_failures.lock();
+        for (dc, &required) in &self.dc_required {
+            let got = acks.get(dc).copied().unwrap_or(0);
+            let failed = failures.get(dc).copied().unwrap_or(0);
+            // Count total replicas in this DC
+            let dc_total = self
+                .endpoint_dc
+                .values()
+                .filter(|d| *d == dc)
+                .count();
+            let remaining = dc_total.saturating_sub(got + failed);
+            if got + remaining < required {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Wait for all DCs to satisfy their CL or timeout.
+    pub async fn await_completion(&self) -> Result<WriteResult, WriteError> {
+        let remaining = self.timeout.saturating_sub(self.created_at.elapsed());
+
+        if remaining.is_zero() {
+            return self.make_timeout_error();
+        }
+
+        if self.is_dc_cl_met() {
+            return self.make_result();
+        }
+
+        let result = tokio::time::timeout(remaining, async {
+            loop {
+                if self.is_dc_cl_met() || self.is_dc_cl_impossible() {
+                    break;
+                }
+                self.notify.notified().await;
+            }
+        })
+        .await;
+
+        match result {
+            Ok(()) => {
+                if self.is_dc_cl_met() {
+                    self.make_result()
+                } else {
+                    self.make_failure_error()
+                }
+            }
+            Err(_) => self.make_timeout_error(),
+        }
+    }
+
+    fn total_acks(&self) -> usize {
+        self.dc_acks.lock().values().sum()
+    }
+
+    fn total_required(&self) -> usize {
+        self.dc_required.values().sum()
+    }
+
+    fn make_result(&self) -> Result<WriteResult, WriteError> {
+        Ok(WriteResult {
+            acks_received: self.total_acks(),
+            acks_required: self.total_required(),
+            contacted_replicas: self.contacted.clone(),
+            hints_stored: self.hints_stored.load(Ordering::Relaxed),
+        })
+    }
+
+    fn make_timeout_error(&self) -> Result<WriteResult, WriteError> {
+        let required = self.total_required();
+        Err(WriteError::Timeout {
+            cl: self.cl,
+            write_type: self.write_type,
+            required,
+            received: self.total_acks(),
+            block_for: required,
+        })
+    }
+
+    fn make_failure_error(&self) -> Result<WriteResult, WriteError> {
+        let required = self.total_required();
+        let failures: usize = self.dc_failures.lock().values().sum();
+        Err(WriteError::WriteFailure {
+            cl: self.cl,
+            write_type: self.write_type,
+            required,
+            received: self.total_acks(),
+            block_for: required,
+            num_failures: failures,
+            failure_map: HashMap::new(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -446,5 +685,104 @@ mod tests {
 
         let result = handler.await_completion().await;
         assert!(result.is_err());
+    }
+
+    // ── DC-Aware Handler Tests (WU-02) ──────────────────────────────
+
+    fn make_dc_handler() -> DatacenterWriteResponseHandler {
+        let contacted = vec![ep(7001), ep(7002), ep(7003), ep(7004)];
+        let mut dc_required = HashMap::new();
+        dc_required.insert("dc1".to_string(), 2); // quorum of 3
+        dc_required.insert("dc2".to_string(), 1); // quorum of 1
+
+        let mut endpoint_dc = HashMap::new();
+        endpoint_dc.insert(ep(7001), "dc1".to_string());
+        endpoint_dc.insert(ep(7002), "dc1".to_string());
+        endpoint_dc.insert(ep(7003), "dc1".to_string());
+        endpoint_dc.insert(ep(7004), "dc2".to_string());
+
+        DatacenterWriteResponseHandler::new_dc_aware(
+            ConsistencyLevel::EachQuorum,
+            WriteType::Simple,
+            dc_required,
+            contacted,
+            endpoint_dc,
+            Duration::from_secs(2),
+        )
+    }
+
+    #[tokio::test]
+    async fn dc_handler_satisfies_each_quorum() {
+        let handler = make_dc_handler();
+
+        // DC1: 2 acks needed
+        assert!(!handler.on_response_from_dc(&ep(7001)));
+        assert!(!handler.on_response_from_dc(&ep(7002)));
+        // DC2: 1 ack needed
+        assert!(handler.on_response_from_dc(&ep(7004)));
+
+        let result = handler.await_completion().await;
+        assert!(result.is_ok());
+        let r = result.unwrap();
+        assert_eq!(r.acks_received, 3);
+        assert_eq!(r.acks_required, 3);
+    }
+
+    #[tokio::test]
+    async fn dc_handler_partial_dc_failure() {
+        let handler = make_dc_handler();
+
+        // DC1: only 1 ack, then failure makes quorum impossible
+        handler.on_response_from_dc(&ep(7001));
+        handler.on_failure_from_dc(&ep(7002), RequestFailureReason::Unknown);
+        handler.on_failure_from_dc(&ep(7003), RequestFailureReason::Unknown);
+
+        // DC2 succeeds but DC1 cannot reach quorum
+        handler.on_response_from_dc(&ep(7004));
+
+        let result = handler.await_completion().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dc_handler_timeout_when_dc_missing() {
+        let handler = DatacenterWriteResponseHandler::new_dc_aware(
+            ConsistencyLevel::EachQuorum,
+            WriteType::Simple,
+            {
+                let mut m = HashMap::new();
+                m.insert("dc1".to_string(), 1);
+                m.insert("dc2".to_string(), 1);
+                m
+            },
+            vec![ep(7001), ep(7002)],
+            {
+                let mut m = HashMap::new();
+                m.insert(ep(7001), "dc1".to_string());
+                m.insert(ep(7002), "dc2".to_string());
+                m
+            },
+            Duration::from_millis(50),
+        );
+
+        // Only DC1 acks — DC2 never responds
+        handler.on_response_from_dc(&ep(7001));
+
+        let result = handler.await_completion().await;
+        // DC2 never acked, should timeout
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn dc_handler_is_dc_cl_met() {
+        let handler = make_dc_handler();
+        assert!(!handler.is_dc_cl_met());
+
+        handler.on_response_from_dc(&ep(7001));
+        handler.on_response_from_dc(&ep(7002));
+        assert!(!handler.is_dc_cl_met()); // DC2 not yet met
+
+        handler.on_response_from_dc(&ep(7004));
+        assert!(handler.is_dc_cl_met());
     }
 }

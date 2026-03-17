@@ -144,6 +144,9 @@ proptest! {
             }],
             timestamp: ts,
             cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
         };
 
         engine.apply_mutation(&m).unwrap();
@@ -189,6 +192,9 @@ proptest! {
                     }],
                     timestamp: i as i64,
                     cdc_enabled: false,
+            static_cells: vec![],
+            partition_tombstone: None,
+            range_tombstones: vec![],
                 };
                 engine.apply_mutation(&m).unwrap();
             }

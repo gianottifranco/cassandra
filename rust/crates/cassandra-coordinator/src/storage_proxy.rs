@@ -264,6 +264,83 @@ impl StorageProxy {
         })
     }
 
+    /// Coordinate a write using async WriteResponseHandler (WU-01).
+    ///
+    /// Uses `coordinate_write_async()` to create a handler, fans out
+    /// mutations via messaging, records acks, and awaits CL satisfaction.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.mutate()` with `performWrite()` + `WriteResponseHandler`
+    pub async fn mutate_async(
+        &self,
+        mutation: CoordinatedMutation,
+        cl: ConsistencyLevel,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Result<WriteResult, WriteError> {
+        debug!(
+            keyspace = %mutation.keyspace,
+            table = %mutation.table,
+            cl = ?cl,
+            "StorageProxy.mutate_async"
+        );
+
+        // Get the plan and handler from WriteCoordinator
+        let (plan, handler) = self
+            .write_coordinator
+            .coordinate_write_async(&mutation, cl, strategy, snitch)?;
+
+        // Fan out mutations to remote live replicas via messaging
+        let local_endpoint = Endpoint::new(self.config.listen_address);
+
+        for replica in &plan.live_replicas {
+            if *replica == local_endpoint {
+                // Local replica: record ack immediately (simulates local apply)
+                handler.on_response(replica);
+                continue;
+            }
+            let payload = serde_json::to_vec(&mutation).unwrap_or_default();
+            let msg = Message::request(
+                Verb::Mutation,
+                self.messaging.next_id(),
+                payload,
+            );
+            let handler_clone = Arc::clone(&handler);
+            let replica_ep = *replica;
+            let messaging = Arc::clone(&self.messaging);
+            let timeout = self.config.write_timeout;
+            let hint_store = Arc::clone(&self.hint_store);
+            let mutation_clone = mutation.clone();
+
+            // Send asynchronously and record ack/failure
+            tokio::spawn(async move {
+                match messaging
+                    .send_and_wait(replica_ep.0, msg, timeout)
+                    .await
+                {
+                    Ok(_) => {
+                        handler_clone.on_response(&replica_ep);
+                    }
+                    Err(e) => {
+                        warn!(replica = %replica_ep, error = %e, "Remote mutation failed");
+                        handler_clone.on_failure(
+                            replica_ep,
+                            crate::write_response_handler::RequestFailureReason::Unknown,
+                        );
+                        // Store hint for failed replica
+                        if hint_store.store_hint(replica_ep, mutation_clone) {
+                            handler_clone.on_hint_stored();
+                        }
+                    }
+                }
+            });
+        }
+
+        // Await CL satisfaction
+        handler.await_completion().await
+    }
+
     /// Coordinate a read from replicas.
     ///
     /// Sends `Verb::ReadData` / `Verb::ReadDigest` messages to replicas

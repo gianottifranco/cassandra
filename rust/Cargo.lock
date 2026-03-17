@@ -415,7 +415,9 @@ name = "cassandra-diff-tests"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "cassandra-cluster-metadata",
  "cassandra-common",
+ "cassandra-coordinator",
  "cassandra-cql",
  "cassandra-native-protocol",
  "cassandra-storage",

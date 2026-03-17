@@ -44,6 +44,8 @@ proptest = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 criterion = { workspace = true }
+cassandra-coordinator = { path = "../cassandra-coordinator" }
+cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
 
 [[bench]]
 name = "p0_gap_benchmarks"
