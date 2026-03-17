@@ -6,8 +6,10 @@
 //! - `org.apache.cassandra.schema.TableMetadata`
 
 use crate::column::{ColumnKind, ColumnMetadata};
+use crate::dropped_column::DroppedColumn;
 use crate::index::IndexMetadata;
 use crate::table_id::TableId;
+use crate::trigger::TriggerDefinition;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -104,6 +106,10 @@ pub struct TableMetadata {
     pub indexes: Vec<IndexMetadata>,
     pub flags: Vec<TableFlag>,
     pub params: TableParams,
+    #[serde(default)]
+    pub triggers: Vec<TriggerDefinition>,
+    #[serde(default)]
+    pub dropped_columns: Vec<DroppedColumn>,
 }
 
 impl TableMetadata {
@@ -176,6 +182,29 @@ impl TableMetadata {
         self.indexes.retain(|i| i.name != name);
         self
     }
+
+    /// Return a new `TableMetadata` with the given trigger added.
+    pub fn with_trigger(mut self, trigger: TriggerDefinition) -> Self {
+        self.triggers.push(trigger);
+        self
+    }
+
+    /// Return a new `TableMetadata` with the named trigger removed.
+    pub fn without_trigger(mut self, name: &str) -> Self {
+        self.triggers.retain(|t| t.name != name);
+        self
+    }
+
+    /// Look up a trigger by name.
+    pub fn trigger(&self, name: &str) -> Option<&TriggerDefinition> {
+        self.triggers.iter().find(|t| t.name == name)
+    }
+
+    /// Return a new `TableMetadata` with the given dropped column recorded.
+    pub fn with_dropped_column(mut self, dc: DroppedColumn) -> Self {
+        self.dropped_columns.push(dc);
+        self
+    }
 }
 
 /// Builder for constructing `TableMetadata`.
@@ -243,6 +272,8 @@ impl TableMetadataBuilder {
             indexes: self.indexes,
             flags: self.flags,
             params: self.params,
+            triggers: Vec::new(),
+            dropped_columns: Vec::new(),
         }
     }
 }

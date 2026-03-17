@@ -540,6 +540,7 @@ dependencies = [
  "cassandra-common",
  "cassandra-types",
  "md-5",
+ "parking_lot",
  "proptest",
  "serde",
  "serde_json",

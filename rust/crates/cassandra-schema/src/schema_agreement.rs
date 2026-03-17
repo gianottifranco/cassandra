@@ -42,6 +42,47 @@ pub fn compute_schema_version(snapshot: &SchemaSnapshot) -> Uuid {
                 hasher.update(format!("{:?}", col.column_type).as_bytes());
                 hasher.update(format!("{:?}", col.kind).as_bytes());
             }
+
+            // Hash triggers
+            for trigger in &table.triggers {
+                hasher.update(b"trigger:");
+                hasher.update(trigger.name.as_bytes());
+                hasher.update(trigger.trigger_class.as_bytes());
+            }
+        }
+
+        // Hash views
+        for (view_name, view) in &ks.views {
+            hasher.update(b"view:");
+            hasher.update(view_name.as_bytes());
+            hasher.update(view.base_table_name.as_bytes());
+            hasher.update(view.where_clause.as_bytes());
+        }
+
+        // Hash user-defined types
+        for (type_name, udt) in &ks.types {
+            hasher.update(b"type:");
+            hasher.update(type_name.as_bytes());
+            for field_name in &udt.field_names {
+                hasher.update(field_name.as_bytes());
+            }
+            for field_type in &udt.field_types {
+                hasher.update(field_type.as_bytes());
+            }
+        }
+
+        // Hash user-defined functions
+        for (sig, func) in &ks.functions {
+            hasher.update(b"function:");
+            hasher.update(sig.as_bytes());
+            hasher.update(func.return_type.as_bytes());
+        }
+
+        // Hash user-defined aggregates
+        for (sig, agg) in &ks.aggregates {
+            hasher.update(b"aggregate:");
+            hasher.update(sig.as_bytes());
+            hasher.update(agg.state_type.as_bytes());
         }
     }
 

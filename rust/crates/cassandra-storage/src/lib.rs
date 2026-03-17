@@ -64,6 +64,10 @@ pub mod index;
 #[cfg(feature = "materialized-views")]
 pub mod materialized_views;
 
+/// View builder for backfilling materialized views.
+#[cfg(feature = "materialized-views")]
+pub mod view_builder;
+
 /// Trigger support (feature-gated).
 #[cfg(feature = "triggers")]
 pub mod triggers;

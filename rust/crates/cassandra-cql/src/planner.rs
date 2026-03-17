@@ -36,6 +36,17 @@ pub enum QueryPlan {
     ListRoles(ListRolesPlan),
     CreateIndex(CreateIndexPlan),
     DropIndex(DropIndexPlan),
+    CreateMaterializedView(CreateMaterializedViewPlan),
+    DropMaterializedView(DropMaterializedViewPlan),
+    AlterMaterializedView(AlterMaterializedViewPlan),
+    CreateType(CreateTypePlan),
+    DropType(DropTypePlan),
+    CreateFunction(CreateFunctionPlan),
+    DropFunction(DropFunctionPlan),
+    CreateAggregate(CreateAggregatePlan),
+    DropAggregate(DropAggregatePlan),
+    CreateTrigger(CreateTriggerPlan),
+    DropTrigger(DropTriggerPlan),
 }
 
 impl QueryPlan {
@@ -50,6 +61,17 @@ impl QueryPlan {
                 | QueryPlan::DropTable(_)
                 | QueryPlan::CreateIndex(_)
                 | QueryPlan::DropIndex(_)
+                | QueryPlan::CreateMaterializedView(_)
+                | QueryPlan::DropMaterializedView(_)
+                | QueryPlan::AlterMaterializedView(_)
+                | QueryPlan::CreateType(_)
+                | QueryPlan::DropType(_)
+                | QueryPlan::CreateFunction(_)
+                | QueryPlan::DropFunction(_)
+                | QueryPlan::CreateAggregate(_)
+                | QueryPlan::DropAggregate(_)
+                | QueryPlan::CreateTrigger(_)
+                | QueryPlan::DropTrigger(_)
         )
     }
 }
@@ -122,6 +144,19 @@ pub struct SelectPlan {
     pub allow_filtering: bool,
     /// Validated restrictions (None if table metadata was not available).
     pub restrictions: Option<RestrictionSet>,
+    /// ANN clause detected from ORDER BY ... ANN OF [...] LIMIT k.
+    pub ann_clause: Option<AnnClause>,
+}
+
+/// Approximate Nearest Neighbor clause for vector search.
+#[derive(Debug, Clone)]
+pub struct AnnClause {
+    /// The vector column name.
+    pub column: String,
+    /// The query vector literal.
+    pub vector_literal: Vec<f32>,
+    /// Number of results to return.
+    pub top_k: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -227,6 +262,118 @@ pub struct CreateIndexPlan {
 pub struct DropIndexPlan {
     pub keyspace: String,
     pub index_name: String,
+    pub if_exists: bool,
+}
+
+// ─── Materialized View Plans ─────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CreateMaterializedViewPlan {
+    pub keyspace: String,
+    pub name: String,
+    pub if_not_exists: bool,
+    pub base_table: String,
+    pub select_columns: SelectColumns,
+    pub where_clause: Vec<Relation>,
+    pub partition_key: Vec<String>,
+    pub clustering_key: Vec<String>,
+    pub clustering_order: Vec<(String, ClusteringOrder)>,
+    pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropMaterializedViewPlan {
+    pub keyspace: String,
+    pub name: String,
+    pub if_exists: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterMaterializedViewPlan {
+    pub keyspace: String,
+    pub name: String,
+    pub options: HashMap<String, String>,
+}
+
+// ─── UDT Plans ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CreateTypePlan {
+    pub keyspace: String,
+    pub name: String,
+    pub if_not_exists: bool,
+    pub fields: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropTypePlan {
+    pub keyspace: String,
+    pub name: String,
+    pub if_exists: bool,
+}
+
+// ─── UDF Plans ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CreateFunctionPlan {
+    pub keyspace: String,
+    pub name: String,
+    pub or_replace: bool,
+    pub if_not_exists: bool,
+    pub args: Vec<(String, String)>,
+    pub called_on_null_input: bool,
+    pub return_type: String,
+    pub language: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropFunctionPlan {
+    pub keyspace: String,
+    pub name: String,
+    pub if_exists: bool,
+    pub arg_types: Vec<String>,
+}
+
+// ─── UDA Plans ───────────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CreateAggregatePlan {
+    pub keyspace: String,
+    pub name: String,
+    pub or_replace: bool,
+    pub if_not_exists: bool,
+    pub arg_types: Vec<String>,
+    pub sfunc: String,
+    pub stype: String,
+    pub finalfunc: Option<String>,
+    pub initcond: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropAggregatePlan {
+    pub keyspace: String,
+    pub name: String,
+    pub if_exists: bool,
+    pub arg_types: Vec<String>,
+}
+
+// ─── Trigger Plans ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+pub struct CreateTriggerPlan {
+    pub keyspace: String,
+    pub table: String,
+    pub name: String,
+    pub if_not_exists: bool,
+    pub trigger_class: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DropTriggerPlan {
+    pub keyspace: String,
+    pub table: String,
+    pub name: String,
     pub if_exists: bool,
 }
 
@@ -408,6 +555,10 @@ pub fn plan(
                 None
             };
 
+            // Detect ANN clause: placeholder detection — in practice, the AST
+            // would encode ANN OF explicitly. For now, ann_clause is None.
+            let ann_clause: Option<AnnClause> = None;
+
             Ok(QueryPlan::Select(SelectPlan {
                 keyspace: ks,
                 table: s.table.clone(),
@@ -419,6 +570,7 @@ pub fn plan(
                 limit: s.limit.clone(),
                 allow_filtering: s.allow_filtering,
                 restrictions,
+                ann_clause,
             }))
         }
 
@@ -610,6 +762,196 @@ pub fn plan(
             }))
         }
 
+        Statement::CreateMaterializedView(cmv) => {
+            let ks = resolve_keyspace(cmv.keyspace.as_deref(), active_keyspace)?;
+            if let Some(ks_meta) = schema.keyspace(&ks) {
+                if ks_meta.table(&cmv.select.table).is_none() {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "Base table '{}.{}' does not exist",
+                        ks, cmv.select.table
+                    )));
+                }
+                if !cmv.if_not_exists && ks_meta.view(&cmv.name).is_some() {
+                    return Err(PlanError::AlreadyExists {
+                        ks: ks.clone(),
+                        name: cmv.name.clone(),
+                    });
+                }
+            }
+            Ok(QueryPlan::CreateMaterializedView(CreateMaterializedViewPlan {
+                keyspace: ks,
+                name: cmv.name.clone(),
+                if_not_exists: cmv.if_not_exists,
+                base_table: cmv.select.table.clone(),
+                select_columns: cmv.select.columns.clone(),
+                where_clause: cmv.select.where_clause.clone(),
+                partition_key: cmv.partition_key.clone(),
+                clustering_key: cmv.clustering_key.clone(),
+                clustering_order: cmv.clustering_order.clone(),
+                options: cmv.options.clone(),
+            }))
+        }
+
+        Statement::DropMaterializedView(dmv) => {
+            let ks = resolve_keyspace(dmv.keyspace.as_deref(), active_keyspace)?;
+            if !dmv.if_exists {
+                if let Some(ks_meta) = schema.keyspace(&ks) {
+                    if ks_meta.view(&dmv.name).is_none() {
+                        return Err(PlanError::InvalidQuery(format!(
+                            "Materialized view '{}.{}' does not exist",
+                            ks, dmv.name
+                        )));
+                    }
+                }
+            }
+            Ok(QueryPlan::DropMaterializedView(DropMaterializedViewPlan {
+                keyspace: ks,
+                name: dmv.name.clone(),
+                if_exists: dmv.if_exists,
+            }))
+        }
+
+        Statement::AlterMaterializedView(amv) => {
+            let ks = resolve_keyspace(amv.keyspace.as_deref(), active_keyspace)?;
+            Ok(QueryPlan::AlterMaterializedView(AlterMaterializedViewPlan {
+                keyspace: ks,
+                name: amv.name.clone(),
+                options: amv.options.clone(),
+            }))
+        }
+
+        Statement::CreateType(ct) => {
+            let ks = resolve_keyspace(ct.keyspace.as_deref(), active_keyspace)?;
+            if !ct.if_not_exists {
+                if let Some(ks_meta) = schema.keyspace(&ks) {
+                    if ks_meta.user_type(&ct.name).is_some() {
+                        return Err(PlanError::AlreadyExists {
+                            ks: ks.clone(),
+                            name: ct.name.clone(),
+                        });
+                    }
+                }
+            }
+            let fields = ct.fields.iter()
+                .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
+                .collect();
+            Ok(QueryPlan::CreateType(CreateTypePlan {
+                keyspace: ks,
+                name: ct.name.clone(),
+                if_not_exists: ct.if_not_exists,
+                fields,
+            }))
+        }
+
+        Statement::DropType(dt) => {
+            let ks = resolve_keyspace(dt.keyspace.as_deref(), active_keyspace)?;
+            if !dt.if_exists {
+                if let Some(ks_meta) = schema.keyspace(&ks) {
+                    if ks_meta.user_type(&dt.name).is_none() {
+                        return Err(PlanError::InvalidQuery(format!(
+                            "Type '{}.{}' does not exist",
+                            ks, dt.name
+                        )));
+                    }
+                }
+            }
+            Ok(QueryPlan::DropType(DropTypePlan {
+                keyspace: ks,
+                name: dt.name.clone(),
+                if_exists: dt.if_exists,
+            }))
+        }
+
+        Statement::AlterType(_at) => {
+            Err(PlanError::InvalidQuery(
+                "ALTER TYPE is not yet fully supported".into(),
+            ))
+        }
+
+        Statement::CreateFunction(cf) => {
+            let ks = resolve_keyspace(cf.keyspace.as_deref(), active_keyspace)?;
+            let args: Vec<(String, String)> = cf.args.iter()
+                .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
+                .collect();
+            Ok(QueryPlan::CreateFunction(CreateFunctionPlan {
+                keyspace: ks,
+                name: cf.name.clone(),
+                or_replace: cf.or_replace,
+                if_not_exists: cf.if_not_exists,
+                args,
+                called_on_null_input: cf.called_on_null_input,
+                return_type: format!("{:?}", cf.return_type),
+                language: cf.language.clone(),
+                body: cf.body.clone(),
+            }))
+        }
+
+        Statement::DropFunction(df) => {
+            let ks = resolve_keyspace(df.keyspace.as_deref(), active_keyspace)?;
+            let arg_types: Vec<String> = df.arg_types.iter()
+                .map(|t| format!("{:?}", t))
+                .collect();
+            Ok(QueryPlan::DropFunction(DropFunctionPlan {
+                keyspace: ks,
+                name: df.name.clone(),
+                if_exists: df.if_exists,
+                arg_types,
+            }))
+        }
+
+        Statement::CreateAggregate(ca) => {
+            let ks = resolve_keyspace(ca.keyspace.as_deref(), active_keyspace)?;
+            let arg_types: Vec<String> = ca.arg_types.iter()
+                .map(|t| format!("{:?}", t))
+                .collect();
+            let initcond = ca.initcond.as_ref().map(|t| format!("{:?}", t));
+            Ok(QueryPlan::CreateAggregate(CreateAggregatePlan {
+                keyspace: ks,
+                name: ca.name.clone(),
+                or_replace: ca.or_replace,
+                if_not_exists: ca.if_not_exists,
+                arg_types,
+                sfunc: ca.sfunc.clone(),
+                stype: format!("{:?}", ca.stype),
+                finalfunc: ca.finalfunc.clone(),
+                initcond,
+            }))
+        }
+
+        Statement::DropAggregate(da) => {
+            let ks = resolve_keyspace(da.keyspace.as_deref(), active_keyspace)?;
+            let arg_types: Vec<String> = da.arg_types.iter()
+                .map(|t| format!("{:?}", t))
+                .collect();
+            Ok(QueryPlan::DropAggregate(DropAggregatePlan {
+                keyspace: ks,
+                name: da.name.clone(),
+                if_exists: da.if_exists,
+                arg_types,
+            }))
+        }
+
+        Statement::CreateTrigger(ct) => {
+            let ks = resolve_keyspace(ct.keyspace.as_deref(), active_keyspace)?;
+            Ok(QueryPlan::CreateTrigger(CreateTriggerPlan {
+                keyspace: ks,
+                table: ct.table.clone(),
+                name: ct.name.clone(),
+                if_not_exists: ct.if_not_exists,
+                trigger_class: ct.trigger_class.clone(),
+            }))
+        }
+
+        Statement::DropTrigger(dt) => {
+            let ks = resolve_keyspace(dt.keyspace.as_deref(), active_keyspace)?;
+            Ok(QueryPlan::DropTrigger(DropTriggerPlan {
+                keyspace: ks,
+                table: dt.table.clone(),
+                name: dt.name.clone(),
+                if_exists: dt.if_exists,
+            }))
+        }
+
         // Statement types not yet fully plannable
         _ => Err(PlanError::InvalidQuery(
             "statement type not yet supported by the planner".into(),
@@ -661,6 +1003,25 @@ fn resolve_keyspace(explicit: Option<&str>, active: Option<&str>) -> Result<Stri
             "No keyspace has been specified. USE a keyspace or qualify the table name.".into(),
         )),
     }
+}
+
+/// Detect an ANN clause from the ORDER BY and WHERE clause.
+///
+/// In Cassandra 5, the syntax is:
+/// `ORDER BY <col> ANN OF [x, y, z] LIMIT k`
+///
+/// Since the AST doesn't yet encode ANN OF natively, this is a placeholder
+/// that returns None. When the parser adds ANN support, this function will
+/// extract the vector literal and top_k from the AST.
+#[allow(unused_variables)]
+fn detect_ann_clause(
+    order_by: &[(String, ClusteringOrder)],
+    limit: &Option<Term>,
+    where_clause: &[Relation],
+) -> Option<AnnClause> {
+    // TODO: Implement when AST supports ANN OF syntax.
+    // For now, ANN is not parseable and this always returns None.
+    None
 }
 
 /// Planner error.

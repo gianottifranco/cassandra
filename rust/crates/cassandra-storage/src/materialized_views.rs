@@ -54,6 +54,9 @@ pub struct MaterializedViewDefinition {
     pub where_clause: String,
     /// Whether the view includes all columns from the base table.
     pub include_all_columns: bool,
+    /// View primary key columns (for PK recomputation from base row).
+    #[serde(default)]
+    pub view_pk_columns: Vec<String>,
 }
 
 /// A generated view mutation from a base table write.
@@ -242,8 +245,10 @@ impl ViewManager {
         timestamp: i64,
         is_delete: bool,
     ) -> Result<Option<ViewMutation>, String> {
-        // Check WHERE clause filter (simplified: always passes for now)
-        // TODO: Implement WHERE clause evaluation
+        // Evaluate WHERE clause filter
+        if !is_delete && !evaluate_where_clause(&view_def.where_clause, columns) {
+            return Ok(None);
+        }
 
         // Filter columns included in the view
         let view_columns: HashMap<String, Option<Vec<u8>>> = if view_def.include_all_columns {
@@ -261,11 +266,12 @@ impl ViewManager {
             return Ok(None);
         }
 
-        // The view partition key is typically a base column value.
-        // For simplicity, we use the base partition key. A full implementation
-        // would recompute based on the view's primary key definition.
-        // TODO: Implement proper view PK computation from base columns
-        let view_pk = partition_key.to_vec();
+        // Compute view partition key from view_pk_columns if specified
+        let view_pk = compute_view_pk(
+            &view_def.view_pk_columns,
+            columns,
+            partition_key,
+        );
 
         Ok(Some(ViewMutation {
             keyspace: view_def.keyspace.clone(),
@@ -289,6 +295,87 @@ impl Default for ViewManager {
     }
 }
 
+/// Evaluate a WHERE clause against a set of column values.
+///
+/// Supports two predicate forms:
+/// - `column_name IS NOT NULL` — passes if column exists and has a non-None value
+/// - `column_name = 'literal'` — passes if column value matches the literal bytes
+///
+/// Multiple predicates separated by `AND` must all pass.
+/// An empty WHERE clause always passes.
+pub fn evaluate_where_clause(
+    where_clause: &str,
+    columns: &HashMap<String, Option<Vec<u8>>>,
+) -> bool {
+    let clause = where_clause.trim();
+    if clause.is_empty() {
+        return true;
+    }
+
+    // Split on AND (case-insensitive)
+    for predicate in clause.split(" AND ") {
+        let predicate = predicate.trim();
+        if predicate.is_empty() {
+            continue;
+        }
+
+        // IS NOT NULL predicate
+        if let Some(col_name) = predicate
+            .strip_suffix(" IS NOT NULL")
+            .or_else(|| predicate.strip_suffix(" is not null"))
+        {
+            let col_name = col_name.trim();
+            match columns.get(col_name) {
+                Some(Some(_)) => continue, // has a non-null value
+                _ => return false,
+            }
+        }
+
+        // Equality predicate: column = 'value'
+        if let Some((col_part, val_part)) = predicate.split_once('=') {
+            let col_name = col_part.trim();
+            let val_str = val_part.trim().trim_matches('\'');
+
+            match columns.get(col_name) {
+                Some(Some(bytes)) => {
+                    if bytes != val_str.as_bytes() {
+                        return false;
+                    }
+                }
+                _ => return false,
+            }
+            continue;
+        }
+    }
+
+    true
+}
+
+/// Compute the view partition key from the specified view PK columns.
+///
+/// If `view_pk_columns` is empty, falls back to the base partition key.
+/// Otherwise, concatenates the byte values of each PK column from the mutation.
+fn compute_view_pk(
+    view_pk_columns: &[String],
+    columns: &HashMap<String, Option<Vec<u8>>>,
+    base_pk: &[u8],
+) -> Vec<u8> {
+    if view_pk_columns.is_empty() {
+        return base_pk.to_vec();
+    }
+
+    let mut pk = Vec::new();
+    for col in view_pk_columns {
+        if let Some(Some(val)) = columns.get(col) {
+            pk.extend_from_slice(val);
+        } else {
+            // If a PK column is missing, fall back to base PK
+            return base_pk.to_vec();
+        }
+    }
+    pk
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +389,7 @@ mod tests {
             included_columns: vec!["email".to_string(), "name".to_string()],
             where_clause: "email IS NOT NULL".to_string(),
             include_all_columns: false,
+            view_pk_columns: Vec::new(),
         }
     }
 
@@ -404,5 +492,135 @@ mod tests {
         let vm = &result.mutations[0];
         assert!(vm.columns.contains_key("email"));
         assert!(vm.columns.contains_key("age"));
+    }
+
+    // ─── WHERE clause evaluation tests ────────────────────────────────
+
+    #[test]
+    fn where_clause_is_not_null_passes() {
+        let mut cols = HashMap::new();
+        cols.insert("email".to_string(), Some(b"a@b.com".to_vec()));
+        assert!(evaluate_where_clause("email IS NOT NULL", &cols));
+    }
+
+    #[test]
+    fn where_clause_is_not_null_fails_missing() {
+        let cols = HashMap::new();
+        assert!(!evaluate_where_clause("email IS NOT NULL", &cols));
+    }
+
+    #[test]
+    fn where_clause_is_not_null_fails_null() {
+        let mut cols = HashMap::new();
+        cols.insert("email".to_string(), None);
+        assert!(!evaluate_where_clause("email IS NOT NULL", &cols));
+    }
+
+    #[test]
+    fn where_clause_equality_passes() {
+        let mut cols = HashMap::new();
+        cols.insert("status".to_string(), Some(b"active".to_vec()));
+        assert!(evaluate_where_clause("status = 'active'", &cols));
+    }
+
+    #[test]
+    fn where_clause_equality_fails() {
+        let mut cols = HashMap::new();
+        cols.insert("status".to_string(), Some(b"inactive".to_vec()));
+        assert!(!evaluate_where_clause("status = 'active'", &cols));
+    }
+
+    #[test]
+    fn where_clause_empty_passes() {
+        let cols = HashMap::new();
+        assert!(evaluate_where_clause("", &cols));
+    }
+
+    #[test]
+    fn where_clause_multiple_predicates() {
+        let mut cols = HashMap::new();
+        cols.insert("email".to_string(), Some(b"a@b.com".to_vec()));
+        cols.insert("status".to_string(), Some(b"active".to_vec()));
+        assert!(evaluate_where_clause(
+            "email IS NOT NULL AND status = 'active'",
+            &cols
+        ));
+    }
+
+    #[test]
+    fn where_clause_filters_view_update() {
+        let mgr = ViewManager::new();
+        mgr.register(test_view_def()).unwrap();
+
+        // email is null → should be filtered out by WHERE email IS NOT NULL
+        let mut columns = HashMap::new();
+        columns.insert("email".to_string(), None);
+        columns.insert("name".to_string(), Some(b"Alice".to_vec()));
+
+        let result = mgr.generate_view_updates("ks", "users", b"user1", &columns, 1000, false);
+        assert!(result.mutations.is_empty());
+    }
+
+    // ─── PK recomputation tests ───────────────────────────────────────
+
+    #[test]
+    fn view_pk_from_columns() {
+        let pk = compute_view_pk(
+            &["email".to_string()],
+            &{
+                let mut m = HashMap::new();
+                m.insert("email".to_string(), Some(b"a@b.com".to_vec()));
+                m
+            },
+            b"base_pk",
+        );
+        assert_eq!(pk, b"a@b.com");
+    }
+
+    #[test]
+    fn view_pk_fallback_to_base() {
+        let pk = compute_view_pk(
+            &["missing_col".to_string()],
+            &HashMap::new(),
+            b"base_pk",
+        );
+        assert_eq!(pk, b"base_pk");
+    }
+
+    #[test]
+    fn view_pk_empty_columns_uses_base() {
+        let pk = compute_view_pk(&[], &HashMap::new(), b"base_pk");
+        assert_eq!(pk, b"base_pk");
+    }
+
+    #[test]
+    fn view_pk_concatenates_multiple() {
+        let mut cols = HashMap::new();
+        cols.insert("a".to_string(), Some(b"X".to_vec()));
+        cols.insert("b".to_string(), Some(b"Y".to_vec()));
+        let pk = compute_view_pk(
+            &["a".to_string(), "b".to_string()],
+            &cols,
+            b"base",
+        );
+        assert_eq!(pk, b"XY");
+    }
+
+    #[test]
+    fn view_with_pk_recomputation() {
+        let mgr = ViewManager::new();
+        let mut def = test_view_def();
+        def.name = "users_by_email_pk".to_string();
+        def.view_table = "users_by_email_pk".to_string();
+        def.view_pk_columns = vec!["email".to_string()];
+        mgr.register(def).unwrap();
+
+        let mut columns = HashMap::new();
+        columns.insert("email".to_string(), Some(b"alice@example.com".to_vec()));
+        columns.insert("name".to_string(), Some(b"Alice".to_vec()));
+
+        let result = mgr.generate_view_updates("ks", "users", b"base_pk", &columns, 1000, false);
+        assert_eq!(result.mutations.len(), 1);
+        assert_eq!(result.mutations[0].partition_key, b"alice@example.com");
     }
 }

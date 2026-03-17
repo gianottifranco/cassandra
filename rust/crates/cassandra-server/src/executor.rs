@@ -20,14 +20,19 @@ use cassandra_cql::ast::{
 };
 use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::planner::{
-    AlterKeyspacePlan, AlterRolePlan, BatchPlan, CreateIndexPlan, CreateKeyspacePlan,
-    CreateRolePlan, CreateTablePlan, DeletePlan, DropIndexPlan, DropKeyspacePlan, DropRolePlan,
-    DropTablePlan, GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan,
+    AlterKeyspacePlan, AlterMaterializedViewPlan, AlterRolePlan, BatchPlan,
+    CreateAggregatePlan, CreateFunctionPlan, CreateIndexPlan, CreateKeyspacePlan,
+    CreateMaterializedViewPlan, CreateRolePlan, CreateTablePlan, CreateTriggerPlan,
+    CreateTypePlan, DeletePlan, DropAggregatePlan, DropFunctionPlan, DropIndexPlan,
+    DropKeyspacePlan, DropMaterializedViewPlan, DropRolePlan, DropTablePlan, DropTriggerPlan,
+    DropTypePlan, GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan,
     UpdatePlan, UsePlan,
 };
+use cassandra_cql::prepared::PreparedCache;
 use cassandra_schema::{
     ClusteringOrder, ColumnKind, ColumnMetadata, KeyspaceMetadata, KeyspaceParams,
-    ReplicationParams, SchemaCatalog,
+    ReplicationParams, SchemaCatalog, TriggerDefinition, UserAggregate, UserFunction, UserType,
+    ViewMetadata,
 };
 use cassandra_storage::commitlog::{CellMutation, Mutation, MutationRow};
 use cassandra_storage::engine::StorageEngine;
@@ -87,6 +92,7 @@ pub struct QueryExecutor {
     catalog: Arc<RwLock<SchemaCatalog>>,
     role_manager: Arc<dyn RoleManager>,
     authorizer: Arc<dyn Authorizer>,
+    prepared_cache: Option<Arc<PreparedCache>>,
 }
 
 impl QueryExecutor {
@@ -101,7 +107,14 @@ impl QueryExecutor {
             catalog,
             role_manager,
             authorizer,
+            prepared_cache: None,
         }
+    }
+
+    /// Set the prepared statement cache for schema-change invalidation.
+    pub fn with_prepared_cache(mut self, cache: Arc<PreparedCache>) -> Self {
+        self.prepared_cache = Some(cache);
+        self
     }
 
     pub fn catalog(&self) -> Arc<RwLock<SchemaCatalog>> {
@@ -113,7 +126,7 @@ impl QueryExecutor {
         plan: &QueryPlan,
         user: Option<&str>,
     ) -> Result<QueryResult, ExecutorError> {
-        match plan {
+        let result = match plan {
             QueryPlan::Use(u) => self.execute_use(u),
             QueryPlan::CreateKeyspace(ck) => self.execute_create_keyspace(ck),
             QueryPlan::AlterKeyspace(ak) => self.execute_alter_keyspace(ak),
@@ -138,7 +151,30 @@ impl QueryExecutor {
             QueryPlan::ListRoles(lr) => self.execute_list_roles(lr),
             QueryPlan::CreateIndex(ci) => self.execute_create_index(ci),
             QueryPlan::DropIndex(di) => self.execute_drop_index(di),
+            QueryPlan::CreateMaterializedView(cmv) => self.execute_create_mv(cmv),
+            QueryPlan::DropMaterializedView(dmv) => self.execute_drop_mv(dmv),
+            QueryPlan::AlterMaterializedView(amv) => self.execute_alter_mv(amv),
+            QueryPlan::CreateType(ct) => self.execute_create_type(ct),
+            QueryPlan::DropType(dt) => self.execute_drop_type(dt),
+            QueryPlan::CreateFunction(cf) => self.execute_create_function(cf),
+            QueryPlan::DropFunction(df) => self.execute_drop_function(df),
+            QueryPlan::CreateAggregate(ca) => self.execute_create_aggregate(ca),
+            QueryPlan::DropAggregate(da) => self.execute_drop_aggregate(da),
+            QueryPlan::CreateTrigger(ct) => self.execute_create_trigger(ct),
+            QueryPlan::DropTrigger(dt) => self.execute_drop_trigger(dt),
+        };
+
+        // Invalidate prepared cache after schema-altering DDL
+        if let Ok(ref result) = result {
+            if plan.is_schema_altering() {
+                if let Some(ref cache) = self.prepared_cache {
+                    let version = self.catalog.read().version();
+                    cache.invalidate_for_schema_change(version);
+                }
+            }
         }
+
+        result
     }
 
     // ─── DDL ───────────────────────────────────────────────────────────
@@ -344,6 +380,54 @@ impl QueryExecutor {
         use cassandra_schema::index::{IndexKind, IndexMetadata};
         use cassandra_storage::index::{IndexDefinition, IndexType};
 
+        // ── Validation ──────────────────────────────────────────────────
+        let is_sai = plan
+            .custom_class
+            .as_deref()
+            .map(|c| c.contains("StorageAttachedIndex"))
+            .unwrap_or(false);
+
+        #[cfg(not(feature = "sasi"))]
+        {
+            let is_sasi = plan
+                .custom_class
+                .as_deref()
+                .map(|c| c.contains("SASIIndex"))
+                .unwrap_or(false);
+            if is_sasi {
+                return Err(ExecutorError::InvalidQuery(
+                    "SASI index support is not enabled (feature flag 'sasi' is disabled)".into(),
+                ));
+            }
+        }
+
+        // Validate SAI options if applicable
+        if is_sai {
+            let warnings =
+                cassandra_config::sai_options::validate_index_definition(&plan.options);
+            for w in &warnings {
+                debug!(warning = %w, "SAI index option warning");
+            }
+        }
+
+        // Check for duplicate index on same column
+        {
+            let catalog = self.catalog.read();
+            let snapshot = catalog.snapshot();
+            if let Some(table_meta) = snapshot.table(&plan.keyspace, &plan.table) {
+                for idx in &table_meta.indexes {
+                    if idx.target_column() == Some(&plan.column)
+                        && idx.name != plan.index_name
+                    {
+                        return Err(ExecutorError::InvalidQuery(format!(
+                            "An index already exists on column '{}' (index '{}')",
+                            plan.column, idx.name
+                        )));
+                    }
+                }
+            }
+        }
+
         let kind = if plan.custom_class.is_some() {
             IndexKind::Custom
         } else {
@@ -463,6 +547,333 @@ impl QueryExecutor {
             target: "INDEX".into(),
             keyspace: plan.keyspace.clone(),
             name: Some(plan.index_name.clone()),
+        })
+    }
+
+    // ─── MV DDL ────────────────────────────────────────────────────────
+
+    fn execute_create_mv(
+        &self,
+        plan: &CreateMaterializedViewPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let columns: Vec<String> = match &plan.select_columns {
+            SelectColumns::All => Vec::new(),
+            SelectColumns::Named(selectors) => selectors
+                .iter()
+                .filter_map(|s| match s {
+                    Selector::Column(name) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect(),
+        };
+
+        let include_all = matches!(plan.select_columns, SelectColumns::All);
+        let where_clause_str = plan
+            .where_clause
+            .iter()
+            .map(|r| format!("{} {:?} {:?}", r.column, r.op, r.value))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+
+        let view = ViewMetadata::new(&plan.name, &plan.keyspace, &plan.base_table)
+            .with_include_all_columns(include_all)
+            .with_where_clause(where_clause_str)
+            .with_partition_key(plan.partition_key.clone())
+            .with_clustering_key(plan.clustering_key.clone());
+
+        let view = columns.into_iter().fold(view, |v, col| v.with_column(col));
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .with_view(view);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, view = %plan.name, "Created materialized view");
+        Ok(QueryResult::SchemaChange {
+            change_type: "CREATED".into(),
+            target: "TABLE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_drop_mv(
+        &self,
+        plan: &DropMaterializedViewPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .without_view(&plan.name);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, view = %plan.name, "Dropped materialized view");
+        Ok(QueryResult::SchemaChange {
+            change_type: "DROPPED".into(),
+            target: "TABLE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_alter_mv(
+        &self,
+        plan: &AlterMaterializedViewPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        // ALTER MV only changes table options, which we store as view metadata.
+        // For now, acknowledge the change without modifying stored options.
+        info!(keyspace = %plan.keyspace, view = %plan.name, "Altered materialized view (options update stub)");
+        Ok(QueryResult::SchemaChange {
+            change_type: "UPDATED".into(),
+            target: "TABLE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    // ─── UDT/UDF/UDA/Trigger DDL ─────────────────────────────────────
+
+    fn execute_create_type(&self, plan: &CreateTypePlan) -> Result<QueryResult, ExecutorError> {
+        let mut udt = UserType::new(&plan.keyspace, &plan.name);
+        for (field_name, field_type) in &plan.fields {
+            udt = udt.with_field(field_name, field_type);
+        }
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .with_type(udt);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, type_name = %plan.name, "Created type");
+        Ok(QueryResult::SchemaChange {
+            change_type: "CREATED".into(),
+            target: "TYPE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_drop_type(&self, plan: &DropTypePlan) -> Result<QueryResult, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .without_type(&plan.name);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, type_name = %plan.name, "Dropped type");
+        Ok(QueryResult::SchemaChange {
+            change_type: "DROPPED".into(),
+            target: "TYPE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_create_function(
+        &self,
+        plan: &CreateFunctionPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let mut udf =
+            UserFunction::new(&plan.keyspace, &plan.name, &plan.return_type, &plan.language, &plan.body)
+                .with_called_on_null_input(plan.called_on_null_input);
+        for (arg_name, arg_type) in &plan.args {
+            udf = udf.with_arg(arg_name, arg_type);
+        }
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .with_function(udf);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, function = %plan.name, "Created function");
+        Ok(QueryResult::SchemaChange {
+            change_type: "CREATED".into(),
+            target: "FUNCTION".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_drop_function(
+        &self,
+        plan: &DropFunctionPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let signature = format!("{}({})", plan.name, plan.arg_types.join(", "));
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .without_function(&signature);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, function = %plan.name, "Dropped function");
+        Ok(QueryResult::SchemaChange {
+            change_type: "DROPPED".into(),
+            target: "FUNCTION".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_create_aggregate(
+        &self,
+        plan: &CreateAggregatePlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let mut uda = UserAggregate::new(&plan.keyspace, &plan.name, &plan.stype, &plan.sfunc);
+        for arg_type in &plan.arg_types {
+            uda = uda.with_arg_type(arg_type);
+        }
+        if let Some(ref ff) = plan.finalfunc {
+            uda = uda.with_finalfunc(ff);
+        }
+        if let Some(ref ic) = plan.initcond {
+            uda = uda.with_initcond(ic);
+        }
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .with_aggregate(uda);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, aggregate = %plan.name, "Created aggregate");
+        Ok(QueryResult::SchemaChange {
+            change_type: "CREATED".into(),
+            target: "FUNCTION".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_drop_aggregate(
+        &self,
+        plan: &DropAggregatePlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let signature = format!("{}({})", plan.name, plan.arg_types.join(", "));
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?
+            .clone()
+            .without_aggregate(&signature);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, aggregate = %plan.name, "Dropped aggregate");
+        Ok(QueryResult::SchemaChange {
+            change_type: "DROPPED".into(),
+            target: "FUNCTION".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_create_trigger(
+        &self,
+        plan: &CreateTriggerPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let trigger = TriggerDefinition::new(&plan.name, &plan.trigger_class);
+
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks_meta = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?;
+        let table = ks_meta
+            .table(&plan.table)
+            .ok_or_else(|| ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone()))?;
+
+        let updated_table = table.clone().with_trigger(trigger);
+        let ks = ks_meta.clone().with_table(updated_table);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, table = %plan.table, trigger = %plan.name, "Created trigger");
+        Ok(QueryResult::SchemaChange {
+            change_type: "CREATED".into(),
+            target: "TABLE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.table.clone()),
+        })
+    }
+
+    fn execute_drop_trigger(
+        &self,
+        plan: &DropTriggerPlan,
+    ) -> Result<QueryResult, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let ks_meta = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?;
+        let table = ks_meta
+            .table(&plan.table)
+            .ok_or_else(|| ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone()))?;
+
+        let updated_table = table.clone().without_trigger(&plan.name);
+        let ks = ks_meta.clone().with_table(updated_table);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, table = %plan.table, trigger = %plan.name, "Dropped trigger");
+        Ok(QueryResult::SchemaChange {
+            change_type: "DROPPED".into(),
+            target: "TABLE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.table.clone()),
         })
     }
 

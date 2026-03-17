@@ -77,6 +77,7 @@ impl FunctionRegistry {
         super::time_uuid::register_all(&registry);
         super::token_cast_blob::register_all(&registry);
         super::math_json::register_all(&registry);
+        super::vector_similarity::register_all(&registry);
         registry
     }
 

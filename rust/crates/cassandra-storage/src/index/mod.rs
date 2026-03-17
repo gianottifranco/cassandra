@@ -34,6 +34,7 @@
 
 pub mod legacy;
 pub mod lifecycle;
+pub mod metrics;
 pub mod sai;
 #[cfg(feature = "sasi")]
 pub mod sasi;

@@ -1554,6 +1554,7 @@ mod tests {
             included_columns: vec!["name".to_string()],
             where_clause: String::new(),
             include_all_columns: false,
+            view_pk_columns: Vec::new(),
         })
         .unwrap();
 

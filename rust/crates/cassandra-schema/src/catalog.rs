@@ -12,6 +12,7 @@
 
 use crate::keyspace::KeyspaceMetadata;
 use crate::table::TableMetadata;
+use crate::view::ViewMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,6 +53,11 @@ impl SchemaSnapshot {
     /// Total number of tables across all keyspaces.
     pub fn table_count(&self) -> usize {
         self.keyspaces.values().map(|ks| ks.table_count()).sum()
+    }
+
+    /// Look up a view across all keyspaces.
+    pub fn view(&self, keyspace: &str, view: &str) -> Option<&ViewMetadata> {
+        self.keyspace(keyspace)?.view(view)
     }
 }
 

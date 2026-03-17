@@ -11,5 +11,6 @@ pub mod math_json;
 pub mod registry;
 pub mod time_uuid;
 pub mod token_cast_blob;
+pub mod vector_similarity;
 
 pub use registry::{CqlFunction, FunctionName, FunctionRegistry};

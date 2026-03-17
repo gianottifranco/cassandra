@@ -82,6 +82,10 @@ async fn handle_request(
         (Method::POST, "/api/v1/operations/rebuild_index") => {
             handle_rebuild_index(req, &state).await
         }
+        (Method::GET, "/admin/indexes") => handle_list_indexes(&state),
+        (Method::GET, p) if p.starts_with("/admin/indexes/") => {
+            handle_index_detail(p, &state)
+        }
         _ => not_found(),
     };
 
@@ -148,6 +152,73 @@ fn handle_virtual_table(path: &str, state: &AdminState) -> Response<Full<Bytes>>
             StatusCode::NOT_FOUND,
             &serde_json::json!({"error": format!("virtual table {}.{} not found", keyspace, table_name)}),
         ),
+    }
+}
+
+fn handle_list_indexes(state: &AdminState) -> Response<Full<Bytes>> {
+    if let Some(ref engine) = state.storage_engine {
+        let mgrs = engine.index_managers.read();
+        let mut indexes = Vec::new();
+        for (cf_name, mgr) in mgrs.iter() {
+            for idx_name in mgr.list_names() {
+                if let Some(def) = mgr.get_definition(&idx_name) {
+                    indexes.push(serde_json::json!({
+                        "name": idx_name,
+                        "column_family": cf_name,
+                        "column": def.column,
+                        "type": format!("{:?}", def.index_type),
+                        "status": format!("{:?}", mgr.get_status(&idx_name)),
+                    }));
+                }
+            }
+        }
+        json_response(StatusCode::OK, &serde_json::json!({"indexes": indexes}))
+    } else {
+        json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &serde_json::json!({"error": "storage engine not configured"}),
+        )
+    }
+}
+
+fn handle_index_detail(path: &str, state: &AdminState) -> Response<Full<Bytes>> {
+    let index_name = path
+        .trim_start_matches("/admin/indexes/")
+        .to_string();
+
+    if index_name.is_empty() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &serde_json::json!({"error": "index name required"}),
+        );
+    }
+
+    if let Some(ref engine) = state.storage_engine {
+        let mgrs = engine.index_managers.read();
+        for (cf_name, mgr) in mgrs.iter() {
+            if let Some(def) = mgr.get_definition(&index_name) {
+                let body = serde_json::json!({
+                    "name": index_name,
+                    "column_family": cf_name,
+                    "column": def.column,
+                    "type": format!("{:?}", def.index_type),
+                    "status": format!("{:?}", mgr.get_status(&index_name)),
+                    "keyspace": def.keyspace,
+                    "table": def.table,
+                    "options": def.options,
+                });
+                return json_response(StatusCode::OK, &body);
+            }
+        }
+        json_response(
+            StatusCode::NOT_FOUND,
+            &serde_json::json!({"error": format!("index '{}' not found", index_name)}),
+        )
+    } else {
+        json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &serde_json::json!({"error": "storage engine not configured"}),
+        )
     }
 }
 

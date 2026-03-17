@@ -7,6 +7,9 @@
 //! - `org.apache.cassandra.schema.KeyspaceParams`
 
 use crate::table::TableMetadata;
+use crate::user_function::{UserAggregate, UserFunction};
+use crate::user_type::UserType;
+use crate::view::ViewMetadata;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -93,6 +96,14 @@ pub struct KeyspaceMetadata {
     pub kind: KeyspaceKind,
     pub params: KeyspaceParams,
     pub tables: BTreeMap<String, TableMetadata>,
+    #[serde(default)]
+    pub views: BTreeMap<String, ViewMetadata>,
+    #[serde(default)]
+    pub types: BTreeMap<String, UserType>,
+    #[serde(default)]
+    pub functions: BTreeMap<String, UserFunction>,
+    #[serde(default)]
+    pub aggregates: BTreeMap<String, UserAggregate>,
 }
 
 impl KeyspaceMetadata {
@@ -103,6 +114,10 @@ impl KeyspaceMetadata {
             kind: KeyspaceKind::Regular,
             params,
             tables: BTreeMap::new(),
+            views: BTreeMap::new(),
+            types: BTreeMap::new(),
+            functions: BTreeMap::new(),
+            aggregates: BTreeMap::new(),
         }
     }
 
@@ -116,6 +131,10 @@ impl KeyspaceMetadata {
                 durable_writes: true,
             },
             tables: BTreeMap::new(),
+            views: BTreeMap::new(),
+            types: BTreeMap::new(),
+            functions: BTreeMap::new(),
+            aggregates: BTreeMap::new(),
         }
     }
 
@@ -177,6 +196,102 @@ impl KeyspaceMetadata {
             self.tables.insert(table_name.to_string(), updated);
         }
         self
+    }
+
+    // ─── Views ─────────────────────────────────────────────────────────
+
+    /// Return a new `KeyspaceMetadata` with the given view added.
+    pub fn with_view(mut self, view: ViewMetadata) -> Self {
+        self.views.insert(view.name.clone(), view);
+        self
+    }
+
+    /// Return a new `KeyspaceMetadata` with the given view removed.
+    pub fn without_view(mut self, view_name: &str) -> Self {
+        self.views.remove(view_name);
+        self
+    }
+
+    /// Look up a view by name.
+    pub fn view(&self, name: &str) -> Option<&ViewMetadata> {
+        self.views.get(name)
+    }
+
+    /// Number of views in this keyspace.
+    pub fn view_count(&self) -> usize {
+        self.views.len()
+    }
+
+    // ─── User-Defined Types ────────────────────────────────────────────
+
+    /// Return a new `KeyspaceMetadata` with the given type added.
+    pub fn with_type(mut self, udt: UserType) -> Self {
+        self.types.insert(udt.name.clone(), udt);
+        self
+    }
+
+    /// Return a new `KeyspaceMetadata` with the given type removed.
+    pub fn without_type(mut self, type_name: &str) -> Self {
+        self.types.remove(type_name);
+        self
+    }
+
+    /// Look up a user-defined type by name.
+    pub fn user_type(&self, name: &str) -> Option<&UserType> {
+        self.types.get(name)
+    }
+
+    /// Number of user-defined types in this keyspace.
+    pub fn type_count(&self) -> usize {
+        self.types.len()
+    }
+
+    // ─── User-Defined Functions ────────────────────────────────────────
+
+    /// Return a new `KeyspaceMetadata` with the given function added.
+    pub fn with_function(mut self, func: UserFunction) -> Self {
+        self.functions.insert(func.signature(), func);
+        self
+    }
+
+    /// Return a new `KeyspaceMetadata` with the given function removed by signature.
+    pub fn without_function(mut self, signature: &str) -> Self {
+        self.functions.remove(signature);
+        self
+    }
+
+    /// Look up a function by signature.
+    pub fn function(&self, signature: &str) -> Option<&UserFunction> {
+        self.functions.get(signature)
+    }
+
+    /// Number of user-defined functions in this keyspace.
+    pub fn function_count(&self) -> usize {
+        self.functions.len()
+    }
+
+    // ─── User-Defined Aggregates ───────────────────────────────────────
+
+    /// Return a new `KeyspaceMetadata` with the given aggregate added.
+    pub fn with_aggregate(mut self, agg: UserAggregate) -> Self {
+        self.aggregates.insert(agg.signature(), agg);
+        self
+    }
+
+    /// Return a new `KeyspaceMetadata` with the given aggregate removed by signature.
+    pub fn without_aggregate(mut self, signature: &str) -> Self {
+        self.aggregates.remove(signature);
+        self
+    }
+
+    /// Look up an aggregate by signature.
+    pub fn aggregate(&self, signature: &str) -> Option<&UserAggregate> {
+        self.aggregates.get(signature)
+    }
+
+    /// Number of user-defined aggregates in this keyspace.
+    pub fn aggregate_count(&self) -> usize {
+        self.aggregates.len()
     }
 }
 

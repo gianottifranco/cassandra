@@ -42,6 +42,9 @@ pub struct CompactionResult {
     pub partitions_merged: u64,
     pub tombstones_dropped: u64,
     pub duration_ms: u64,
+    /// SAI segments produced during compaction (if any SAI indexes are present).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sai_segments: Vec<crate::index::sai::builder::SaiSegment>,
 }
 
 // ─── CompactionTask trait ───────────────────────────────────────────────────
@@ -510,6 +513,7 @@ mod tests {
             partitions_merged: 100,
             tombstones_dropped: 5,
             duration_ms: 42,
+            sai_segments: Vec::new(),
         };
         let json = serde_json::to_string(&r).unwrap();
         let back: CompactionResult = serde_json::from_str(&json).unwrap();

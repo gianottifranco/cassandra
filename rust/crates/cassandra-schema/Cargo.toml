@@ -14,6 +14,7 @@ serde_json = { workspace = true }
 cassandra-types = { path = "../cassandra-types" }
 md-5 = { workspace = true }
 uuid = { workspace = true }
+parking_lot = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

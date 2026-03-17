@@ -54,9 +54,12 @@
 //! - [ ] Integrate with streaming: include SAI segments in stream plan
 //! - [ ] Implement approximate nearest neighbor (HNSW or IVF) for vectors
 
+pub mod bloom;
 pub mod builder;
+pub mod hnsw;
 pub mod posting;
 pub mod query;
+pub mod segment_format;
 pub mod vector_index;
 
 use parking_lot::RwLock;
