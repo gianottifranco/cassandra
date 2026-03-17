@@ -11,40 +11,69 @@
 //! cargo test -p cassandra-diff-tests --test backup_restore_tests -- --nocapture
 //! ```
 
-use cassandra_storage::commitlog::CommitLogConfig;
+use cassandra_storage::commitlog::{CellMutation, CommitLogConfig, Mutation, MutationRow};
 use cassandra_storage::engine::{EngineConfig, StorageEngine};
-use cassandra_storage::memtable::partition::{Cell, Row};
 
 use std::path::Path;
 use tempfile::TempDir;
 
 fn test_engine(dir: &Path) -> StorageEngine {
     let config = EngineConfig {
-        data_dir: dir.join("data"),
-        commitlog_config: CommitLogConfig {
+        data_directories: vec![dir.join("data")],
+        commitlog: CommitLogConfig {
             max_segment_size: 8192,
             directory: dir.join("commitlog"),
             ..CommitLogConfig::default()
         },
         memtable_flush_threshold: 1024 * 1024,
         gc_grace_seconds: 86400,
+        ..EngineConfig::default()
     };
     StorageEngine::open(config).expect("Failed to open engine")
 }
 
-fn make_row(ck: &[u8], col: &str, val: &[u8], ts: i64) -> Row {
-    Row {
-        clustering_key: ck.to_vec(),
-        cells: vec![Cell {
-            column: col.to_string(),
-            value: Some(val.to_vec()),
-            timestamp: ts,
-            ttl: 0,
-            local_deletion_time: None,
+fn make_engine_config(dir: &Path) -> EngineConfig {
+    EngineConfig {
+        data_directories: vec![dir.join("data")],
+        commitlog: CommitLogConfig {
+            max_segment_size: 8192,
+            directory: dir.join("commitlog"),
+            ..CommitLogConfig::default()
+        },
+        memtable_flush_threshold: 1024 * 1024,
+        gc_grace_seconds: 86400,
+        ..EngineConfig::default()
+    }
+}
+
+fn make_mutation(
+    ks: &str,
+    tbl: &str,
+    pk: &[u8],
+    ck: &[u8],
+    col: &str,
+    val: &[u8],
+    ts: i64,
+) -> Mutation {
+    Mutation {
+        keyspace: ks.to_string(),
+        table: tbl.to_string(),
+        partition_key: pk.to_vec(),
+        rows: vec![MutationRow {
+            clustering_key: ck.to_vec(),
+            cells: vec![CellMutation {
+                column: col.to_string(),
+                value: Some(val.to_vec()),
+                timestamp: ts,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
             is_tombstone: false,
+            local_deletion_time: None,
         }],
-        is_tombstone: false,
-        local_deletion_time: None,
+        timestamp: ts,
+        cdc_enabled: false,
     }
 }
 
@@ -56,38 +85,28 @@ fn snapshot_creates_consistent_backup() {
 
     // Write data
     for i in 0..100 {
-        engine
-            .apply_mutation(
-                "ks",
-                "backup_test",
-                format!("pk-{i}").as_bytes().to_vec(),
-                vec![make_row(
-                    b"ck",
-                    "name",
-                    format!("user-{i}").as_bytes(),
-                    i as i64,
-                )],
-                i as i64,
-            )
-            .unwrap();
+        let m = make_mutation(
+            "ks",
+            "backup_test",
+            format!("pk-{i}").as_bytes(),
+            b"ck",
+            "name",
+            format!("user-{i}").as_bytes(),
+            i as i64,
+        );
+        engine.apply_mutation(&m).unwrap();
     }
 
     // Flush to SSTable
-    engine.flush_cf("ks", "backup_test").unwrap();
+    engine.flush_cf("ks.backup_test").unwrap();
 
     // Create snapshot
-    let snap_path = engine.snapshot("backup-drill-1").unwrap();
-    assert!(snap_path.exists(), "Snapshot directory should be created");
-
-    // Snapshot should contain SSTable files
-    let snap_files: Vec<_> = std::fs::read_dir(&snap_path)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
-
-    println!("Snapshot contains {} files", snap_files.len());
+    let manifest = engine
+        .snapshot("backup-drill-1", "ks", "backup_test", None)
+        .unwrap();
+    println!("Snapshot contains {} files", manifest.files.len());
     assert!(
-        !snap_files.is_empty(),
+        !manifest.files.is_empty(),
         "Snapshot should contain at least one file"
     );
 }
@@ -105,50 +124,45 @@ fn rollback_drill_validates_data_integrity() {
         let engine = test_engine(dir.path());
 
         for i in 0..50 {
-            engine
-                .apply_mutation(
-                    "ks",
-                    "rollback_test",
-                    format!("pk-{i}").as_bytes().to_vec(),
-                    vec![make_row(b"ck", "v", format!("v1-{i}").as_bytes(), i as i64)],
-                    i as i64,
-                )
-                .unwrap();
+            let m = make_mutation(
+                "ks",
+                "rollback_test",
+                format!("pk-{i}").as_bytes(),
+                b"ck",
+                "v",
+                format!("v1-{i}").as_bytes(),
+                i as i64,
+            );
+            engine.apply_mutation(&m).unwrap();
         }
 
-        engine.flush_cf("ks", "rollback_test").unwrap();
+        engine.flush_cf("ks.rollback_test").unwrap();
 
         // Take snapshot (rollback point)
-        let snap = engine.snapshot("rollback-point").unwrap();
-        assert!(snap.exists());
+        let manifest = engine
+            .snapshot("rollback-point", "ks", "rollback_test", None)
+            .unwrap();
+        assert!(!manifest.files.is_empty());
 
         // Phase 2: Write MORE data (simulates post-migration writes)
         for i in 50..100 {
-            engine
-                .apply_mutation(
-                    "ks",
-                    "rollback_test",
-                    format!("pk-{i}").as_bytes().to_vec(),
-                    vec![make_row(
-                        b"ck",
-                        "v",
-                        format!("v2-{i}").as_bytes(),
-                        (i + 100) as i64,
-                    )],
-                    (i + 100) as i64,
-                )
-                .unwrap();
+            let m = make_mutation(
+                "ks",
+                "rollback_test",
+                format!("pk-{i}").as_bytes(),
+                b"ck",
+                "v",
+                format!("v2-{i}").as_bytes(),
+                (i + 100) as i64,
+            );
+            engine.apply_mutation(&m).unwrap();
         }
 
         // Verify both pre and post-snapshot data exists
-        let pre = engine
-            .read_partition("ks", "rollback_test", b"pk-0")
-            .unwrap();
+        let pre = engine.read_partition("ks", "rollback_test", b"pk-0");
         assert!(pre.is_some(), "Pre-snapshot data should exist");
 
-        let post = engine
-            .read_partition("ks", "rollback_test", b"pk-75")
-            .unwrap();
+        let post = engine.read_partition("ks", "rollback_test", b"pk-75");
         assert!(
             post.is_some(),
             "Post-snapshot data should exist before rollback"
@@ -183,52 +197,32 @@ fn multiple_snapshots_coexist() {
     let engine = test_engine(dir.path());
 
     // Write and flush
-    engine
-        .apply_mutation(
-            "ks",
-            "multi_snap",
-            b"pk1".to_vec(),
-            vec![make_row(b"ck", "v", b"data1", 1)],
-            1,
-        )
-        .unwrap();
-    engine.flush_cf("ks", "multi_snap").unwrap();
+    let m = make_mutation("ks", "multi_snap", b"pk1", b"ck", "v", b"data1", 1);
+    engine.apply_mutation(&m).unwrap();
+    engine.flush_cf("ks.multi_snap").unwrap();
 
-    let snap1 = engine.snapshot("snap-a").unwrap();
+    let manifest1 = engine
+        .snapshot("snap-a", "ks", "multi_snap", None)
+        .unwrap();
 
     // Write more
-    engine
-        .apply_mutation(
-            "ks",
-            "multi_snap",
-            b"pk2".to_vec(),
-            vec![make_row(b"ck", "v", b"data2", 2)],
-            2,
-        )
+    let m = make_mutation("ks", "multi_snap", b"pk2", b"ck", "v", b"data2", 2);
+    engine.apply_mutation(&m).unwrap();
+    engine.flush_cf("ks.multi_snap").unwrap();
+
+    let manifest2 = engine
+        .snapshot("snap-b", "ks", "multi_snap", None)
         .unwrap();
-    engine.flush_cf("ks", "multi_snap").unwrap();
 
-    let snap2 = engine.snapshot("snap-b").unwrap();
-
-    assert!(snap1.exists());
-    assert!(snap2.exists());
-    assert_ne!(snap1, snap2);
+    assert!(!manifest1.files.is_empty());
+    assert!(!manifest2.files.is_empty());
 }
 
 /// Snapshot + commit log replay = complete recovery.
 #[test]
 fn snapshot_plus_replay_full_recovery() {
     let dir = TempDir::new().unwrap();
-    let config = EngineConfig {
-        data_dir: dir.path().join("data"),
-        commitlog_config: CommitLogConfig {
-            max_segment_size: 8192,
-            directory: dir.path().join("commitlog"),
-            ..CommitLogConfig::default()
-        },
-        memtable_flush_threshold: 1024 * 1024,
-        gc_grace_seconds: 86400,
-    };
+    let config = make_engine_config(dir.path());
 
     // Write data, flush some, leave some in memtable
     {
@@ -236,30 +230,34 @@ fn snapshot_plus_replay_full_recovery() {
 
         // Flushed data (in SSTable)
         for i in 0..30 {
-            engine
-                .apply_mutation(
-                    "ks",
-                    "recovery",
-                    format!("flushed-{i}").as_bytes().to_vec(),
-                    vec![make_row(b"ck", "v", b"flushed", i as i64)],
-                    i as i64,
-                )
-                .unwrap();
+            let m = make_mutation(
+                "ks",
+                "recovery",
+                format!("flushed-{i}").as_bytes(),
+                b"ck",
+                "v",
+                b"flushed",
+                i as i64,
+            );
+            engine.apply_mutation(&m).unwrap();
         }
-        engine.flush_cf("ks", "recovery").unwrap();
-        engine.snapshot("recovery-snap").unwrap();
+        engine.flush_cf("ks.recovery").unwrap();
+        engine
+            .snapshot("recovery-snap", "ks", "recovery", None)
+            .unwrap();
 
         // Unflushed data (only in commit log)
         for i in 30..50 {
-            engine
-                .apply_mutation(
-                    "ks",
-                    "recovery",
-                    format!("unflushed-{i}").as_bytes().to_vec(),
-                    vec![make_row(b"ck", "v", b"unflushed", i as i64)],
-                    i as i64,
-                )
-                .unwrap();
+            let m = make_mutation(
+                "ks",
+                "recovery",
+                format!("unflushed-{i}").as_bytes(),
+                b"ck",
+                "v",
+                b"unflushed",
+                i as i64,
+            );
+            engine.apply_mutation(&m).unwrap();
         }
 
         // Sync commit log but don't flush memtable
@@ -273,31 +271,21 @@ fn snapshot_plus_replay_full_recovery() {
         println!("Recovery: replayed {replayed} mutations from commit log");
 
         // Commit log replay recovers unflushed mutations.
-        // Flushed mutations were already committed to SSTable and their CL segments
-        // were discarded, so they are NOT in the commit log.
-        // They survive restart ONLY if the SSTable scanner finds them on disk.
         assert!(
             replayed > 0,
             "Commit log should have unflushed mutations to replay"
         );
 
-        // Unflushed data (written after flush, before crash) should be available
-        // via commit log replay.
-        let unflushed = engine
-            .read_partition("ks", "recovery", b"unflushed-30")
-            .unwrap();
+        // Unflushed data should be available via commit log replay.
+        let unflushed = engine.read_partition("ks", "recovery", b"unflushed-30");
         assert!(
             unflushed.is_some(),
             "Unflushed data should be recovered via commit log replay"
         );
 
-        // NOTE: Flushed data (flushed-0..flushed-29) depends on SSTable scanner
-        // finding the files in the nested directory structure. This is a known
-        // limitation tracked in the compatibility matrix. The SSTable files exist
-        // on disk but the scanner may not locate them in all directory layouts.
-        let flushed = engine
-            .read_partition("ks", "recovery", b"flushed-0")
-            .unwrap();
+        // NOTE: Flushed data depends on SSTable scanner finding the files
+        // in the nested directory structure. This is a known limitation.
+        let flushed = engine.read_partition("ks", "recovery", b"flushed-0");
         if flushed.is_none() {
             println!(
                 "NOTE: Flushed data not found after restart — SSTable scan limitation. \

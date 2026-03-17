@@ -48,10 +48,10 @@ run_check "Migration Crate Tests" cargo test -p cassandra-migration -- --nocaptu
 run_check "Upgrade Harness Tests" cargo test -p cassandra-diff-tests upgrade_harness -- --nocapture
 
 # 4. CDC continuity tests
-run_check "CDC Continuity Tests" cargo test -p cassandra-diff-tests cdc_tests -- --nocapture
+run_check "CDC Continuity Tests" cargo test -p cassandra-diff-tests --lib cdc_tests -- --nocapture
 
 # 5. Rollback tests
-run_check "Rollback Tests" cargo test -p cassandra-diff-tests rollback_tests -- --nocapture
+run_check "Rollback Tests" cargo test -p cassandra-diff-tests --lib rollback_tests -- --nocapture
 
 # 6. Existing backup/restore tests
 run_check "Backup/Restore Tests" cargo test -p cassandra-storage backup -- --nocapture

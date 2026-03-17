@@ -4,7 +4,8 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::BTreeSet;
+    use std::fs;
     use tempfile::TempDir;
 
     fn make_cdc_segments(dir: &std::path::Path, ids: &[u64]) {

@@ -7,7 +7,7 @@
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::fs;
     use tempfile::TempDir;
 
     fn write_data(dir: &std::path::Path, prefix: &str, count: usize) {

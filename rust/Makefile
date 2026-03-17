@@ -2,7 +2,7 @@
 # or more contributor license agreements.
 # See the NOTICE file and LICENSE.txt at the repository root.
 
-.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate gap-audit
+.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate gap-audit cluster-validate capture-evidence phase26-validate
 
 # Default target
 all: check-all
@@ -138,11 +138,11 @@ upgrade-test:
 
 ## Run CDC continuity tests
 cdc-test:
-	cargo test -p cassandra-diff-tests cdc_tests -- --nocapture
+	cargo test -p cassandra-diff-tests --lib cdc_tests -- --nocapture
 
 ## Run rollback validation tests
 rollback-test:
-	cargo test -p cassandra-diff-tests rollback_tests -- --nocapture
+	cargo test -p cassandra-diff-tests --lib rollback_tests -- --nocapture
 
 ## Run full migration validation suite
 validate-migration: migration-test upgrade-test cdc-test rollback-test
@@ -186,4 +186,24 @@ final-validate: check-all chaos-test soak-test perf-test fuzz-test security-test
 	@echo "    ✅ Performance budgets (ADR-015)"
 	@echo "    ✅ Property-based fuzz tests"
 	@echo "    ✅ Security audit"
+	@echo "═══════════════════════════════════════════════════════════"
+
+## ── Phase 26: Final Validation ───────────────────────────────────────
+
+## Run cluster validation (Tier 1: single-node only)
+cluster-validate:
+	bash scripts/cluster-validate.sh --single-node-only
+
+## Capture evidence for all test suites
+capture-evidence:
+	bash scripts/capture-evidence.sh
+
+## Run Phase 26 full validation
+phase26-validate: check-all chaos-test soak-test perf-test fuzz-test security-test backup-test capture-evidence cluster-validate
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════"
+	@echo "  ✓ Phase 26 Validation Complete"
+	@echo "═══════════════════════════════════════════════════════════"
+	@echo "  See docs/rewrite/rc-gate-checklist.md for RC assessment"
+	@echo "  See evidence/phase-26/ for test logs"
 	@echo "═══════════════════════════════════════════════════════════"
