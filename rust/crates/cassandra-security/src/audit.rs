@@ -397,7 +397,7 @@ mod tests {
 
         let event =
             AuditEvent::now(AuditEventType::DmlRead, "reader", "::1").with_query("SELECT * FROM t");
-        async_logger.log(event);
+        async_logger.log(&event);
 
         // Drop the sender to signal shutdown
         drop(async_logger);

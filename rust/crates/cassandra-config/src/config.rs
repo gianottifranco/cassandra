@@ -161,7 +161,41 @@ pub struct CassandraConfig {
     pub authorizer: Option<AuthorizerConfig>,
 
     #[serde(default)]
-    pub role_manager: Option<String>,
+    pub role_manager: Option<RoleManagerConfig>,
+
+    #[serde(default)]
+    pub network_authorizer: Option<NetworkAuthorizerConfig>,
+
+    #[serde(default)]
+    pub internode_authenticator: Option<InternodeAuthenticatorConfig>,
+
+    #[serde(default)]
+    pub cidr_authorizer: Option<CidrAuthorizerConfig>,
+
+    // ── Auth Cache ──
+    /// Validity period for permissions cache in milliseconds.
+    #[serde(default = "defaults::permissions_validity_ms")]
+    pub permissions_validity_in_ms: u64,
+
+    /// Max entries in the permissions cache.
+    #[serde(default = "defaults::permissions_cache_max_entries")]
+    pub permissions_cache_max_entries: usize,
+
+    /// Validity period for roles cache in milliseconds.
+    #[serde(default = "defaults::roles_validity_ms")]
+    pub roles_validity_in_ms: u64,
+
+    /// Max entries in the roles cache.
+    #[serde(default = "defaults::roles_cache_max_entries")]
+    pub roles_cache_max_entries: usize,
+
+    /// Validity period for credentials cache in milliseconds.
+    #[serde(default = "defaults::credentials_validity_ms")]
+    pub credentials_validity_in_ms: u64,
+
+    /// Max entries in the credentials cache.
+    #[serde(default = "defaults::credentials_cache_max_entries")]
+    pub credentials_cache_max_entries: usize,
 
     // ── TLS / Encryption ──
     #[serde(default)]
@@ -214,6 +248,44 @@ pub struct AuthorizerConfig {
     pub class_name: String,
     #[serde(default)]
     pub parameters: std::collections::HashMap<String, String>,
+}
+
+/// Role manager configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct RoleManagerConfig {
+    /// Class name: "CassandraRoleManager", "InMemoryRoleManager"
+    pub class_name: String,
+    #[serde(default)]
+    pub parameters: std::collections::HashMap<String, String>,
+}
+
+/// Network authorizer configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkAuthorizerConfig {
+    /// Class name: "AllowAllNetworkAuthorizer", "CassandraNetworkAuthorizer"
+    pub class_name: String,
+    #[serde(default)]
+    pub parameters: std::collections::HashMap<String, String>,
+}
+
+/// Internode authenticator configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InternodeAuthenticatorConfig {
+    /// Class name: "AllowAllInternodeAuthenticator", "MutualTlsInternodeAuthenticator"
+    pub class_name: String,
+    #[serde(default)]
+    pub parameters: std::collections::HashMap<String, String>,
+}
+
+/// CIDR authorizer configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct CidrAuthorizerConfig {
+    /// Whether CIDR-based authorization is enabled.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Whether to deny by default when no CIDR rules exist.
+    #[serde(default)]
+    pub deny_by_default: bool,
 }
 
 // ─── Encryption Config ─────────────────────────────────────────────────────
@@ -359,6 +431,27 @@ pub mod defaults {
     }
     pub fn native_transport_max_requests_per_second() -> u32 {
         25_000
+    }
+    /// Default permissions cache validity: 2000ms (Java default).
+    pub fn permissions_validity_ms() -> u64 {
+        2000
+    }
+    pub fn permissions_cache_max_entries() -> usize {
+        1000
+    }
+    /// Default roles cache validity: 2000ms (Java default).
+    pub fn roles_validity_ms() -> u64 {
+        2000
+    }
+    pub fn roles_cache_max_entries() -> usize {
+        1000
+    }
+    /// Default credentials cache validity: 2000ms (Java default).
+    pub fn credentials_validity_ms() -> u64 {
+        2000
+    }
+    pub fn credentials_cache_max_entries() -> usize {
+        1000
     }
 }
 

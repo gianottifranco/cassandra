@@ -63,17 +63,16 @@ impl Authenticator for AllowAllAuthenticator {
     }
 }
 
-/// PasswordAuthenticator stub — accepts PLAIN SASL credentials.
+/// PasswordAuthenticator — PLAIN SASL credential parser.
 ///
-/// In this phase, accepts any non-empty username/password.
+/// Parses SASL PLAIN tokens (\0username\0password) for the native protocol.
+/// In production, `cassandra-server::NativeAuthWrapper` wraps a
+/// `cassandra-security::PasswordAuthenticator` for real bcrypt verification.
+/// This standalone implementation accepts any non-empty credentials and is
+/// only used when the native-protocol crate is used without the server layer.
 ///
 /// ## Java Oracle
 /// - `org.apache.cassandra.auth.PasswordAuthenticator`
-///
-/// ## TODO
-/// - Real credential store lookup
-/// - Bcrypt verification
-/// - Rate limiting
 pub struct PasswordAuthenticator;
 
 impl Authenticator for PasswordAuthenticator {

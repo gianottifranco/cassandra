@@ -21,6 +21,7 @@ uuid = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 md-5 = { workspace = true }
+dashmap = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

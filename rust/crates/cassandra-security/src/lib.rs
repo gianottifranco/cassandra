@@ -39,11 +39,20 @@
 
 pub mod audit;
 pub mod auth;
+pub mod auth_service;
 pub mod authz;
+pub mod cache;
 pub mod cidr;
+pub mod credentials_cache;
 pub mod fql;
+pub mod identity_mapping;
+pub mod internode_auth;
 pub mod masking;
+pub mod mtls;
+pub mod network_auth;
+pub mod permissions_cache;
 pub mod roles;
+pub mod roles_cache;
 pub mod tls;
 
 // Re-export key types
@@ -55,10 +64,23 @@ pub use auth::{
     AllowAllAuthenticator, AuthenticatedUser, Authenticator, Credentials, PasswordAuthenticator,
 };
 pub use authz::{AllowAllAuthorizer, Authorizer, CassandraAuthorizer, Permission, Resource};
-pub use cidr::CidrAuthorizer;
+pub use auth_service::AuthManager;
+pub use cache::{AuthCache, AuthCacheConfig};
+pub use cidr::{CidrAuthorizer, CidrGroup, CidrGroupsManager, InMemoryCidrGroupsManager};
+pub use credentials_cache::CredentialsCache;
 pub use fql::{FqlLogger, FqlOptions, FqlReader, FqlRecord};
+pub use identity_mapping::{IdentityRoleMapper, InMemoryIdentityRoleMapper};
+pub use internode_auth::{
+    AllowAllInternodeAuthenticator, InternodeAuthenticator, MutualTlsInternodeAuthenticator,
+};
 pub use masking::{MaskingFunction, MaskingRegistry};
+pub use mtls::{CertificateValidator, MutualTlsAuthenticator, SpiffeCertificateValidator, SubjectCnValidator};
+pub use network_auth::{
+    AllowAllNetworkAuthorizer, CassandraNetworkAuthorizer, DCPermissions, NetworkAuthorizer,
+};
+pub use permissions_cache::PermissionsCache;
 pub use roles::{InMemoryRoleManager, Role, RoleManager, RoleOptions};
+pub use roles_cache::RolesCache;
 pub use tls::{ReloadableTlsAcceptor, TlsConfig, TlsVersion};
 
 // ─── Security Error ────────────────────────────────────────────────────────

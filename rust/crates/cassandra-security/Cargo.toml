@@ -32,6 +32,9 @@ rustls-pemfile = { workspace = true }
 # Auth
 bcrypt = { workspace = true }
 
+# X.509 certificate parsing (mTLS)
+x509-parser = { version = "0.16", features = ["verify"] }
+
 # CIDR
 ipnet = { workspace = true }
 

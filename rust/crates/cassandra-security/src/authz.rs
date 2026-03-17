@@ -100,7 +100,61 @@ impl fmt::Display for Resource {
     }
 }
 
+impl std::str::FromStr for Permission {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "CREATE" => Ok(Permission::Create),
+            "ALTER" => Ok(Permission::Alter),
+            "DROP" => Ok(Permission::Drop),
+            "SELECT" => Ok(Permission::Select),
+            "MODIFY" => Ok(Permission::Modify),
+            "AUTHORIZE" => Ok(Permission::Authorize),
+            "DESCRIBE" => Ok(Permission::Describe),
+            "EXECUTE" => Ok(Permission::Execute),
+            "UNMASK" => Ok(Permission::Unmask),
+            "SELECT_MASKED" => Ok(Permission::SelectMasked),
+            _ => Err(format!("unknown permission: {}", s)),
+        }
+    }
+}
+
 impl Resource {
+    /// Serialize to CQL-compatible string for storage in system_auth tables.
+    pub fn to_cql_string(&self) -> String {
+        match self {
+            Self::Root => "data".to_string(),
+            Self::Keyspace(ks) => format!("data/{}", ks),
+            Self::Table { keyspace, table } => format!("data/{}/{}", keyspace, table),
+            Self::Function { keyspace, name } => format!("functions/{}/{}", keyspace, name),
+            Self::Role(name) => format!("roles/{}", name),
+            Self::Jmx(name) => format!("mbean/{}", name),
+        }
+    }
+
+    /// Deserialize from CQL storage string.
+    pub fn from_cql_string(s: &str) -> Option<Self> {
+        if s == "data" {
+            return Some(Resource::Root);
+        }
+        let parts: Vec<&str> = s.splitn(3, '/').collect();
+        match parts.as_slice() {
+            ["data", ks] => Some(Resource::Keyspace(ks.to_string())),
+            ["data", ks, table] => Some(Resource::Table {
+                keyspace: ks.to_string(),
+                table: table.to_string(),
+            }),
+            ["functions", ks, name] => Some(Resource::Function {
+                keyspace: ks.to_string(),
+                name: name.to_string(),
+            }),
+            ["roles", name] => Some(Resource::Role(name.to_string())),
+            ["mbean", name] => Some(Resource::Jmx(name.to_string())),
+            _ => None,
+        }
+    }
+
     /// Get the parent resource for hierarchical permission checks.
     pub fn parent(&self) -> Option<Resource> {
         match self {
@@ -498,6 +552,36 @@ mod tests {
             ),
             "TABLE ks.t"
         );
+    }
+
+    #[test]
+    fn resource_cql_roundtrip() {
+        let resources = vec![
+            Resource::Root,
+            Resource::Keyspace("ks".into()),
+            Resource::Table {
+                keyspace: "ks".into(),
+                table: "t".into(),
+            },
+            Resource::Function {
+                keyspace: "ks".into(),
+                name: "fn".into(),
+            },
+            Resource::Role("admin".into()),
+            Resource::Jmx("bean".into()),
+        ];
+        for r in resources {
+            let s = r.to_cql_string();
+            let parsed = Resource::from_cql_string(&s).unwrap();
+            assert_eq!(parsed, r);
+        }
+    }
+
+    #[test]
+    fn permission_from_str() {
+        assert_eq!("SELECT".parse::<Permission>().unwrap(), Permission::Select);
+        assert_eq!("MODIFY".parse::<Permission>().unwrap(), Permission::Modify);
+        assert!("INVALID".parse::<Permission>().is_err());
     }
 
     #[test]

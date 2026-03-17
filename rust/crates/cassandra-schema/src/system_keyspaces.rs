@@ -989,6 +989,51 @@ pub fn auth_cidr_permissions_table() -> SystemTableDef {
     }
 }
 
+/// `system_auth.cidr_groups`
+pub fn auth_cidr_groups_table() -> SystemTableDef {
+    SystemTableDef {
+        keyspace: schema_constants::AUTH_KEYSPACE,
+        name: "cidr_groups",
+        comment: "named CIDR group definitions",
+        columns: vec![
+            SystemColumnSpec::partition_key("cidr_group", CqlType::Varchar, 0),
+            SystemColumnSpec::regular("cidrs", CqlType::Set(Box::new(CqlType::Varchar), false)),
+        ],
+        gc_grace_seconds: 7776000,
+        default_ttl: 0,
+    }
+}
+
+/// `system_auth.identity_to_roles`
+pub fn auth_identity_to_roles_table() -> SystemTableDef {
+    SystemTableDef {
+        keyspace: schema_constants::AUTH_KEYSPACE,
+        name: "identity_to_roles",
+        comment: "maps certificate identities to roles",
+        columns: vec![
+            SystemColumnSpec::partition_key("identity", CqlType::Varchar, 0),
+            SystemColumnSpec::regular("role", CqlType::Varchar),
+        ],
+        gc_grace_seconds: 7776000,
+        default_ttl: 0,
+    }
+}
+
+/// `system_auth.resource_role_index`
+pub fn auth_resource_role_index_table() -> SystemTableDef {
+    SystemTableDef {
+        keyspace: schema_constants::AUTH_KEYSPACE,
+        name: "resource_role_index",
+        comment: "reverse index from resource to roles with permissions",
+        columns: vec![
+            SystemColumnSpec::partition_key("resource", CqlType::Varchar, 0),
+            SystemColumnSpec::clustering("role", CqlType::Varchar, 0),
+        ],
+        gc_grace_seconds: 7776000,
+        default_ttl: 0,
+    }
+}
+
 /// Returns all table definitions for the `system_auth` keyspace.
 pub fn system_auth_tables() -> Vec<SystemTableDef> {
     vec![
@@ -997,6 +1042,9 @@ pub fn system_auth_tables() -> Vec<SystemTableDef> {
         auth_role_permissions_table(),
         auth_network_permissions_table(),
         auth_cidr_permissions_table(),
+        auth_cidr_groups_table(),
+        auth_identity_to_roles_table(),
+        auth_resource_role_index_table(),
     ]
 }
 
@@ -1339,7 +1387,7 @@ mod tests {
     #[test]
     fn system_auth_has_all_tables() {
         let tables = system_auth_tables();
-        assert!(tables.len() >= 5);
+        assert!(tables.len() >= 8);
         let names: Vec<&str> = tables.iter().map(|t| t.name).collect();
         assert!(names.contains(&"roles"));
         assert!(names.contains(&"role_members"));

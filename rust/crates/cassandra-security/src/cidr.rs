@@ -13,6 +13,8 @@ use std::net::IpAddr;
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
 
+use dashmap::DashMap;
+
 use crate::SecurityError;
 
 // ─── CIDR Group ────────────────────────────────────────────────────────────
@@ -22,6 +24,85 @@ use crate::SecurityError;
 pub struct CidrGroup {
     pub name: String,
     pub ranges: Vec<String>, // Stored as strings for serialization; parsed on check.
+}
+
+// ─── CIDR Groups Manager ──────────────────────────────────────────────────
+
+/// Manages named CIDR groups (CRUD operations).
+///
+/// ## Java Oracle
+/// - `org.apache.cassandra.auth.CIDRGroupsMappingManager`
+pub trait CidrGroupsManager: Send + Sync {
+    fn create_group(&self, group: CidrGroup) -> Result<(), SecurityError>;
+    fn get_group(&self, name: &str) -> Option<CidrGroup>;
+    fn update_group(&self, name: &str, ranges: Vec<String>) -> Result<(), SecurityError>;
+    fn delete_group(&self, name: &str) -> Result<(), SecurityError>;
+    fn list_groups(&self) -> Vec<CidrGroup>;
+}
+
+/// In-memory CIDR groups manager.
+pub struct InMemoryCidrGroupsManager {
+    groups: DashMap<String, CidrGroup>,
+}
+
+impl InMemoryCidrGroupsManager {
+    pub fn new() -> Self {
+        Self {
+            groups: DashMap::new(),
+        }
+    }
+}
+
+impl Default for InMemoryCidrGroupsManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CidrGroupsManager for InMemoryCidrGroupsManager {
+    fn create_group(&self, group: CidrGroup) -> Result<(), SecurityError> {
+        if self.groups.contains_key(&group.name) {
+            return Err(SecurityError::AuthError(format!(
+                "CIDR group '{}' already exists",
+                group.name
+            )));
+        }
+        // Validate ranges
+        for r in &group.ranges {
+            r.parse::<IpNet>()
+                .map_err(|e| SecurityError::AuthError(format!("invalid CIDR '{}': {}", r, e)))?;
+        }
+        self.groups.insert(group.name.clone(), group);
+        Ok(())
+    }
+
+    fn get_group(&self, name: &str) -> Option<CidrGroup> {
+        self.groups.get(name).map(|g| g.clone())
+    }
+
+    fn update_group(&self, name: &str, ranges: Vec<String>) -> Result<(), SecurityError> {
+        for r in &ranges {
+            r.parse::<IpNet>()
+                .map_err(|e| SecurityError::AuthError(format!("invalid CIDR '{}': {}", r, e)))?;
+        }
+        let mut entry = self
+            .groups
+            .get_mut(name)
+            .ok_or_else(|| SecurityError::AuthError(format!("CIDR group '{}' not found", name)))?;
+        entry.ranges = ranges;
+        Ok(())
+    }
+
+    fn delete_group(&self, name: &str) -> Result<(), SecurityError> {
+        self.groups
+            .remove(name)
+            .ok_or_else(|| SecurityError::AuthError(format!("CIDR group '{}' not found", name)))?;
+        Ok(())
+    }
+
+    fn list_groups(&self) -> Vec<CidrGroup> {
+        self.groups.iter().map(|e| e.value().clone()).collect()
+    }
 }
 
 // ─── CIDR Authorizer ───────────────────────────────────────────────────────
@@ -232,5 +313,90 @@ mod tests {
             .unwrap();
         let list = authz.list_restrictions();
         assert_eq!(list.len(), 1);
+    }
+
+    // ─── CIDR Groups Manager Tests ───────────────────────────────────────
+
+    #[test]
+    fn create_and_get_group() {
+        let mgr = InMemoryCidrGroupsManager::new();
+        mgr.create_group(CidrGroup {
+            name: "office".into(),
+            ranges: vec!["10.0.0.0/8".into()],
+        })
+        .unwrap();
+        let group = mgr.get_group("office").unwrap();
+        assert_eq!(group.ranges, vec!["10.0.0.0/8".to_string()]);
+    }
+
+    #[test]
+    fn duplicate_group_fails() {
+        let mgr = InMemoryCidrGroupsManager::new();
+        mgr.create_group(CidrGroup {
+            name: "g".into(),
+            ranges: vec!["10.0.0.0/8".into()],
+        })
+        .unwrap();
+        assert!(
+            mgr.create_group(CidrGroup {
+                name: "g".into(),
+                ranges: vec![],
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn update_group() {
+        let mgr = InMemoryCidrGroupsManager::new();
+        mgr.create_group(CidrGroup {
+            name: "g".into(),
+            ranges: vec!["10.0.0.0/8".into()],
+        })
+        .unwrap();
+        mgr.update_group("g", vec!["192.168.0.0/16".into()])
+            .unwrap();
+        let group = mgr.get_group("g").unwrap();
+        assert_eq!(group.ranges, vec!["192.168.0.0/16".to_string()]);
+    }
+
+    #[test]
+    fn delete_group() {
+        let mgr = InMemoryCidrGroupsManager::new();
+        mgr.create_group(CidrGroup {
+            name: "g".into(),
+            ranges: vec!["10.0.0.0/8".into()],
+        })
+        .unwrap();
+        mgr.delete_group("g").unwrap();
+        assert!(mgr.get_group("g").is_none());
+    }
+
+    #[test]
+    fn invalid_cidr_in_group_rejected() {
+        let mgr = InMemoryCidrGroupsManager::new();
+        assert!(
+            mgr.create_group(CidrGroup {
+                name: "bad".into(),
+                ranges: vec!["not-valid".into()],
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn list_groups() {
+        let mgr = InMemoryCidrGroupsManager::new();
+        mgr.create_group(CidrGroup {
+            name: "a".into(),
+            ranges: vec!["10.0.0.0/8".into()],
+        })
+        .unwrap();
+        mgr.create_group(CidrGroup {
+            name: "b".into(),
+            ranges: vec!["172.16.0.0/12".into()],
+        })
+        .unwrap();
+        assert_eq!(mgr.list_groups().len(), 2);
     }
 }
