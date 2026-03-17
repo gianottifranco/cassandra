@@ -433,18 +433,16 @@ impl SystemAuthAuthorizer {
 
         for row in partition.live_rows(now_secs) {
             // Clustering key is the resource string
-            if let Some(ck) = row.clustering_key.first() {
-                if let Ok(stored_resource) = std::str::from_utf8(ck) {
-                    if stored_resource == resource_str {
-                        // Read permission set elements from cells
-                        for cell in &row.cells {
-                            if !cell.is_live_at(now_secs) {
-                                continue;
-                            }
-                            if let Some(perm_name) = cell.column.strip_prefix("permissions:") {
-                                if let Ok(p) = perm_name.parse::<Permission>() {
-                                    perms.push(p);
-                                }
+            if let Ok(stored_resource) = std::str::from_utf8(&row.clustering_key) {
+                if stored_resource == resource_str {
+                    // Read permission set elements from cells
+                    for cell in &row.cells {
+                        if !cell.is_live_at(now_secs) {
+                            continue;
+                        }
+                        if let Some(perm_name) = cell.column.strip_prefix("permissions:") {
+                            if let Ok(p) = perm_name.parse::<Permission>() {
+                                perms.push(p);
                             }
                         }
                     }
@@ -598,19 +596,17 @@ impl Authorizer for SystemAuthAuthorizer {
 
             let now_secs = (Self::now() / 1_000_000) as i32;
             for row in partition.live_rows(now_secs) {
-                if let Some(ck) = row.clustering_key.first() {
-                    if let Ok(stored_resource_str) = std::str::from_utf8(ck) {
-                        if let Some(stored_resource) = Resource::from_cql_string(stored_resource_str) {
-                            // Match if resource is Root (list all) or matches
-                            if *resource == Resource::Root || stored_resource == *resource {
-                                for cell in &row.cells {
-                                    if !cell.is_live_at(now_secs) {
-                                        continue;
-                                    }
-                                    if let Some(perm_name) = cell.column.strip_prefix("permissions:") {
-                                        if let Ok(p) = perm_name.parse::<Permission>() {
-                                            result.push((p, stored_resource.clone()));
-                                        }
+                if let Ok(stored_resource_str) = std::str::from_utf8(&row.clustering_key) {
+                    if let Some(stored_resource) = Resource::from_cql_string(stored_resource_str) {
+                        // Match if resource is Root (list all) or matches
+                        if *resource == Resource::Root || stored_resource == *resource {
+                            for cell in &row.cells {
+                                if !cell.is_live_at(now_secs) {
+                                    continue;
+                                }
+                                if let Some(perm_name) = cell.column.strip_prefix("permissions:") {
+                                    if let Ok(p) = perm_name.parse::<Permission>() {
+                                        result.push((p, stored_resource.clone()));
                                     }
                                 }
                             }
