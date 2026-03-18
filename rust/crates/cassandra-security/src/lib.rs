@@ -69,8 +69,8 @@ pub use audit_filter::{AuditCategory, AuditFilter, AuditLogContext};
 pub use auth::{
     AllowAllAuthenticator, AuthenticatedUser, Authenticator, Credentials, PasswordAuthenticator,
 };
-pub use authz::{AllowAllAuthorizer, Authorizer, CassandraAuthorizer, Permission, Resource};
 pub use auth_service::AuthManager;
+pub use authz::{AllowAllAuthorizer, Authorizer, CassandraAuthorizer, Permission, Resource};
 pub use cache::{AuthCache, AuthCacheConfig};
 pub use cidr::{CidrAuthorizer, CidrGroup, CidrGroupsManager, InMemoryCidrGroupsManager};
 pub use credentials_cache::CredentialsCache;
@@ -80,7 +80,9 @@ pub use internode_auth::{
     AllowAllInternodeAuthenticator, InternodeAuthenticator, MutualTlsInternodeAuthenticator,
 };
 pub use masking::{MaskingFunction, MaskingRegistry};
-pub use mtls::{CertificateValidator, MutualTlsAuthenticator, SpiffeCertificateValidator, SubjectCnValidator};
+pub use mtls::{
+    CertificateValidator, MutualTlsAuthenticator, SpiffeCertificateValidator, SubjectCnValidator,
+};
 pub use network_auth::{
     AllowAllNetworkAuthorizer, CassandraNetworkAuthorizer, DCPermissions, NetworkAuthorizer,
 };
@@ -90,9 +92,11 @@ pub use roles_cache::RolesCache;
 pub use tls::{ReloadableTlsAcceptor, TlsConfig, TlsVersion};
 
 // Encryption-at-rest
-pub use crypto::{AesCbcProvider, CryptoProvider, FileKeyProvider, KeyProvider, NoOpCryptoProvider};
+pub use crypto::{
+    AesCbcProvider, CryptoProvider, FileKeyProvider, KeyProvider, NoOpCryptoProvider,
+};
 pub use encryption_at_rest::{
-    create_encryptor, NoOpStorageEncryptor, StorageEncryptor, TdeStorageEncryptor,
+    NoOpStorageEncryptor, StorageEncryptor, TdeStorageEncryptor, create_encryptor,
 };
 pub use encryption_context::{EncryptionContext, EncryptionHeader};
 pub use tde::{KeyProviderConfig, TransparentDataEncryptionOptions};

@@ -169,8 +169,7 @@ mod tests {
 
     #[test]
     fn serde_round_trip_function() {
-        let udf = UserFunction::new("ks", "f", "text", "java", "return x;")
-            .with_arg("x", "text");
+        let udf = UserFunction::new("ks", "f", "text", "java", "return x;").with_arg("x", "text");
         let json = serde_json::to_string(&udf).unwrap();
         let deserialized: UserFunction = serde_json::from_str(&json).unwrap();
         assert_eq!(udf, deserialized);
@@ -178,8 +177,7 @@ mod tests {
 
     #[test]
     fn serde_round_trip_aggregate() {
-        let uda = UserAggregate::new("ks", "a", "int", "sfn")
-            .with_arg_type("int");
+        let uda = UserAggregate::new("ks", "a", "int", "sfn").with_arg_type("int");
         let json = serde_json::to_string(&uda).unwrap();
         let deserialized: UserAggregate = serde_json::from_str(&json).unwrap();
         assert_eq!(uda, deserialized);

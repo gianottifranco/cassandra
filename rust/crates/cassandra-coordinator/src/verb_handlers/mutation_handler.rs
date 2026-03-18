@@ -77,7 +77,7 @@ impl MutationVerbHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::{CoordinatedMutation, MutationRow, CellMutation};
+    use crate::write::{CellMutation, CoordinatedMutation, MutationRow};
 
     fn make_mutation() -> CoordinatedMutation {
         CoordinatedMutation::simple(

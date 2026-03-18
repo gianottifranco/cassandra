@@ -75,12 +75,12 @@ pub use snitch::{
     GossipingPropertyFileSnitch, PropertyFileSnitch, RackInferringSnitch, SimpleSnitch, Snitch,
     create_snitch,
 };
-pub use token_allocator::{TokenAllocator, create_token_allocator};
 pub use tcm::bridge::{ControlPlaneBridge, ControlPlaneMode};
 pub use tcm::{
     Epoch, LockedRanges, MetadataLog, NodeDirectory, Placement, TcmError, TcmMetadata,
     Transformation,
 };
+pub use token_allocator::{TokenAllocator, create_token_allocator};
 pub use topology::{
     StreamPlanDescriptor, StreamRangeRequest, TopologyCoordinator, TopologyError,
     TopologyOperation, TopologyState,

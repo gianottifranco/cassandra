@@ -326,14 +326,11 @@ impl MigrationCoordinator {
     }
 
     /// Cast a vote in the current election.
-    pub fn cast_vote(
-        &mut self,
-        voter: NodeId,
-        candidate: NodeId,
-    ) -> Result<(), MigrationError> {
-        let election = self.election.as_mut().ok_or_else(|| {
-            MigrationError::InvalidState("no election in progress".into())
-        })?;
+    pub fn cast_vote(&mut self, voter: NodeId, candidate: NodeId) -> Result<(), MigrationError> {
+        let election = self
+            .election
+            .as_mut()
+            .ok_or_else(|| MigrationError::InvalidState("no election in progress".into()))?;
         election.vote(voter, candidate)
     }
 
@@ -342,9 +339,10 @@ impl MigrationCoordinator {
     /// If a winner is found and it is the local node, the state transitions
     /// to `Migrating`. Returns the winner's `NodeId`.
     pub fn finalize_election(&mut self) -> Result<NodeId, MigrationError> {
-        let election = self.election.as_mut().ok_or_else(|| {
-            MigrationError::InvalidState("no election in progress".into())
-        })?;
+        let election = self
+            .election
+            .as_mut()
+            .ok_or_else(|| MigrationError::InvalidState("no election in progress".into()))?;
 
         let winner = election
             .tally()
@@ -498,7 +496,10 @@ mod tests {
 
         let transform = listener.on_gossip_event(event).unwrap();
         match transform {
-            Transformation::AssignTokens { node_id: nid, tokens } => {
+            Transformation::AssignTokens {
+                node_id: nid,
+                tokens,
+            } => {
                 assert_eq!(nid, node_id(1));
                 assert_eq!(tokens.len(), 2);
             }
@@ -521,7 +522,10 @@ mod tests {
 
         let transform = listener.on_gossip_event(event).unwrap();
         match transform {
-            Transformation::UpdateNodeState { node_id: nid, state } => {
+            Transformation::UpdateNodeState {
+                node_id: nid,
+                state,
+            } => {
                 assert_eq!(nid, node_id(1));
                 assert_eq!(state, NodeState::Leaving);
             }
@@ -561,7 +565,9 @@ mod tests {
         assert!(matches!(coord.state(), MigrationState::NotStarted));
 
         // Start election
-        coord.start_election(vec![local, node_id(2), node_id(3)]).unwrap();
+        coord
+            .start_election(vec![local, node_id(2), node_id(3)])
+            .unwrap();
         assert!(matches!(coord.state(), MigrationState::ElectionInProgress));
 
         // Cast votes: local node wins majority

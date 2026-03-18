@@ -41,11 +41,11 @@ pub mod version;
 /// Re-export commonly used types.
 pub use error::{CassandraError, CassandraResult};
 pub use estimated_histogram::EstimatedHistogram;
-pub use stages::{Stage, StageMetrics, StageRegistry};
 pub use partitioner::{
     ByteOrderedPartitioner, LocalPartitioner, LongTokenFactory, Murmur3Partitioner, Partitioner,
     RandomPartitioner, TokenFactory, create_partitioner,
 };
+pub use stages::{Stage, StageMetrics, StageRegistry};
 pub use timestamp::Timestamp;
 pub use token::Token;
 pub use tombstone::{DeletionTime, RangeTombstone};

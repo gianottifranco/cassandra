@@ -101,12 +101,10 @@ impl MetadataCollector {
     /// Record a partition key, updating min/max bounds.
     pub fn add_partition_key(&mut self, key: &[u8]) {
         self.partition_count += 1;
-        if self.min_partition_key.is_none() || key < self.min_partition_key.as_deref().unwrap()
-        {
+        if self.min_partition_key.is_none() || key < self.min_partition_key.as_deref().unwrap() {
             self.min_partition_key = Some(key.to_vec());
         }
-        if self.max_partition_key.is_none() || key > self.max_partition_key.as_deref().unwrap()
-        {
+        if self.max_partition_key.is_none() || key > self.max_partition_key.as_deref().unwrap() {
             self.max_partition_key = Some(key.to_vec());
         }
     }

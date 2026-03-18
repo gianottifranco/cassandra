@@ -607,7 +607,10 @@ mod tests {
         let d = before.diff(&after);
         assert_eq!(d.tokens_changed, vec![nid]);
         assert_eq!(d.state_changes.len(), 1);
-        assert_eq!(d.state_changes[0], (nid, NodeState::Normal, NodeState::Leaving));
+        assert_eq!(
+            d.state_changes[0],
+            (nid, NodeState::Normal, NodeState::Leaving)
+        );
     }
 
     #[test]

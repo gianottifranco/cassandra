@@ -8,8 +8,8 @@
 
 use cassandra_common::token::Token;
 
-use super::partition::{PartitionData, Row};
 use super::MemtableBackend;
+use super::partition::{PartitionData, Row};
 
 /// Boundaries for sharding the token space.
 #[derive(Debug, Clone)]

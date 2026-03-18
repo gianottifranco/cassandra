@@ -443,7 +443,10 @@ impl SystemAuthAuthorizer {
     /// Read permissions for a role on a specific resource from storage.
     fn read_permissions(&self, role: &str, resource: &Resource) -> Vec<Permission> {
         let pk = role.as_bytes().to_vec();
-        let partition = match self.engine.read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk) {
+        let partition = match self
+            .engine
+            .read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk)
+        {
             Some(p) => p,
             None => return vec![],
         };
@@ -619,7 +622,10 @@ impl Authorizer for SystemAuthAuthorizer {
 
         for role_name in &all_roles {
             let pk = role_name.as_bytes().to_vec();
-            let partition = match self.engine.read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk) {
+            let partition = match self
+                .engine
+                .read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk)
+            {
                 Some(p) => p,
                 None => continue,
             };

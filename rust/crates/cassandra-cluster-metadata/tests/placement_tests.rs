@@ -24,9 +24,7 @@ use cassandra_cluster_metadata::snitch::{
     AlibabaCloudSnitch, AzureSnitch, CloudstackSnitch, Ec2Snitch, GoogleCloudSnitch,
     PropertyFileSnitch, SimpleSnitch, Snitch,
 };
-use cassandra_cluster_metadata::token_allocator::{
-    NoReplicationTokenAllocator, TokenAllocator,
-};
+use cassandra_cluster_metadata::token_allocator::{NoReplicationTokenAllocator, TokenAllocator};
 
 fn ep(port: u16) -> Endpoint {
     Endpoint::new(SocketAddr::V4(SocketAddrV4::new(
@@ -65,12 +63,17 @@ fn nts_multi_dc_rack_awareness() {
     let strategy = NetworkTopologyStrategy::new(dc_rf);
 
     // For any token, we should get 3 replicas in dc1 and 2 in dc2
-    let replicas =
-        strategy.calculate_natural_endpoints(Token::from_raw(-2500), &ring, &snitch);
+    let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-2500), &ring, &snitch);
     assert_eq!(replicas.len(), 5);
 
-    let dc1_count = replicas.iter().filter(|e| snitch.datacenter(e) == "dc1").count();
-    let dc2_count = replicas.iter().filter(|e| snitch.datacenter(e) == "dc2").count();
+    let dc1_count = replicas
+        .iter()
+        .filter(|e| snitch.datacenter(e) == "dc1")
+        .count();
+    let dc2_count = replicas
+        .iter()
+        .filter(|e| snitch.datacenter(e) == "dc2")
+        .count();
     assert_eq!(dc1_count, 3);
     assert_eq!(dc2_count, 2);
 
@@ -95,10 +98,7 @@ fn token_allocation_balances_ownership() {
     let mut ring = TokenRing::new();
     // Start with 3 nodes, evenly spaced
     let third = (i64::MAX as i128 - i64::MIN as i128) / 3;
-    ring.add_token(
-        Token::from_raw((i64::MIN as i128 + third) as i64),
-        ep(7001),
-    );
+    ring.add_token(Token::from_raw((i64::MIN as i128 + third) as i64), ep(7001));
     ring.add_token(
         Token::from_raw((i64::MIN as i128 + 2 * third) as i64),
         ep(7002),
@@ -170,13 +170,15 @@ fn transient_replica_placement_correct() {
     ring.add_token(Token::from_raw(100), ep(7003));
     ring.add_token(Token::from_raw(200), ep(7004));
 
-    let replicas =
-        strategy.calculate_natural_replicas(Token::from_raw(-50), &ring, &snitch);
+    let replicas = strategy.calculate_natural_replicas(Token::from_raw(-50), &ring, &snitch);
     assert_eq!(replicas.len(), 3);
 
     // 2 full + 1 transient
     let full_count = replicas.iter().filter(|r: &&Replica| r.is_full()).count();
-    let trans_count = replicas.iter().filter(|r: &&Replica| r.is_transient).count();
+    let trans_count = replicas
+        .iter()
+        .filter(|r: &&Replica| r.is_transient)
+        .count();
     assert_eq!(full_count, 2);
     assert_eq!(trans_count, 1);
 
@@ -186,8 +188,7 @@ fn transient_replica_placement_correct() {
     assert!(replicas[2].is_transient);
 
     // Read endpoints should only include full replicas
-    let read_eps =
-        strategy.calculate_read_endpoints(Token::from_raw(-50), &ring, &snitch);
+    let read_eps = strategy.calculate_read_endpoints(Token::from_raw(-50), &ring, &snitch);
     assert_eq!(read_eps.len(), 2);
 }
 
@@ -307,8 +308,7 @@ fn old_nts_simple_ring_walk() {
     ring.add_token(Token::from_raw(100), ep(7003));
     ring.add_token(Token::from_raw(200), ep(7004));
 
-    let replicas =
-        strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+    let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
     assert_eq!(replicas.len(), 3);
     // Should walk clockwise: 7002, 7003, 7004
     assert_eq!(replicas[0], ep(7002));

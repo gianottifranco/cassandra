@@ -27,7 +27,7 @@ use std::cmp::Ordering;
 use std::net::IpAddr;
 
 use crate::bigint;
-use crate::codec::{CqlValue, CodecError};
+use crate::codec::{CodecError, CqlValue};
 use crate::comparator::compare_bytes;
 use crate::marshal::{MarshalError, MarshalResult};
 use crate::native::CqlType;
@@ -237,7 +237,10 @@ fn parse_int(s: &str, type_name: &str) -> MarshalResult<i64> {
 }
 
 fn parse_hex_blob(s: &str) -> MarshalResult<Vec<u8>> {
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     (0..s.len())
         .step_by(2)
         .map(|i| {

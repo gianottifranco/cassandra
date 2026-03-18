@@ -22,8 +22,8 @@ use std::time::Duration;
 
 use cassandra_cluster_metadata::gossip::handlers::register_gossip_handlers;
 use cassandra_cluster_metadata::gossip::task::{GossipTask, GossipTaskConfig};
-use cassandra_cluster_metadata::{ApplicationState, Gossiper, SeedProvider};
 use cassandra_cluster_metadata::node::Endpoint;
+use cassandra_cluster_metadata::{ApplicationState, Gossiper, SeedProvider};
 use cassandra_messaging::MessagingService;
 
 /// Helper: start a gossiper with a TCP listener and periodic task.
@@ -195,9 +195,7 @@ async fn schema_agreement_across_nodes() {
     // Wait for convergence
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
     loop {
-        if n1.gossiper.known_endpoint_count() >= 2
-            && n2.gossiper.known_endpoint_count() >= 2
-        {
+        if n1.gossiper.known_endpoint_count() >= 2 && n2.gossiper.known_endpoint_count() >= 2 {
             break;
         }
         if tokio::time::Instant::now() > deadline {

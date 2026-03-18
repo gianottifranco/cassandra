@@ -476,7 +476,11 @@ mod tests {
         let mut resp_body: &[u8] = &resp_frame.body;
         let _code = types::read_int(&mut resp_body).unwrap();
         let msg = types::read_string(&mut resp_body).unwrap();
-        assert!(msg.contains("USE_BETA"), "error message should mention USE_BETA: {}", msg);
+        assert!(
+            msg.contains("USE_BETA"),
+            "error message should mention USE_BETA: {}",
+            msg
+        );
     }
 
     #[test]

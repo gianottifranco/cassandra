@@ -61,29 +61,27 @@ fn full_data_transfer_protocol() {
 
     // Create test data
     let wire = WirePartitions {
-        entries: vec![
-            WirePartition {
-                key: b"pk1".to_vec(),
-                rows: vec![(
-                    b"ck1".to_vec(),
-                    cassandra_storage::memtable::partition::Row {
-                        clustering_key: b"ck1".to_vec(),
-                        cells: vec![cassandra_storage::memtable::partition::Cell {
-                            column: "col1".into(),
-                            value: Some(b"value1".to_vec()),
-                            timestamp: 1000,
-                            ttl: 0,
-                            local_deletion_time: None,
-                            is_tombstone: false,
-                        }],
-                        is_tombstone: false,
+        entries: vec![WirePartition {
+            key: b"pk1".to_vec(),
+            rows: vec![(
+                b"ck1".to_vec(),
+                cassandra_storage::memtable::partition::Row {
+                    clustering_key: b"ck1".to_vec(),
+                    cells: vec![cassandra_storage::memtable::partition::Cell {
+                        column: "col1".into(),
+                        value: Some(b"value1".to_vec()),
+                        timestamp: 1000,
+                        ttl: 0,
                         local_deletion_time: None,
-                    },
-                )],
-                tombstone_timestamp: None,
-                tombstone_local_deletion_time: None,
-            },
-        ],
+                        is_tombstone: false,
+                    }],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                },
+            )],
+            tombstone_timestamp: None,
+            tombstone_local_deletion_time: None,
+        }],
     };
 
     let serialized = serde_json::to_vec(&wire).unwrap();
@@ -248,11 +246,7 @@ fn receiver_handler_registration() {
     let metrics = Arc::new(StreamingMetrics::new());
     let tmp = TempDir::new().unwrap();
 
-    let receiver = Arc::new(StreamReceiver::new(
-        manager,
-        metrics,
-        tmp.path(),
-    ));
+    let receiver = Arc::new(StreamReceiver::new(manager, metrics, tmp.path()));
 
     // Register handlers — should not panic
     StreamReceiver::register_handlers(Arc::clone(&receiver), &messaging);
@@ -266,11 +260,7 @@ fn abort_mid_stream_cleanup() {
     let metrics = Arc::new(StreamingMetrics::new());
     let tmp = TempDir::new().unwrap();
 
-    let receiver = StreamReceiver::new(
-        manager,
-        metrics,
-        tmp.path(),
-    );
+    let receiver = StreamReceiver::new(manager, metrics, tmp.path());
 
     // No buffers initially
     assert_eq!(receiver.active_buffer_count(), 0);

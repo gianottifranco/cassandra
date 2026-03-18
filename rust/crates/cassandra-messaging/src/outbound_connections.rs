@@ -75,10 +75,7 @@ impl OutboundConnections {
     /// The message is classified by verb and payload size, then enqueued
     /// on the appropriate outbound connection.
     pub fn send(&self, msg: Message, timeout: Duration) -> bool {
-        let conn_type = ConnectionType::classify(
-            msg.header.verb,
-            msg.payload.len(),
-        );
+        let conn_type = ConnectionType::classify(msg.header.verb, msg.payload.len());
         let expires_at = Instant::now() + timeout;
         self.channel(conn_type).enqueue(msg, expires_at)
     }

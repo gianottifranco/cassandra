@@ -46,7 +46,11 @@ impl WirePartitions {
                 .iter()
                 .map(|(key, pd)| WirePartition {
                     key: key.clone(),
-                    rows: pd.rows.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    rows: pd
+                        .rows
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
                     tombstone_timestamp: pd.tombstone_timestamp,
                     tombstone_local_deletion_time: pd.tombstone_local_deletion_time,
                 })
@@ -202,12 +206,10 @@ impl StreamMessage {
             Verb::StreamDataResponse => {
                 Ok(Self::DataResponse(serde_json::from_slice(&msg.payload)?))
             }
-            Verb::StreamComplete => {
-                Ok(Self::Complete(serde_json::from_slice(&msg.payload)?))
-            }
-            Verb::StreamCompleteResponse => {
-                Ok(Self::CompleteResponse(serde_json::from_slice(&msg.payload)?))
-            }
+            Verb::StreamComplete => Ok(Self::Complete(serde_json::from_slice(&msg.payload)?)),
+            Verb::StreamCompleteResponse => Ok(Self::CompleteResponse(serde_json::from_slice(
+                &msg.payload,
+            )?)),
             _ => Err(StreamProtocolError::UnexpectedVerb(verb)),
         }
     }
@@ -305,7 +307,10 @@ mod tests {
     fn unknown_verb_error() {
         let msg = Message::request(Verb::Ping, 99, b"{}".to_vec());
         let err = StreamMessage::from_message(&msg).unwrap_err();
-        assert!(matches!(err, StreamProtocolError::UnexpectedVerb(Verb::Ping)));
+        assert!(matches!(
+            err,
+            StreamProtocolError::UnexpectedVerb(Verb::Ping)
+        ));
     }
 
     #[test]

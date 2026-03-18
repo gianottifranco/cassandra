@@ -63,22 +63,22 @@ mod sstable_verify;
 mod admin_client;
 
 // CLI command modules (Units 2-9)
+mod cmd_cache_hints;
 mod cmd_cluster_info;
 mod cmd_compaction;
-mod cmd_snapshots;
-mod cmd_topology;
-mod cmd_stats;
-mod cmd_cache_hints;
 mod cmd_config;
 mod cmd_logging_security;
+mod cmd_snapshots;
+mod cmd_stats;
+mod cmd_topology;
 
 // New offline SSTable tools (Unit 10)
-mod sstable_split;
-mod sstable_level_reset;
-mod sstable_repaired_at;
 mod sstable_expired_blockers;
+mod sstable_level_reset;
 mod sstable_offline_relevel;
 mod sstable_partitions;
+mod sstable_repaired_at;
+mod sstable_split;
 
 // Utility tools (Unit 11)
 mod bootstrap_monitor;
@@ -626,25 +626,43 @@ fn main() {
         Commands::Gossipinfo => cmd_cluster_info::gossip_info(&client),
 
         // ── Compaction ────────────────────────────────────────────
-        Commands::Compact { keyspace, table } => cmd_compaction::compact(&client, keyspace.as_deref(), table.as_deref()),
+        Commands::Compact { keyspace, table } => {
+            cmd_compaction::compact(&client, keyspace.as_deref(), table.as_deref())
+        }
         Commands::Cleanup { keyspace } => cmd_compaction::cleanup(&client, keyspace.as_deref()),
-        Commands::Flush { keyspace, table } => cmd_compaction::flush(&client, keyspace.as_deref(), table.as_deref()),
-        Commands::Scrub { keyspace, table } => cmd_compaction::scrub(&client, keyspace.as_deref(), table.as_deref()),
+        Commands::Flush { keyspace, table } => {
+            cmd_compaction::flush(&client, keyspace.as_deref(), table.as_deref())
+        }
+        Commands::Scrub { keyspace, table } => {
+            cmd_compaction::scrub(&client, keyspace.as_deref(), table.as_deref())
+        }
         Commands::Compactionstats => cmd_compaction::compaction_stats(&client),
         Commands::Compactionhistory => cmd_compaction::compaction_history(&client),
         Commands::Enableautocompaction => cmd_compaction::enable_autocompaction(&client),
         Commands::Disableautocompaction => cmd_compaction::disable_autocompaction(&client),
         Commands::Statusautocompaction => cmd_compaction::status_autocompaction(&client),
         Commands::Getcompactionthroughput => cmd_compaction::get_compaction_throughput(&client),
-        Commands::Setcompactionthroughput { throughput_mb } => cmd_compaction::set_compaction_throughput(&client, throughput_mb),
-        Commands::Forcecompact { keyspace, table } => cmd_compaction::force_compact(&client, &keyspace, &table),
-        Commands::Garbagecollect { keyspace } => cmd_compaction::garbage_collect(&client, keyspace.as_deref()),
+        Commands::Setcompactionthroughput { throughput_mb } => {
+            cmd_compaction::set_compaction_throughput(&client, throughput_mb)
+        }
+        Commands::Forcecompact { keyspace, table } => {
+            cmd_compaction::force_compact(&client, &keyspace, &table)
+        }
+        Commands::Garbagecollect { keyspace } => {
+            cmd_compaction::garbage_collect(&client, keyspace.as_deref())
+        }
 
         // ── Snapshots ─────────────────────────────────────────────
-        Commands::Snapshot { name, keyspaces } => cmd_snapshots::snapshot(&client, name, &keyspaces),
+        Commands::Snapshot { name, keyspaces } => {
+            cmd_snapshots::snapshot(&client, name, &keyspaces)
+        }
         Commands::Listsnapshots => cmd_snapshots::list_snapshots(&client),
         Commands::Clearsnapshot { name } => cmd_snapshots::clear_snapshot(&client, name),
-        Commands::Import { keyspace, table, directory } => cmd_snapshots::import(&client, &keyspace, &table, &directory),
+        Commands::Import {
+            keyspace,
+            table,
+            directory,
+        } => cmd_snapshots::import(&client, &keyspace, &table, &directory),
         Commands::Enablebackup => cmd_snapshots::enable_backup(&client),
         Commands::Disablebackup => cmd_snapshots::disable_backup(&client),
         Commands::Statusbackup => cmd_snapshots::status_backup(&client),
@@ -666,27 +684,48 @@ fn main() {
 
         // ── Statistics ────────────────────────────────────────────
         Commands::Tablestats { keyspace } => cmd_stats::table_stats(&client, keyspace.as_deref()),
-        Commands::Tablehistograms { keyspace, table } => cmd_stats::table_histograms(&client, keyspace.as_deref(), table.as_deref()),
+        Commands::Tablehistograms { keyspace, table } => {
+            cmd_stats::table_histograms(&client, keyspace.as_deref(), table.as_deref())
+        }
         Commands::Tpstats => cmd_stats::tp_stats(&client),
         Commands::Gcstats => cmd_stats::gc_stats(&client),
         Commands::Proxyhistograms => cmd_stats::proxy_histograms(&client),
         Commands::Clientstats => cmd_stats::client_stats(&client),
-        Commands::Toppartitions { keyspace, table, duration_ms } => cmd_stats::top_partitions(&client, keyspace.as_deref(), table.as_deref(), duration_ms),
+        Commands::Toppartitions {
+            keyspace,
+            table,
+            duration_ms,
+        } => cmd_stats::top_partitions(&client, keyspace.as_deref(), table.as_deref(), duration_ms),
         Commands::Failuredetectorinfo => cmd_stats::failure_detector_info(&client),
         Commands::Datapaths => cmd_stats::data_paths(&client),
         Commands::Refreshsizeestimates => cmd_stats::refresh_size_estimates(&client),
         Commands::Viewbuildstatus => cmd_stats::view_build_status(&client),
-        Commands::Getendpoints { keyspace, table, key } => cmd_stats::get_endpoints(&client, &keyspace, &table, &key),
-        Commands::Getsstables { keyspace, table, key } => cmd_stats::get_sstables(&client, &keyspace, &table, &key),
+        Commands::Getendpoints {
+            keyspace,
+            table,
+            key,
+        } => cmd_stats::get_endpoints(&client, &keyspace, &table, &key),
+        Commands::Getsstables {
+            keyspace,
+            table,
+            key,
+        } => cmd_stats::get_sstables(&client, &keyspace, &table, &key),
 
         // ── Cache & Hints ─────────────────────────────────────────
         Commands::Invalidatekeycache => cmd_cache_hints::invalidate_cache(&client, "key"),
         Commands::Invalidaterowcache => cmd_cache_hints::invalidate_cache(&client, "row"),
         Commands::Invalidatecountercache => cmd_cache_hints::invalidate_cache(&client, "counter"),
-        Commands::Invalidatecredentialscache => cmd_cache_hints::invalidate_cache(&client, "credentials"),
-        Commands::Invalidatepermissionscache => cmd_cache_hints::invalidate_cache(&client, "permissions"),
+        Commands::Invalidatecredentialscache => {
+            cmd_cache_hints::invalidate_cache(&client, "credentials")
+        }
+        Commands::Invalidatepermissionscache => {
+            cmd_cache_hints::invalidate_cache(&client, "permissions")
+        }
         Commands::Invalidaterolescache => cmd_cache_hints::invalidate_cache(&client, "roles"),
-        Commands::Setcachecapacity { cache_type, capacity_mb } => cmd_cache_hints::set_cache_capacity(&client, &cache_type, capacity_mb),
+        Commands::Setcachecapacity {
+            cache_type,
+            capacity_mb,
+        } => cmd_cache_hints::set_cache_capacity(&client, &cache_type, capacity_mb),
         Commands::Enablehandoff => cmd_cache_hints::enable_handoff(&client),
         Commands::Disablehandoff => cmd_cache_hints::disable_handoff(&client),
         Commands::Pausehandoff => cmd_cache_hints::pause_handoff(&client),
@@ -698,13 +737,22 @@ fn main() {
         Commands::Getconfig { key } => cmd_config::get_config(&client, key.as_deref()),
         Commands::Setconfig { key, value } => cmd_config::set_config(&client, &key, &value),
         Commands::Gettimeout { timeout_type } => cmd_config::get_timeout(&client, &timeout_type),
-        Commands::Settimeout { timeout_type, timeout_ms } => cmd_config::set_timeout(&client, &timeout_type, timeout_ms),
+        Commands::Settimeout {
+            timeout_type,
+            timeout_ms,
+        } => cmd_config::set_timeout(&client, &timeout_type, timeout_ms),
         Commands::Getstreamingthroughput => cmd_config::get_streaming_throughput(&client),
-        Commands::Setstreamingthroughput { throughput_mb } => cmd_config::set_streaming_throughput(&client, throughput_mb),
+        Commands::Setstreamingthroughput { throughput_mb } => {
+            cmd_config::set_streaming_throughput(&client, throughput_mb)
+        }
         Commands::Getinterdcstreamthroughput => cmd_config::get_interdc_stream_throughput(&client),
-        Commands::Setinterdcstreamthroughput { throughput_mb } => cmd_config::set_interdc_stream_throughput(&client, throughput_mb),
+        Commands::Setinterdcstreamthroughput { throughput_mb } => {
+            cmd_config::set_interdc_stream_throughput(&client, throughput_mb)
+        }
         Commands::Getconcurrentcompactors => cmd_config::get_concurrent_compactors(&client),
-        Commands::Setconcurrentcompactors { value } => cmd_config::set_concurrent_compactors(&client, value),
+        Commands::Setconcurrentcompactors { value } => {
+            cmd_config::set_concurrent_compactors(&client, value)
+        }
         Commands::Reloadlocalschema => cmd_config::reload_local_schema(&client),
         Commands::Reloadtriggers => cmd_config::reload_triggers(&client),
         Commands::Reloadssl => cmd_config::reload_ssl(&client),
@@ -718,7 +766,9 @@ fn main() {
 
         // ── Logging & Security ────────────────────────────────────
         Commands::Getlogginglevels => cmd_logging_security::get_logging_levels(&client),
-        Commands::Setlogginglevel { logger, level } => cmd_logging_security::set_logging_level(&client, &logger, &level),
+        Commands::Setlogginglevel { logger, level } => {
+            cmd_logging_security::set_logging_level(&client, &logger, &level)
+        }
         Commands::Enableauditlog => cmd_logging_security::enable_audit_log(&client),
         Commands::Disableauditlog => cmd_logging_security::disable_audit_log(&client),
         Commands::Getauditlogconfig => cmd_logging_security::get_audit_log_config(&client),
@@ -727,13 +777,32 @@ fn main() {
         Commands::Getfqlconfig => cmd_logging_security::get_fql_config(&client),
         Commands::Resetfql => cmd_logging_security::reset_fql(&client),
         Commands::Gettraceprobability => cmd_logging_security::get_trace_probability(&client),
-        Commands::Settraceprobability { probability } => cmd_logging_security::set_trace_probability(&client, probability),
+        Commands::Settraceprobability { probability } => {
+            cmd_logging_security::set_trace_probability(&client, probability)
+        }
 
         // ── Repair ────────────────────────────────────────────────
-        Commands::Repair { keyspace, tables, full, incremental, preview } => {
-            cmd_compaction::repair(&client, keyspace.as_deref(), &tables, full, incremental, preview);
+        Commands::Repair {
+            keyspace,
+            tables,
+            full,
+            incremental,
+            preview,
+        } => {
+            cmd_compaction::repair(
+                &client,
+                keyspace.as_deref(),
+                &tables,
+                full,
+                incremental,
+                preview,
+            );
         }
-        Commands::RebuildIndex { keyspace, table, index_names } => {
+        Commands::RebuildIndex {
+            keyspace,
+            table,
+            index_names,
+        } => {
             cmd_compaction::rebuild_index(&client, &keyspace, &table, &index_names);
         }
 
@@ -741,12 +810,19 @@ fn main() {
         Commands::Sstabledump { file } => sstable_tools::dump_sstable(&file),
         Commands::Sstablemetadata { file } => sstable_tools::show_metadata(&file),
         Commands::Sstableverify { file } => sstable_verify::run(&file),
-        Commands::Sstablescrub { file, output_dir } => sstable_scrub::run(&file, output_dir.as_deref()),
+        Commands::Sstablescrub { file, output_dir } => {
+            sstable_scrub::run(&file, output_dir.as_deref())
+        }
         Commands::Sstableupgrade { file } => sstable_upgrade::run(&file),
         Commands::Sstablesplit { file, size_mb } => sstable_split::run(&file, size_mb),
         Commands::Sstablelevelreset { file } => sstable_level_reset::run(&file),
-        Commands::Sstablerepairedset { file, repaired_at } => sstable_repaired_at::run(&file, repaired_at),
-        Commands::Sstableexpiredblockers { file, gc_grace_seconds } => sstable_expired_blockers::run(&file, gc_grace_seconds),
+        Commands::Sstablerepairedset { file, repaired_at } => {
+            sstable_repaired_at::run(&file, repaired_at)
+        }
+        Commands::Sstableexpiredblockers {
+            file,
+            gc_grace_seconds,
+        } => sstable_expired_blockers::run(&file, gc_grace_seconds),
         Commands::Sstableofflinerelevel { dir } => sstable_offline_relevel::run(&dir),
         Commands::Sstablepartitions { file, top } => sstable_partitions::run(&file, top),
 
@@ -759,7 +835,11 @@ fn main() {
             println!("(stub — implement via admin API)");
         }
         Commands::Bootstrapmonitor => bootstrap_monitor::run(&client),
-        Commands::Generatetokens { nodes, tokens, racks } => generate_tokens::run(nodes, tokens, racks),
+        Commands::Generatetokens {
+            nodes,
+            tokens,
+            racks,
+        } => generate_tokens::run(nodes, tokens, racks),
         Commands::Hashpassword { password, rounds } => hash_password::run(password, rounds),
 
         // ── Pass-through tools ────────────────────────────────────

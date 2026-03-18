@@ -15,21 +15,70 @@ pub enum SchemaChangeEvent {
     KeyspaceCreated(String),
     KeyspaceDropped(String),
     KeyspaceAltered(String),
-    TableCreated { keyspace: String, table: String },
-    TableDropped { keyspace: String, table: String },
-    TableAltered { keyspace: String, table: String },
-    ViewCreated { keyspace: String, view: String },
-    ViewDropped { keyspace: String, view: String },
-    TypeCreated { keyspace: String, type_name: String },
-    TypeDropped { keyspace: String, type_name: String },
-    FunctionCreated { keyspace: String, function: String },
-    FunctionDropped { keyspace: String, function: String },
-    AggregateCreated { keyspace: String, aggregate: String },
-    AggregateDropped { keyspace: String, aggregate: String },
-    TriggerCreated { keyspace: String, table: String, trigger: String },
-    TriggerDropped { keyspace: String, table: String, trigger: String },
-    IndexCreated { keyspace: String, table: String, index: String },
-    IndexDropped { keyspace: String, table: String, index: String },
+    TableCreated {
+        keyspace: String,
+        table: String,
+    },
+    TableDropped {
+        keyspace: String,
+        table: String,
+    },
+    TableAltered {
+        keyspace: String,
+        table: String,
+    },
+    ViewCreated {
+        keyspace: String,
+        view: String,
+    },
+    ViewDropped {
+        keyspace: String,
+        view: String,
+    },
+    TypeCreated {
+        keyspace: String,
+        type_name: String,
+    },
+    TypeDropped {
+        keyspace: String,
+        type_name: String,
+    },
+    FunctionCreated {
+        keyspace: String,
+        function: String,
+    },
+    FunctionDropped {
+        keyspace: String,
+        function: String,
+    },
+    AggregateCreated {
+        keyspace: String,
+        aggregate: String,
+    },
+    AggregateDropped {
+        keyspace: String,
+        aggregate: String,
+    },
+    TriggerCreated {
+        keyspace: String,
+        table: String,
+        trigger: String,
+    },
+    TriggerDropped {
+        keyspace: String,
+        table: String,
+        trigger: String,
+    },
+    IndexCreated {
+        keyspace: String,
+        table: String,
+        index: String,
+    },
+    IndexDropped {
+        keyspace: String,
+        table: String,
+        index: String,
+    },
 }
 
 /// Trait for listeners that react to schema changes.

@@ -146,8 +146,8 @@ fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::builder::SaiSegmentBuilder;
+    use super::*;
 
     #[test]
     fn round_trip_in_memory() {

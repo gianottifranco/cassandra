@@ -18,14 +18,11 @@ use hyper::body::Incoming;
 use hyper::{Request, Response, StatusCode};
 use serde_json::json;
 
-use crate::http_admin::{json_response, AdminState};
+use crate::http_admin::{AdminState, json_response};
 use crate::operations::OperationType;
 
 /// POST /api/v1/operations/compact — trigger major compaction.
-pub async fn handle_compact(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_compact(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -63,7 +60,9 @@ fn handle_compact_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<
         Some(t) => format!("Compact {}.{}", payload.keyspace, t),
         None => format!("Compact keyspace: {}", payload.keyspace),
     };
-    let op_id = state.operations.register(OperationType::Rebuild, description);
+    let op_id = state
+        .operations
+        .register(OperationType::Rebuild, description);
 
     json_response(
         StatusCode::OK,
@@ -75,10 +74,7 @@ fn handle_compact_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<
 }
 
 /// POST /api/v1/operations/cleanup — trigger cleanup of keys no longer belonging to this node.
-pub async fn handle_cleanup(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_cleanup(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -125,10 +121,7 @@ fn handle_cleanup_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<
 }
 
 /// POST /api/v1/operations/flush — flush memtables to SSTables.
-pub async fn handle_flush(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_flush(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -166,7 +159,9 @@ fn handle_flush_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<By
         Some(t) => format!("Flush {}.{}", payload.keyspace, t),
         None => format!("Flush keyspace: {}", payload.keyspace),
     };
-    let op_id = state.operations.register(OperationType::Rebuild, description);
+    let op_id = state
+        .operations
+        .register(OperationType::Rebuild, description);
 
     json_response(
         StatusCode::OK,
@@ -178,10 +173,7 @@ fn handle_flush_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<By
 }
 
 /// POST /api/v1/operations/scrub — scrub SSTables for corruption.
-pub async fn handle_scrub(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_scrub(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -219,7 +211,9 @@ fn handle_scrub_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<By
         Some(t) => format!("Scrub {}.{}", payload.keyspace, t),
         None => format!("Scrub keyspace: {}", payload.keyspace),
     };
-    let op_id = state.operations.register(OperationType::Rebuild, description);
+    let op_id = state
+        .operations
+        .register(OperationType::Rebuild, description);
 
     json_response(
         StatusCode::OK,
@@ -419,7 +413,9 @@ mod tests {
     fn compaction_stats_shows_active_operations() {
         let state = test_state();
         // Register an operation to verify it shows up in stats
-        state.operations.register(OperationType::Rebuild, "test compaction");
+        state
+            .operations
+            .register(OperationType::Rebuild, "test compaction");
         let resp = handle_compaction_stats(&state);
         assert_eq!(resp.status(), StatusCode::OK);
     }
@@ -427,7 +423,8 @@ mod tests {
     #[test]
     fn compact_with_valid_body() {
         let state = test_state();
-        let body = serde_json::to_vec(&json!({"keyspace": "test_ks", "table": "test_tbl"})).unwrap();
+        let body =
+            serde_json::to_vec(&json!({"keyspace": "test_ks", "table": "test_tbl"})).unwrap();
         let resp = handle_compact_inner(&body, &state);
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(state.operations.count(), 1);

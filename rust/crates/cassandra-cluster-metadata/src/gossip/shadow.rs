@@ -95,9 +95,8 @@ pub async fn execute_shadow_round(
         digests: vec![],
     };
 
-    let syn_payload = serde_json::to_vec(&syn).map_err(|e| {
-        ShadowRoundError::Internal(format!("Failed to serialize SYN: {}", e))
-    })?;
+    let syn_payload = serde_json::to_vec(&syn)
+        .map_err(|e| ShadowRoundError::Internal(format!("Failed to serialize SYN: {}", e)))?;
 
     let mut all_states: HashMap<Endpoint, EndpointState> = HashMap::new();
     let mut seeds_responded = 0;
@@ -214,11 +213,7 @@ mod tests {
     #[tokio::test]
     async fn shadow_round_does_not_modify_live_dead() {
         // Set up a seed with a listener
-        let seed_gossiper = Arc::new(Gossiper::new(
-            ep(0),
-            SeedProvider::new(vec![]),
-            1,
-        ));
+        let seed_gossiper = Arc::new(Gossiper::new(ep(0), SeedProvider::new(vec![]), 1));
         seed_gossiper.set_local_state(ApplicationState::Datacenter, "dc1".to_string());
         seed_gossiper.set_local_state(ApplicationState::Status, "NORMAL".to_string());
 
@@ -246,11 +241,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         // Joiner performs shadow round
-        let joiner = Gossiper::new(
-            ep(0),
-            SeedProvider::new(vec![Endpoint::new(seed_addr)]),
-            1,
-        );
+        let joiner = Gossiper::new(ep(0), SeedProvider::new(vec![Endpoint::new(seed_addr)]), 1);
         let joiner_messaging = MessagingService::new("127.0.0.1:0".parse().unwrap());
 
         let config = ShadowRoundConfig {

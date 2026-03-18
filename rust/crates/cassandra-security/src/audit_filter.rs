@@ -36,9 +36,9 @@ impl AuditCategory {
 
             AuditEventType::DmlRead | AuditEventType::DmlWrite => Self::Dml,
 
-            AuditEventType::DdlCreate
-            | AuditEventType::DdlAlter
-            | AuditEventType::DdlDrop => Self::Ddl,
+            AuditEventType::DdlCreate | AuditEventType::DdlAlter | AuditEventType::DdlDrop => {
+                Self::Ddl
+            }
 
             AuditEventType::DclGrant
             | AuditEventType::DclRevoke
@@ -229,21 +229,66 @@ mod tests {
 
     #[test]
     fn category_from_event_type_mappings() {
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::AuthSuccess), AuditCategory::Auth);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::AuthFailure), AuditCategory::Auth);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::LoginError), AuditCategory::Auth);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::Query), AuditCategory::Query);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DmlRead), AuditCategory::Dml);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DmlWrite), AuditCategory::Dml);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DdlCreate), AuditCategory::Ddl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DdlAlter), AuditCategory::Ddl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DdlDrop), AuditCategory::Ddl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DclGrant), AuditCategory::Dcl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::DclRevoke), AuditCategory::Dcl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::RoleCreate), AuditCategory::Dcl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::RoleAlter), AuditCategory::Dcl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::RoleDrop), AuditCategory::Dcl);
-        assert_eq!(AuditCategory::from_event_type(&AuditEventType::Unauthorized), AuditCategory::Other);
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::AuthSuccess),
+            AuditCategory::Auth
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::AuthFailure),
+            AuditCategory::Auth
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::LoginError),
+            AuditCategory::Auth
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::Query),
+            AuditCategory::Query
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DmlRead),
+            AuditCategory::Dml
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DmlWrite),
+            AuditCategory::Dml
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DdlCreate),
+            AuditCategory::Ddl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DdlAlter),
+            AuditCategory::Ddl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DdlDrop),
+            AuditCategory::Ddl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DclGrant),
+            AuditCategory::Dcl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::DclRevoke),
+            AuditCategory::Dcl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::RoleCreate),
+            AuditCategory::Dcl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::RoleAlter),
+            AuditCategory::Dcl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::RoleDrop),
+            AuditCategory::Dcl
+        );
+        assert_eq!(
+            AuditCategory::from_event_type(&AuditEventType::Unauthorized),
+            AuditCategory::Other
+        );
     }
 
     #[test]

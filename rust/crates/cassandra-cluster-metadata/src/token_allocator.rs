@@ -145,12 +145,8 @@ impl TokenAllocator for ReplicationAwareTokenAllocator {
         }
 
         // Find average ownership per node in this DC
-        let total_dc_ownership: f64 = dc_endpoints
-            .iter()
-            .filter_map(|ep| ownership.get(ep))
-            .sum();
-        let avg_ownership =
-            total_dc_ownership / (dc_endpoints.len() as f64 + 1.0);
+        let total_dc_ownership: f64 = dc_endpoints.iter().filter_map(|ep| ownership.get(ep)).sum();
+        let avg_ownership = total_dc_ownership / (dc_endpoints.len() as f64 + 1.0);
 
         // Greedily split gaps near over-represented nodes
         let mut gaps = compute_gaps(ring);
@@ -413,7 +409,10 @@ mod tests {
         let tokens = even_split(4);
         assert_eq!(tokens.len(), 4);
         for i in 1..tokens.len() {
-            assert!(tokens[i] > tokens[i - 1], "tokens must be strictly increasing");
+            assert!(
+                tokens[i] > tokens[i - 1],
+                "tokens must be strictly increasing"
+            );
         }
     }
 }

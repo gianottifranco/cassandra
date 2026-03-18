@@ -329,7 +329,10 @@ mod tests {
 
     #[test]
     fn replication_factor_parse() {
-        assert_eq!(ReplicationFactor::parse("3"), Some(ReplicationFactor::full(3)));
+        assert_eq!(
+            ReplicationFactor::parse("3"),
+            Some(ReplicationFactor::full(3))
+        );
         assert_eq!(
             ReplicationFactor::parse("3/1"),
             Some(ReplicationFactor::with_transient(3, 1))

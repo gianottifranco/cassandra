@@ -92,10 +92,7 @@ impl IndexDefinition {
         keyspace: &str,
         table: &str,
     ) -> Self {
-        let column = meta
-            .target_column()
-            .cloned()
-            .unwrap_or_default();
+        let column = meta.target_column().cloned().unwrap_or_default();
 
         let index_type = match meta.kind {
             cassandra_schema::index::IndexKind::Keys
@@ -569,8 +566,7 @@ mod tests {
         use cassandra_schema::index::{IndexKind, IndexMetadata};
         let mut opts = HashMap::new();
         opts.insert("target".into(), "col1".into());
-        let meta =
-            IndexMetadata::new("id2".into(), "comp_idx".into(), IndexKind::Composites, opts);
+        let meta = IndexMetadata::new("id2".into(), "comp_idx".into(), IndexKind::Composites, opts);
         let def = IndexDefinition::from_metadata(&meta, "ks", "tbl");
         assert_eq!(def.index_type, IndexType::Legacy);
     }
@@ -595,8 +591,7 @@ mod tests {
         let mut opts = HashMap::new();
         opts.insert("target".into(), "col1".into());
         opts.insert("class_name".into(), "com.example.MyCustomIndex".into());
-        let meta =
-            IndexMetadata::new("id4".into(), "custom_idx".into(), IndexKind::Custom, opts);
+        let meta = IndexMetadata::new("id4".into(), "custom_idx".into(), IndexKind::Custom, opts);
         let def = IndexDefinition::from_metadata(&meta, "ks", "tbl");
         assert_eq!(def.index_type, IndexType::Legacy);
     }
@@ -672,10 +667,7 @@ mod tests {
         assert_eq!(def.column, "col1");
         assert!(mgr.get_definition("nonexistent").is_none());
 
-        assert_eq!(
-            mgr.get_index_for_column("col1"),
-            Some("idx1".to_string())
-        );
+        assert_eq!(mgr.get_index_for_column("col1"), Some("idx1".to_string()));
         assert!(mgr.get_index_for_column("col2").is_none());
 
         // Unregister

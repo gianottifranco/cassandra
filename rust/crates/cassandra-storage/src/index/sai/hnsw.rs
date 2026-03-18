@@ -124,11 +124,7 @@ impl HnswGraph {
                 self.search_layer_inner(&nodes, &vector, ep, self.ef_construction, layer);
 
             let max_conn = if layer == 0 { self.m_max0 } else { self.m };
-            let selected: Vec<usize> = neighbors
-                .iter()
-                .take(max_conn)
-                .map(|&(_, id)| id)
-                .collect();
+            let selected: Vec<usize> = neighbors.iter().take(max_conn).map(|&(_, id)| id).collect();
 
             // Connect new node to selected neighbors
             nodes[new_id].neighbors[layer] = selected.clone();
@@ -336,17 +332,29 @@ mod tests {
     #[test]
     fn insert_and_count() {
         let g = make_graph();
-        g.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk1".to_vec(), b"".to_vec())
-            .unwrap();
-        g.insert(VectorValue::new(vec![0.0, 1.0, 0.0]), b"pk2".to_vec(), b"".to_vec())
-            .unwrap();
+        g.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk1".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        g.insert(
+            VectorValue::new(vec![0.0, 1.0, 0.0]),
+            b"pk2".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
         assert_eq!(g.count(), 2);
     }
 
     #[test]
     fn dimension_mismatch() {
         let g = make_graph();
-        let result = g.insert(VectorValue::new(vec![1.0, 2.0]), b"pk".to_vec(), b"".to_vec());
+        let result = g.insert(
+            VectorValue::new(vec![1.0, 2.0]),
+            b"pk".to_vec(),
+            b"".to_vec(),
+        );
         assert!(result.is_err());
     }
 
@@ -360,12 +368,24 @@ mod tests {
     #[test]
     fn knn_basic() {
         let g = make_graph();
-        g.insert(VectorValue::new(vec![0.0, 0.0, 0.0]), b"origin".to_vec(), b"".to_vec())
-            .unwrap();
-        g.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"x".to_vec(), b"".to_vec())
-            .unwrap();
-        g.insert(VectorValue::new(vec![10.0, 10.0, 10.0]), b"far".to_vec(), b"".to_vec())
-            .unwrap();
+        g.insert(
+            VectorValue::new(vec![0.0, 0.0, 0.0]),
+            b"origin".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        g.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"x".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        g.insert(
+            VectorValue::new(vec![10.0, 10.0, 10.0]),
+            b"far".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         let query = VectorValue::new(vec![0.0, 0.0, 0.0]);
         let results = g.search(&query, 50, 2);
@@ -379,10 +399,18 @@ mod tests {
     #[test]
     fn delete_tombstones_node() {
         let g = make_graph();
-        g.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk1".to_vec(), b"".to_vec())
-            .unwrap();
-        g.insert(VectorValue::new(vec![0.0, 1.0, 0.0]), b"pk2".to_vec(), b"".to_vec())
-            .unwrap();
+        g.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk1".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        g.insert(
+            VectorValue::new(vec![0.0, 1.0, 0.0]),
+            b"pk2".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         g.delete(b"pk1", b"");
         assert_eq!(g.count(), 1);
@@ -391,8 +419,12 @@ mod tests {
     #[test]
     fn search_k_zero() {
         let g = make_graph();
-        g.insert(VectorValue::new(vec![1.0, 0.0, 0.0]), b"pk".to_vec(), b"".to_vec())
-            .unwrap();
+        g.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"pk".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
         let results = g.search(&VectorValue::new(vec![1.0, 0.0, 0.0]), 50, 0);
         assert!(results.is_empty());
     }
@@ -400,12 +432,24 @@ mod tests {
     #[test]
     fn cosine_search() {
         let g = HnswGraph::new(2, SimilarityMetric::Cosine);
-        g.insert(VectorValue::new(vec![1.0, 0.0]), b"east".to_vec(), b"".to_vec())
-            .unwrap();
-        g.insert(VectorValue::new(vec![0.0, 1.0]), b"north".to_vec(), b"".to_vec())
-            .unwrap();
-        g.insert(VectorValue::new(vec![-1.0, 0.0]), b"west".to_vec(), b"".to_vec())
-            .unwrap();
+        g.insert(
+            VectorValue::new(vec![1.0, 0.0]),
+            b"east".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        g.insert(
+            VectorValue::new(vec![0.0, 1.0]),
+            b"north".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        g.insert(
+            VectorValue::new(vec![-1.0, 0.0]),
+            b"west".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
 
         let results = g.search(&VectorValue::new(vec![1.0, 0.0]), 50, 1);
         assert_eq!(results[0].location.partition_key, b"east");

@@ -8,8 +8,8 @@
 //! Defines the `StorageEncryptor` trait with hook points for commitlog
 //! and SSTable write paths. Default implementation is `NoOpStorageEncryptor`.
 
-use crate::encryption_context::EncryptionContext;
 use crate::SecurityError;
+use crate::encryption_context::EncryptionContext;
 use std::sync::Arc;
 
 /// Trait for storage-level encryption hooks.

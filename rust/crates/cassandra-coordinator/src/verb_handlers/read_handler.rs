@@ -149,9 +149,7 @@ impl ReadDigestVerbHandler {
 
         // In a full implementation, this would read data and compute a real digest.
         // For now, return a zeroed digest (empty partition).
-        let response = ReadDigestResponsePayload {
-            digest: [0u8; 8],
-        };
+        let response = ReadDigestResponsePayload { digest: [0u8; 8] };
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
         Some(Message::response(

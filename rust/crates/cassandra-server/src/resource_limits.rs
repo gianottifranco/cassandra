@@ -7,8 +7,8 @@
 //! - `org.apache.cassandra.net.ResourceLimits`
 
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
@@ -40,11 +40,7 @@ impl ResourceLimits {
         } else {
             None
         };
-        let max_per_ip = if max_per_ip > 0 {
-            max_per_ip as u32
-        } else {
-            0
-        };
+        let max_per_ip = if max_per_ip > 0 { max_per_ip as u32 } else { 0 };
         Self {
             global_conn_semaphore,
             per_ip_counts: Arc::new(DashMap::new()),

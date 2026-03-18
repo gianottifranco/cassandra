@@ -8,9 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use cassandra_storage::index::lifecycle::SecondaryIndexManager;
-use cassandra_storage::index::{
-    IndexDefinition, IndexManager, IndexStatus, IndexType,
-};
+use cassandra_storage::index::{IndexDefinition, IndexManager, IndexStatus, IndexType};
 use cassandra_storage::memtable::partition::{Cell, PartitionData, Row};
 
 fn make_def(name: &str, column: &str) -> IndexDefinition {

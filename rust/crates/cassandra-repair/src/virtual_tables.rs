@@ -181,8 +181,7 @@ impl RepairHistoryTracker for InMemoryRepairHistory {
                 };
                 entry.finished_at_millis = Some(now);
                 entry.error = error;
-                entry.duration_ms =
-                    Some(now.saturating_sub(entry.started_at_millis));
+                entry.duration_ms = Some(now.saturating_sub(entry.started_at_millis));
                 return;
             }
         }
@@ -226,8 +225,7 @@ impl RepairHistoryTracker for InMemoryRepairHistory {
                 entry.state = state.to_string();
                 entry.finished_at_millis = Some(now);
                 entry.error = error;
-                entry.duration_ms =
-                    Some(now.saturating_sub(entry.started_at_millis));
+                entry.duration_ms = Some(now.saturating_sub(entry.started_at_millis));
                 return;
             }
         }
@@ -237,9 +235,7 @@ impl RepairHistoryTracker for InMemoryRepairHistory {
 // ── Formatters ──────────────────────────────────────────────
 
 /// Format repair status for nodetool-style output.
-pub fn format_repair_status(
-    statuses: &[crate::coordinator::RepairStatus],
-) -> String {
+pub fn format_repair_status(statuses: &[crate::coordinator::RepairStatus]) -> String {
     let mut out = String::new();
     for s in statuses {
         out.push_str(&format!(
@@ -309,20 +305,8 @@ mod tests {
     #[test]
     fn query_by_keyspace() {
         let h = make_history(10);
-        h.record_parent_repair_start(
-            Uuid::new_v4(),
-            "ks1",
-            &[],
-            &[],
-            RepairType::Full,
-        );
-        h.record_parent_repair_start(
-            Uuid::new_v4(),
-            "ks2",
-            &[],
-            &[],
-            RepairType::Full,
-        );
+        h.record_parent_repair_start(Uuid::new_v4(), "ks1", &[], &[], RepairType::Full);
+        h.record_parent_repair_start(Uuid::new_v4(), "ks2", &[], &[], RepairType::Full);
 
         let results = h.query(&RepairHistoryQuery {
             keyspace: Some("ks1".into()),
@@ -336,13 +320,7 @@ mod tests {
     fn query_with_limit() {
         let h = make_history(10);
         for _ in 0..5 {
-            h.record_parent_repair_start(
-                Uuid::new_v4(),
-                "ks",
-                &[],
-                &[],
-                RepairType::Full,
-            );
+            h.record_parent_repair_start(Uuid::new_v4(), "ks", &[], &[], RepairType::Full);
         }
 
         let results = h.query(&RepairHistoryQuery {

@@ -6,10 +6,10 @@
 use std::io::Write;
 use tempfile::NamedTempFile;
 
+use cassandra_io::compress::CompressorType;
 use cassandra_io::compress::compressed_reader::CompressedChunkReader;
 use cassandra_io::compress::compressed_writer::CompressedSequentialWriter;
 use cassandra_io::compress::metadata::{CompressionMetadata, CompressionParams};
-use cassandra_io::compress::CompressorType;
 use cassandra_io::util::rebufferer::Rebufferer;
 
 fn roundtrip_with_compressor(ctype: CompressorType, data: &[u8]) {

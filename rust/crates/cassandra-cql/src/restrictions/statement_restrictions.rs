@@ -152,10 +152,7 @@ mod tests {
     #[test]
     fn pk_and_ck() {
         let table = test_table();
-        let relations = vec![
-            rel("pk", RelationOp::Eq),
-            rel("ck", RelationOp::Gt),
-        ];
+        let relations = vec![rel("pk", RelationOp::Eq), rel("ck", RelationOp::Gt)];
         let result = build(&relations, &table, false).unwrap();
         assert_eq!(result.partition_key_restrictions.len(), 1);
         assert_eq!(result.clustering_restrictions.len(), 1);
@@ -164,10 +161,7 @@ mod tests {
     #[test]
     fn non_key_without_filtering_rejected() {
         let table = test_table();
-        let relations = vec![
-            rel("pk", RelationOp::Eq),
-            rel("v", RelationOp::Eq),
-        ];
+        let relations = vec![rel("pk", RelationOp::Eq), rel("v", RelationOp::Eq)];
         let result = build(&relations, &table, false);
         assert!(result.is_err());
     }
@@ -175,10 +169,7 @@ mod tests {
     #[test]
     fn non_key_with_filtering() {
         let table = test_table();
-        let relations = vec![
-            rel("pk", RelationOp::Eq),
-            rel("v", RelationOp::Eq),
-        ];
+        let relations = vec![rel("pk", RelationOp::Eq), rel("v", RelationOp::Eq)];
         let result = build(&relations, &table, true).unwrap();
         assert!(result.needs_filtering);
         assert_eq!(result.non_key_restrictions.len(), 1);

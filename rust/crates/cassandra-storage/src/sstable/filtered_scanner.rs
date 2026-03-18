@@ -50,10 +50,7 @@ pub fn apply_filters(partition: PartitionData, options: &ScanOptions) -> Partiti
 
     // 1. Clustering filter: retain only rows whose clustering key is selected.
     if let Some(ref cf) = options.clustering_filter {
-        rows = rows
-            .into_iter()
-            .filter(|(ck, _)| cf.selects(ck))
-            .collect();
+        rows = rows.into_iter().filter(|(ck, _)| cf.selects(ck)).collect();
     }
 
     // 2. Row filter: evaluate expressions on cell values.
@@ -155,8 +152,7 @@ impl FilteredPartitionReader {
                     PartitionData {
                         rows: limited_rows,
                         tombstone_timestamp: filtered.tombstone_timestamp,
-                        tombstone_local_deletion_time: filtered
-                            .tombstone_local_deletion_time,
+                        tombstone_local_deletion_time: filtered.tombstone_local_deletion_time,
                     },
                 ));
             }
@@ -200,9 +196,7 @@ fn evaluate_expression(row: &Row, expr: &FilterExpression) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::clustering_filter::{
-        ClusteringBound, ClusteringIndexFilter, Slice, Slices,
-    };
+    use crate::filter::clustering_filter::{ClusteringBound, ClusteringIndexFilter, Slice, Slices};
     use crate::memtable::partition::Cell;
     use std::collections::BTreeSet;
 
@@ -235,9 +229,10 @@ mod tests {
 
     #[test]
     fn column_filter_removes_unneeded_columns() {
-        let pd = make_partition(vec![
-            make_row(b"ck1", &[("name", b"alice"), ("age", b"30"), ("score", b"99")]),
-        ]);
+        let pd = make_partition(vec![make_row(
+            b"ck1",
+            &[("name", b"alice"), ("age", b"30"), ("score", b"99")],
+        )]);
 
         let mut fetched = BTreeSet::new();
         fetched.insert("name".to_string());
@@ -331,13 +326,11 @@ mod tests {
             column_filter: None,
             clustering_filter: None,
             data_limits: None,
-            row_filter: Some(
-                RowFilter::none().with(FilterExpression::Simple {
-                    column: "name".to_string(),
-                    operator: Operator::Eq,
-                    value: b"alice".to_vec(),
-                }),
-            ),
+            row_filter: Some(RowFilter::none().with(FilterExpression::Simple {
+                column: "name".to_string(),
+                operator: Operator::Eq,
+                value: b"alice".to_vec(),
+            })),
         };
 
         let filtered = apply_filters(pd, &options);
@@ -379,13 +372,11 @@ mod tests {
                 rows_limit: 2,
                 per_partition_limit: u32::MAX,
             }),
-            row_filter: Some(
-                RowFilter::none().with(FilterExpression::Simple {
-                    column: "name".to_string(),
-                    operator: Operator::Eq,
-                    value: b"alice".to_vec(),
-                }),
-            ),
+            row_filter: Some(RowFilter::none().with(FilterExpression::Simple {
+                column: "name".to_string(),
+                operator: Operator::Eq,
+                value: b"alice".to_vec(),
+            })),
         };
 
         let filtered = apply_filters(pd, &options);

@@ -72,20 +72,14 @@ pub fn make_shutdown_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
 
 /// Register the gossip shutdown handler on the messaging service.
 pub fn register_shutdown_handler(gossiper: Arc<Gossiper>, messaging: &MessagingService) {
-    messaging.register_handler(
-        Verb::GossipShutdown,
-        make_shutdown_handler(gossiper),
-    );
+    messaging.register_handler(Verb::GossipShutdown, make_shutdown_handler(gossiper));
 }
 
 /// Announce shutdown to all live peers, then stop the gossiper.
 ///
 /// Sets local status to SHUTDOWN, broadcasts shutdown message to all
 /// live endpoints, waits briefly for delivery, then calls `gossiper.shutdown()`.
-pub async fn announce_shutdown(
-    gossiper: &Gossiper,
-    messaging: &MessagingService,
-) {
+pub async fn announce_shutdown(gossiper: &Gossiper, messaging: &MessagingService) {
     // Set local status to indicate shutdown
     gossiper.set_local_state(
         crate::gossip::ApplicationState::Status,
@@ -154,9 +148,7 @@ mod tests {
 
         let handler = make_shutdown_handler(Arc::clone(&gossiper));
 
-        let shutdown_msg = GossipShutdownMessage {
-            endpoint: ep(7002),
-        };
+        let shutdown_msg = GossipShutdownMessage { endpoint: ep(7002) };
         let payload = serde_json::to_vec(&shutdown_msg).unwrap();
         let msg = Message::request(Verb::GossipShutdown, 1, payload);
 
@@ -186,9 +178,7 @@ mod tests {
 
     #[test]
     fn shutdown_message_serialization_round_trip() {
-        let msg = GossipShutdownMessage {
-            endpoint: ep(7001),
-        };
+        let msg = GossipShutdownMessage { endpoint: ep(7001) };
         let json = serde_json::to_vec(&msg).unwrap();
         let decoded: GossipShutdownMessage = serde_json::from_slice(&json).unwrap();
         assert_eq!(decoded.endpoint, ep(7001));

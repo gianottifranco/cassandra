@@ -189,9 +189,6 @@ mod tests {
             value: Term::Literal(Literal::String("alice".into())),
         }];
         let resolved = resolve_where_clause(&relations, type_lookup).unwrap();
-        assert_eq!(
-            resolved[0].value,
-            ResolvedValue::Single(b"alice".to_vec())
-        );
+        assert_eq!(resolved[0].value, ResolvedValue::Single(b"alice".to_vec()));
     }
 }

@@ -57,10 +57,7 @@ impl<T: Ord + Clone> AbstractBounds<T> {
 
     /// Whether the left boundary is inclusive.
     pub fn includes_left(&self) -> bool {
-        matches!(
-            self,
-            Self::Bounds { .. } | Self::IncludingExcluding { .. }
-        )
+        matches!(self, Self::Bounds { .. } | Self::IncludingExcluding { .. })
     }
 
     /// Whether the right boundary is inclusive.
@@ -214,9 +211,7 @@ impl<T: Ord + Clone> AbstractBounds<T> {
         }
         // Right remainder: portion of self that is after other
         if self.right() > other.right()
-            || (self.right() == other.right()
-                && self.includes_right()
-                && !other.includes_right())
+            || (self.right() == other.right() && self.includes_right() && !other.includes_right())
         {
             let new_left = other.right().clone();
             let includes_new_left = !other.includes_right();
@@ -265,7 +260,10 @@ mod tests {
 
     #[test]
     fn range_contains() {
-        let r = AbstractBounds::Range { left: 10, right: 20 };
+        let r = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
         assert!(!r.contains(&10)); // exclusive start
         assert!(r.contains(&11));
         assert!(r.contains(&20)); // inclusive end
@@ -274,7 +272,10 @@ mod tests {
 
     #[test]
     fn bounds_contains() {
-        let b = AbstractBounds::Bounds { left: 10, right: 20 };
+        let b = AbstractBounds::Bounds {
+            left: 10,
+            right: 20,
+        };
         assert!(b.contains(&10)); // inclusive start
         assert!(b.contains(&20)); // inclusive end
         assert!(!b.contains(&9));
@@ -283,15 +284,21 @@ mod tests {
 
     #[test]
     fn including_excluding_contains() {
-        let ie = AbstractBounds::IncludingExcluding { left: 10, right: 20 };
-        assert!(ie.contains(&10));  // inclusive start
+        let ie = AbstractBounds::IncludingExcluding {
+            left: 10,
+            right: 20,
+        };
+        assert!(ie.contains(&10)); // inclusive start
         assert!(!ie.contains(&20)); // exclusive end
         assert!(ie.contains(&19));
     }
 
     #[test]
     fn excluding_contains() {
-        let e = AbstractBounds::Excluding { left: 10, right: 20 };
+        let e = AbstractBounds::Excluding {
+            left: 10,
+            right: 20,
+        };
         assert!(!e.contains(&10)); // exclusive start
         assert!(!e.contains(&20)); // exclusive end
         assert!(e.contains(&15));
@@ -299,24 +306,42 @@ mod tests {
 
     #[test]
     fn intersects_overlapping() {
-        let a = AbstractBounds::Range { left: 10, right: 30 };
-        let b = AbstractBounds::Range { left: 20, right: 40 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 30,
+        };
+        let b = AbstractBounds::Range {
+            left: 20,
+            right: 40,
+        };
         assert!(a.intersects(&b));
         assert!(b.intersects(&a));
     }
 
     #[test]
     fn intersects_disjoint() {
-        let a = AbstractBounds::Range { left: 10, right: 20 };
-        let b = AbstractBounds::Range { left: 30, right: 40 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
+        let b = AbstractBounds::Range {
+            left: 30,
+            right: 40,
+        };
         assert!(!a.intersects(&b));
     }
 
     #[test]
     fn intersects_adjacent_range() {
         // (10, 20] and (20, 30] — share point 20
-        let a = AbstractBounds::Range { left: 10, right: 20 };
-        let b = AbstractBounds::Range { left: 20, right: 30 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
+        let b = AbstractBounds::Range {
+            left: 20,
+            right: 30,
+        };
         // a includes 20, b excludes 20 — no shared point
         assert!(!a.intersects(&b));
     }
@@ -324,14 +349,23 @@ mod tests {
     #[test]
     fn intersects_adjacent_bounds() {
         // [10, 20] and [20, 30] — share point 20
-        let a = AbstractBounds::Bounds { left: 10, right: 20 };
-        let b = AbstractBounds::Bounds { left: 20, right: 30 };
+        let a = AbstractBounds::Bounds {
+            left: 10,
+            right: 20,
+        };
+        let b = AbstractBounds::Bounds {
+            left: 20,
+            right: 30,
+        };
         assert!(a.intersects(&b));
     }
 
     #[test]
     fn unwrap_non_wrapping() {
-        let r = AbstractBounds::Range { left: 10, right: 20 };
+        let r = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
         let parts = r.unwrap(&0, &100);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0], r);
@@ -339,23 +373,32 @@ mod tests {
 
     #[test]
     fn unwrap_wrapping() {
-        let r = AbstractBounds::Range { left: 80, right: 20 };
+        let r = AbstractBounds::Range {
+            left: 80,
+            right: 20,
+        };
         let parts = r.unwrap(&0, &100);
         assert_eq!(parts.len(), 2);
         assert_eq!(
             parts[0],
-            AbstractBounds::Range { left: 80, right: 100 }
+            AbstractBounds::Range {
+                left: 80,
+                right: 100
+            }
         );
-        assert_eq!(
-            parts[1],
-            AbstractBounds::Range { left: 0, right: 20 }
-        );
+        assert_eq!(parts[1], AbstractBounds::Range { left: 0, right: 20 });
     }
 
     #[test]
     fn subtract_no_overlap() {
-        let a = AbstractBounds::Range { left: 10, right: 20 };
-        let b = AbstractBounds::Range { left: 30, right: 40 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
+        let b = AbstractBounds::Range {
+            left: 30,
+            right: 40,
+        };
         let result = a.subtract(&b);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], a);
@@ -363,7 +406,10 @@ mod tests {
 
     #[test]
     fn subtract_full_overlap() {
-        let a = AbstractBounds::Range { left: 10, right: 20 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
         let b = AbstractBounds::Range { left: 5, right: 25 };
         let result = a.subtract(&b);
         assert!(result.is_empty());
@@ -371,7 +417,10 @@ mod tests {
 
     #[test]
     fn subtract_partial_left() {
-        let a = AbstractBounds::Range { left: 10, right: 30 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 30,
+        };
         let b = AbstractBounds::Range { left: 5, right: 20 };
         let result = a.subtract(&b);
         assert_eq!(result.len(), 1);
@@ -382,27 +431,48 @@ mod tests {
 
     #[test]
     fn subtract_middle() {
-        let a = AbstractBounds::Range { left: 10, right: 40 };
-        let b = AbstractBounds::Range { left: 20, right: 30 };
+        let a = AbstractBounds::Range {
+            left: 10,
+            right: 40,
+        };
+        let b = AbstractBounds::Range {
+            left: 20,
+            right: 30,
+        };
         let result = a.subtract(&b);
         assert_eq!(result.len(), 2);
     }
 
     #[test]
     fn display() {
-        let r = AbstractBounds::Range { left: 10, right: 20 };
+        let r = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
         assert_eq!(format!("{}", r), "(10, 20]");
-        let b = AbstractBounds::Bounds { left: 10, right: 20 };
+        let b = AbstractBounds::Bounds {
+            left: 10,
+            right: 20,
+        };
         assert_eq!(format!("{}", b), "[10, 20]");
-        let ie = AbstractBounds::IncludingExcluding { left: 10, right: 20 };
+        let ie = AbstractBounds::IncludingExcluding {
+            left: 10,
+            right: 20,
+        };
         assert_eq!(format!("{}", ie), "[10, 20)");
-        let e = AbstractBounds::Excluding { left: 10, right: 20 };
+        let e = AbstractBounds::Excluding {
+            left: 10,
+            right: 20,
+        };
         assert_eq!(format!("{}", e), "(10, 20)");
     }
 
     #[test]
     fn accessors() {
-        let r = AbstractBounds::Range { left: 10, right: 20 };
+        let r = AbstractBounds::Range {
+            left: 10,
+            right: 20,
+        };
         assert_eq!(*r.left(), 10);
         assert_eq!(*r.right(), 20);
         assert!(!r.includes_left());

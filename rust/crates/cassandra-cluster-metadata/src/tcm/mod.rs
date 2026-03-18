@@ -34,14 +34,14 @@ pub mod commit;
 pub mod listeners;
 pub mod locking;
 pub mod log_storage;
-pub mod migration;
-pub mod transformations;
 pub mod membership;
 pub mod metadata;
+pub mod migration;
 pub mod ownership;
 pub mod sequences;
-pub mod service;
 pub mod serialization;
+pub mod service;
+pub mod transformations;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

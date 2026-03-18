@@ -37,9 +37,7 @@ fn test_schema() -> SchemaSnapshot {
     let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
 
     let mut snapshot = SchemaSnapshot::empty();
-    snapshot
-        .keyspaces
-        .insert("test_ks".to_string(), ks);
+    snapshot.keyspaces.insert("test_ks".to_string(), ks);
     snapshot
 }
 
@@ -50,7 +48,10 @@ fn invalid_where_missing_pk() {
     let schema = test_schema();
     let stmt = parser::parse("SELECT * FROM test_ks.users WHERE name = 'Alice'").unwrap();
     let result = planner::plan(&stmt, &schema, None);
-    assert!(result.is_err(), "should reject WHERE without PK restriction");
+    assert!(
+        result.is_err(),
+        "should reject WHERE without PK restriction"
+    );
 }
 
 #[test]
@@ -71,10 +72,8 @@ fn invalid_where_bad_operator_for_type() {
 fn needs_allow_filtering() {
     let schema = test_schema();
     // Non-key column restriction without ALLOW FILTERING
-    let stmt = parser::parse(
-        "SELECT * FROM test_ks.users WHERE user_id = 123 AND age > 21",
-    )
-    .unwrap();
+    let stmt =
+        parser::parse("SELECT * FROM test_ks.users WHERE user_id = 123 AND age > 21").unwrap();
     let result = planner::plan(&stmt, &schema, None);
     assert!(
         result.is_err(),
@@ -127,10 +126,9 @@ fn contains_on_collection_accepted() {
 #[test]
 fn undefined_column_rejected() {
     let schema = test_schema();
-    let stmt = parser::parse(
-        "SELECT * FROM test_ks.users WHERE user_id = 123 AND nonexistent = 'x'",
-    )
-    .unwrap();
+    let stmt =
+        parser::parse("SELECT * FROM test_ks.users WHERE user_id = 123 AND nonexistent = 'x'")
+            .unwrap();
     let result = planner::plan(&stmt, &schema, None);
     assert!(result.is_err());
 }
@@ -146,10 +144,12 @@ fn select_invalid_column_rejected() {
 #[test]
 fn insert_column_value_mismatch() {
     let schema = test_schema();
-    let stmt =
-        parser::parse("INSERT INTO test_ks.users (user_id, name) VALUES (123)").unwrap();
+    let stmt = parser::parse("INSERT INTO test_ks.users (user_id, name) VALUES (123)").unwrap();
     let result = planner::plan(&stmt, &schema, None);
-    assert!(result.is_err(), "should reject INSERT with mismatched column/value counts");
+    assert!(
+        result.is_err(),
+        "should reject INSERT with mismatched column/value counts"
+    );
 }
 
 // ── Function evaluation tests ─────────────────────────────────────────
@@ -168,9 +168,7 @@ fn now_returns_timeuuid() {
 #[test]
 fn cast_int_to_text_via_registry() {
     let registry = FunctionRegistry::with_builtins();
-    let func = registry
-        .resolve("cast", &[CqlType::Int])
-        .unwrap();
+    let func = registry.resolve("cast", &[CqlType::Int]).unwrap();
     let bytes = 42i32.to_be_bytes();
     let result = func.execute(&[Some(&bytes)]).unwrap().unwrap();
     assert_eq!(String::from_utf8(result).unwrap(), "42");
@@ -201,10 +199,7 @@ fn selector_eval_column() {
     columns.insert("name".to_string(), 0);
     columns.insert("age".to_string(), 1);
 
-    let row = vec![
-        Some(b"Alice".to_vec()),
-        Some(30i32.to_be_bytes().to_vec()),
-    ];
+    let row = vec![Some(b"Alice".to_vec()), Some(30i32.to_be_bytes().to_vec())];
 
     let result = eval.evaluate(&Selector::Column("name".into()), &columns, &row, None);
     assert_eq!(result, Some(b"Alice".to_vec()));
@@ -317,10 +312,9 @@ fn parse_alter_type_rename() {
 
 #[test]
 fn parse_alter_materialized_view() {
-    let stmt = parser::parse(
-        "ALTER MATERIALIZED VIEW test_ks.my_view WITH gc_grace_seconds = 3600",
-    )
-    .unwrap();
+    let stmt =
+        parser::parse("ALTER MATERIALIZED VIEW test_ks.my_view WITH gc_grace_seconds = 3600")
+            .unwrap();
     match stmt {
         Statement::AlterMaterializedView(amv) => {
             assert_eq!(amv.name, "my_view");

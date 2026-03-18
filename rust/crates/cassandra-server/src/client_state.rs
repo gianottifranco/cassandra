@@ -311,7 +311,9 @@ mod tests {
     #[test]
     fn query_state_basics() {
         let cs = ClientState::new(localhost());
-        let qs = QueryState::new(&cs).with_consistency(10).with_timestamp(12345);
+        let qs = QueryState::new(&cs)
+            .with_consistency(10)
+            .with_timestamp(12345);
         assert_eq!(qs.consistency_level, 10);
         assert_eq!(qs.timestamp_micros, Some(12345));
         assert_eq!(qs.client_state.remote_address(), localhost());

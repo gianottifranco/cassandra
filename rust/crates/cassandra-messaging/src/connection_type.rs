@@ -90,12 +90,18 @@ mod tests {
 
     #[test]
     fn ping_is_urgent() {
-        assert_eq!(ConnectionType::classify(Verb::Ping, 0), ConnectionType::Urgent);
+        assert_eq!(
+            ConnectionType::classify(Verb::Ping, 0),
+            ConnectionType::Urgent
+        );
     }
 
     #[test]
     fn pong_is_urgent() {
-        assert_eq!(ConnectionType::classify(Verb::Pong, 0), ConnectionType::Urgent);
+        assert_eq!(
+            ConnectionType::classify(Verb::Pong, 0),
+            ConnectionType::Urgent
+        );
     }
 
     #[test]

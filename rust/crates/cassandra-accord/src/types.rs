@@ -40,7 +40,11 @@ impl TxnId {
     }
 
     pub fn with_timestamp(timestamp: i64, node_id: Uuid, sequence: u32) -> Self {
-        Self { timestamp, node_id, sequence }
+        Self {
+            timestamp,
+            node_id,
+            sequence,
+        }
     }
 }
 
@@ -61,7 +65,11 @@ impl PartialOrd for TxnId {
 
 impl fmt::Display for TxnId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TxnId(ts={}, node={}, seq={})", self.timestamp, self.node_id, self.sequence)
+        write!(
+            f,
+            "TxnId(ts={}, node={}, seq={})",
+            self.timestamp, self.node_id, self.sequence
+        )
     }
 }
 

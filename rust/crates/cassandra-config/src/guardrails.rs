@@ -286,10 +286,7 @@ impl PasswordPolicyGuardrail {
         if password.len() < self.min_length {
             return Some(GuardrailViolation {
                 guardrail_name: "password_policy".to_string(),
-                message: format!(
-                    "password must be at least {} characters",
-                    self.min_length
-                ),
+                message: format!("password must be at least {} characters", self.min_length),
                 action: GuardrailAction::Fail,
             });
         }
@@ -337,9 +334,15 @@ impl GuardrailRegistry {
     }
 
     /// Check all guardrails and return `Err` if any are `Fail`.
-    pub fn enforce(&self, config: &GuardrailsConfig) -> Result<Vec<GuardrailViolation>, GuardrailViolation> {
+    pub fn enforce(
+        &self,
+        config: &GuardrailsConfig,
+    ) -> Result<Vec<GuardrailViolation>, GuardrailViolation> {
         let violations = self.check_all(config);
-        if let Some(fail) = violations.iter().find(|v| v.action == GuardrailAction::Fail) {
+        if let Some(fail) = violations
+            .iter()
+            .find(|v| v.action == GuardrailAction::Fail)
+        {
             return Err(fail.clone());
         }
         // Return warnings only
@@ -440,7 +443,10 @@ mod tests {
         let mut g = GuardrailsConfig::default();
         g.truncate_enabled = false;
         assert_eq!(g.check_feature("truncate"), GuardrailAction::Fail);
-        assert_eq!(g.check_feature("allow_filtering"), GuardrailAction::Disabled);
+        assert_eq!(
+            g.check_feature("allow_filtering"),
+            GuardrailAction::Disabled
+        );
     }
 
     #[test]

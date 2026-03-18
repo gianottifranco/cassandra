@@ -103,8 +103,8 @@ impl PaxosRepair {
         let result = self
             .coordinator
             .execute_cas(
-                "",                // keyspace not needed for repair
-                "",                // table not needed for repair
+                "", // keyspace not needed for repair
+                "", // table not needed for repair
                 partition_key,
                 proposal.mutation.clone(),
                 || async { None },
@@ -146,8 +146,7 @@ mod tests {
             data_directories: vec![dir.path().to_path_buf()],
             ..Default::default()
         };
-        let engine =
-            Arc::new(cassandra_storage::engine::StorageEngine::open(config).unwrap());
+        let engine = Arc::new(cassandra_storage::engine::StorageEngine::open(config).unwrap());
         let storage = Arc::new(PaxosStorage::new(engine));
 
         let repair = PaxosRepair::new(storage, coordinator);

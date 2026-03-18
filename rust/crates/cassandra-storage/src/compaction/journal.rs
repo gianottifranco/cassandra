@@ -222,12 +222,8 @@ mod tests {
 
         {
             let mut journal = Journal::create(&path).unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 1 })
-                .unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 2 })
-                .unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 1 }).unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 2 }).unwrap();
             journal
                 .append(JournalEntry::Remove { sstable_id: 1 })
                 .unwrap();
@@ -272,12 +268,8 @@ mod tests {
         // Write two valid entries.
         {
             let mut journal = Journal::create(&path).unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 1 })
-                .unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 2 })
-                .unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 1 }).unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 2 }).unwrap();
         }
 
         // Corrupt the CRC of the first record by flipping a byte.
@@ -309,9 +301,7 @@ mod tests {
         // Write one valid entry.
         {
             let mut journal = Journal::create(&path).unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 1 })
-                .unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 1 }).unwrap();
         }
 
         // Append a truncated line (simulating a crash mid-write).
@@ -344,15 +334,9 @@ mod tests {
         let path = dir.path().join("seq.journal");
 
         let mut journal = Journal::create(&path).unwrap();
-        let seq1 = journal
-            .append(JournalEntry::Add { sstable_id: 1 })
-            .unwrap();
-        let seq2 = journal
-            .append(JournalEntry::Add { sstable_id: 2 })
-            .unwrap();
-        let seq3 = journal
-            .append(JournalEntry::Add { sstable_id: 3 })
-            .unwrap();
+        let seq1 = journal.append(JournalEntry::Add { sstable_id: 1 }).unwrap();
+        let seq2 = journal.append(JournalEntry::Add { sstable_id: 2 }).unwrap();
+        let seq3 = journal.append(JournalEntry::Add { sstable_id: 3 }).unwrap();
 
         assert_eq!(seq1, 1);
         assert_eq!(seq2, 2);
@@ -367,20 +351,14 @@ mod tests {
         // Write two entries.
         {
             let mut journal = Journal::create(&path).unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 1 })
-                .unwrap();
-            journal
-                .append(JournalEntry::Add { sstable_id: 2 })
-                .unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 1 }).unwrap();
+            journal.append(JournalEntry::Add { sstable_id: 2 }).unwrap();
         }
 
         // Re-open and continue.
         {
             let mut journal = Journal::open(&path).unwrap();
-            let seq = journal
-                .append(JournalEntry::Add { sstable_id: 3 })
-                .unwrap();
+            let seq = journal.append(JournalEntry::Add { sstable_id: 3 }).unwrap();
             assert_eq!(seq, 3);
         }
 
@@ -395,9 +373,7 @@ mod tests {
         let path = dir.path().join("sync.journal");
 
         let mut journal = Journal::create(&path).unwrap();
-        journal
-            .append(JournalEntry::Add { sstable_id: 1 })
-            .unwrap();
+        journal.append(JournalEntry::Add { sstable_id: 1 }).unwrap();
         journal.sync().unwrap();
 
         // File should be readable and contain the entry.

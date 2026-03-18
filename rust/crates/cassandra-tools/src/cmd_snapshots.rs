@@ -85,7 +85,8 @@ pub fn list_snapshots(client: &AdminClient) {
                 let name = snap["name"].as_str().unwrap_or("-");
                 let keyspace = snap["keyspace"].as_str().unwrap_or("-");
                 let table = snap["table"].as_str().unwrap_or("-");
-                let size = snap["true_size"].as_str()
+                let size = snap["true_size"]
+                    .as_str()
                     .or_else(|| snap["true_size_bytes"].as_str())
                     .unwrap_or("-");
                 println!("{:<30} {:<20} {:<15} {:<20}", name, keyspace, table, size);
@@ -192,7 +193,11 @@ mod tests {
     #[test]
     fn test_generate_snapshot_name_format() {
         let name = generate_snapshot_name();
-        assert!(name.starts_with("snapshot-"), "Expected prefix 'snapshot-', got: {}", name);
+        assert!(
+            name.starts_with("snapshot-"),
+            "Expected prefix 'snapshot-', got: {}",
+            name
+        );
         let ts_part = &name["snapshot-".len()..];
         let ts: u64 = ts_part.parse().expect("Timestamp part should be numeric");
         // Timestamp should be a reasonable Unix epoch value (after 2020).

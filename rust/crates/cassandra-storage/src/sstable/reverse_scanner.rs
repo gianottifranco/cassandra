@@ -77,12 +77,8 @@ impl ReverseScanner {
                     Bound::Unbounded => true,
                 };
                 let before_end = match &end {
-                    Bound::Included(e_bound) => {
-                        e.partition_key.as_slice() <= e_bound.as_slice()
-                    }
-                    Bound::Excluded(e_bound) => {
-                        e.partition_key.as_slice() < e_bound.as_slice()
-                    }
+                    Bound::Included(e_bound) => e.partition_key.as_slice() <= e_bound.as_slice(),
+                    Bound::Excluded(e_bound) => e.partition_key.as_slice() < e_bound.as_slice(),
                     Bound::Unbounded => true,
                 };
                 after_start && before_end
@@ -234,12 +230,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let desc = write_sstable(&dir);
 
-        let mut scanner = ReverseScanner::open_range(
-            desc,
-            Bound::Included(vec![1]),
-            Bound::Included(vec![3]),
-        )
-        .unwrap();
+        let mut scanner =
+            ReverseScanner::open_range(desc, Bound::Included(vec![1]), Bound::Included(vec![3]))
+                .unwrap();
 
         let mut keys = Vec::new();
         while let Some(p) = scanner.next_partition().unwrap() {
@@ -254,12 +247,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let desc = write_sstable(&dir);
 
-        let mut scanner = ReverseScanner::open_range(
-            desc,
-            Bound::Included(vec![2]),
-            Bound::Included(vec![2]),
-        )
-        .unwrap();
+        let mut scanner =
+            ReverseScanner::open_range(desc, Bound::Included(vec![2]), Bound::Included(vec![2]))
+                .unwrap();
 
         let p = scanner.next_partition().unwrap().unwrap();
         assert_eq!(p.key, vec![2]);

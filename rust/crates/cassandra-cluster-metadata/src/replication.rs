@@ -358,9 +358,10 @@ pub fn create_strategy(
                     continue;
                 }
                 if let Some((total_str, trans_str)) = v.split_once('/') {
-                    if let (Ok(total), Ok(trans)) =
-                        (total_str.trim().parse::<usize>(), trans_str.trim().parse::<usize>())
-                    {
+                    if let (Ok(total), Ok(trans)) = (
+                        total_str.trim().parse::<usize>(),
+                        trans_str.trim().parse::<usize>(),
+                    ) {
                         dc_replication.insert(k.clone(), total);
                         if trans > 0 {
                             dc_transient.insert(k.clone(), trans);
@@ -370,7 +371,10 @@ pub fn create_strategy(
                     dc_replication.insert(k.clone(), rf);
                 }
             }
-            Box::new(TransientReplicationStrategy::new(dc_replication, dc_transient))
+            Box::new(TransientReplicationStrategy::new(
+                dc_replication,
+                dc_transient,
+            ))
         } else {
             let dc_replication: BTreeMap<String, usize> = options
                 .iter()
@@ -771,8 +775,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_replicas(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_replicas(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 3);
 
         // Full replicas should come before transient
@@ -801,8 +804,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let read_eps =
-            strategy.calculate_read_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let read_eps = strategy.calculate_read_endpoints(Token::from_raw(-50), &ring, &snitch);
         // Only full replicas serve reads
         assert_eq!(read_eps.len(), 2);
     }
@@ -819,8 +821,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 2);
     }
 

@@ -23,7 +23,10 @@ pub enum AccordError {
     Unavailable { required: usize, available: usize },
 
     #[error("Invalid status transition from {from} to {to}")]
-    InvalidTransition { from: CommandStatus, to: CommandStatus },
+    InvalidTransition {
+        from: CommandStatus,
+        to: CommandStatus,
+    },
 
     #[error("Journal write failed: {0}")]
     JournalError(String),

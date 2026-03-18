@@ -9,6 +9,7 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::SecurityError;
 use crate::auth::{AuthenticatedUser, Authenticator, Credentials};
 use crate::authz::{Authorizer, Permission, Resource};
 use crate::cache::AuthCacheConfig;
@@ -18,7 +19,6 @@ use crate::network_auth::NetworkAuthorizer;
 use crate::permissions_cache::PermissionsCache;
 use crate::roles::RoleManager;
 use crate::roles_cache::RolesCache;
-use crate::SecurityError;
 
 /// Unified auth manager owning all auth components and caches.
 ///
@@ -57,7 +57,10 @@ impl AuthManager {
     }
 
     /// Authenticate a user with credentials.
-    pub fn authenticate(&self, credentials: &Credentials) -> Result<AuthenticatedUser, SecurityError> {
+    pub fn authenticate(
+        &self,
+        credentials: &Credentials,
+    ) -> Result<AuthenticatedUser, SecurityError> {
         self.authenticator.authenticate(credentials)
     }
 

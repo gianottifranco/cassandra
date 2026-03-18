@@ -76,7 +76,10 @@ pub fn run(file: &str, gc_grace_seconds: u64) {
         }
     };
 
-    println!("Scanning for expired tombstone blockers: {}", desc.file_prefix());
+    println!(
+        "Scanning for expired tombstone blockers: {}",
+        desc.file_prefix()
+    );
     println!("GC grace period: {} seconds", gc_grace_seconds);
     println!();
 
@@ -168,10 +171,7 @@ pub fn run(file: &str, gc_grace_seconds: u64) {
     println!("  Total partitions scanned : {}", partitions.len());
     println!("  Total tombstones         : {}", total_tombstones);
     println!("  Expired tombstones       : {}", expired_tombstones);
-    println!(
-        "  Blocking partitions      : {}",
-        blocking_partitions.len()
-    );
+    println!("  Blocking partitions      : {}", blocking_partitions.len());
 }
 
 #[cfg(test)]

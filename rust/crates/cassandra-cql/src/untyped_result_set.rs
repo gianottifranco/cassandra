@@ -57,12 +57,16 @@ impl UntypedResultSet {
 
     /// Iterate over rows.
     pub fn iter(&self) -> impl Iterator<Item = UntypedRow> + '_ {
-        self.rows.iter().map(|data| UntypedRow { data: data.clone() })
+        self.rows
+            .iter()
+            .map(|data| UntypedRow { data: data.clone() })
     }
 
     /// Get a specific row by index.
     pub fn row(&self, index: usize) -> Option<UntypedRow> {
-        self.rows.get(index).map(|data| UntypedRow { data: data.clone() })
+        self.rows
+            .get(index)
+            .map(|data| UntypedRow { data: data.clone() })
     }
 }
 
@@ -119,11 +123,22 @@ impl UntypedRow {
         if bytes.len() == 16 {
             Some(format!(
                 "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5],
-                bytes[6], bytes[7],
-                bytes[8], bytes[9],
-                bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
+                bytes[0],
+                bytes[1],
+                bytes[2],
+                bytes[3],
+                bytes[4],
+                bytes[5],
+                bytes[6],
+                bytes[7],
+                bytes[8],
+                bytes[9],
+                bytes[10],
+                bytes[11],
+                bytes[12],
+                bytes[13],
+                bytes[14],
+                bytes[15]
             ))
         } else {
             None
@@ -208,10 +223,7 @@ mod tests {
 
     #[test]
     fn null_value() {
-        let rs = UntypedResultSet::from_columns_and_rows(
-            vec!["name".into()],
-            vec![vec![None]],
-        );
+        let rs = UntypedResultSet::from_columns_and_rows(vec!["name".into()], vec![vec![None]]);
         let row = rs.row(0).unwrap();
         assert!(row.get_string("name").is_none());
         assert!(!row.has("name"));
@@ -232,8 +244,8 @@ mod tests {
     #[test]
     fn get_uuid() {
         let uuid_bytes = vec![
-            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4,
-            0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00,
+            0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
         ];
         let rs = UntypedResultSet::from_columns_and_rows(
             vec!["id".into()],

@@ -190,21 +190,23 @@ impl MessagingMetrics {
     }
 
     /// Record bytes sent, updating both global and connection-type metrics.
-    pub fn record_bytes_sent(
-        &self,
-        bytes: u64,
-        conn_type: crate::connection_type::ConnectionType,
-    ) {
+    pub fn record_bytes_sent(&self, bytes: u64, conn_type: crate::connection_type::ConnectionType) {
         self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
         match conn_type {
             crate::connection_type::ConnectionType::Urgent => {
-                self.urgent_metrics.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+                self.urgent_metrics
+                    .bytes_sent
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
             crate::connection_type::ConnectionType::Small => {
-                self.small_metrics.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+                self.small_metrics
+                    .bytes_sent
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
             crate::connection_type::ConnectionType::Large => {
-                self.large_metrics.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+                self.large_metrics
+                    .bytes_sent
+                    .fetch_add(bytes, Ordering::Relaxed);
             }
         }
     }
@@ -287,7 +289,11 @@ mod tests {
         let metrics = MessagingMetrics::new();
         let snaps = metrics.all_verb_snapshots();
         // Should have all 44 verbs (45 total - GossipShutdown has no separate response)
-        assert!(snaps.len() >= 44, "Expected >= 44 verbs, got {}", snaps.len());
+        assert!(
+            snaps.len() >= 44,
+            "Expected >= 44 verbs, got {}",
+            snaps.len()
+        );
 
         // Spot-check some previously missing verbs
         metrics.verb(Verb::StreamInit).record_sent();

@@ -3,11 +3,11 @@
 //! Benchmarks for IO operations: sequential writes, positioned reads,
 //! compression throughput, and buffer pool operations.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-use cassandra_io::compress::{create_compressor, CompressorType, ICompressor};
+use cassandra_io::compress::{CompressorType, ICompressor, create_compressor};
 use cassandra_io::util::buffer_pool::BufferPool;
 use cassandra_io::util::chunk_reader::SimpleChunkReader;
 use cassandra_io::util::rebufferer::Rebufferer;

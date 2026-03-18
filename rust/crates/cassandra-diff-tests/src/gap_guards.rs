@@ -108,7 +108,9 @@ fn gap_guard_cql_schema_statements() {
     use cassandra_cql::parser;
 
     // Verify CREATE FUNCTION parses
-    let stmt = parser::parse("CREATE FUNCTION ks.myfunc(val int) CALLED ON NULL INPUT RETURNS int LANGUAGE java AS 'return val;'");
+    let stmt = parser::parse(
+        "CREATE FUNCTION ks.myfunc(val int) CALLED ON NULL INPUT RETURNS int LANGUAGE java AS 'return val;'",
+    );
     assert!(stmt.is_ok(), "CREATE FUNCTION should parse");
 
     // Verify CREATE AGGREGATE parses
@@ -128,9 +130,9 @@ fn gap_guard_cql_schema_statements() {
 fn gap_guard_cql_selection_functions() {
     // CLOSED by prompt-12: WritetimeOrTtl selector now evaluates against CellMeta.
     // SelectorEvaluator accepts cell_metadata parameter for WRITETIME/TTL resolution.
-    use cassandra_cql::selection::selector_eval::{CellMeta, SelectorEvaluator};
     use cassandra_cql::ast::Selector;
     use cassandra_cql::functions::FunctionRegistry;
+    use cassandra_cql::selection::selector_eval::{CellMeta, SelectorEvaluator};
     use std::collections::HashMap;
 
     let registry = FunctionRegistry::new();

@@ -13,9 +13,9 @@
 
 use std::sync::Arc;
 
+use cassandra_messaging::MessagingService;
 use cassandra_messaging::service::MessageHandler;
 use cassandra_messaging::verb::Verb;
-use cassandra_messaging::MessagingService;
 use tracing::info;
 
 use super::batch_handler::{BatchRemoveVerbHandler, BatchStoreVerbHandler};
@@ -30,38 +30,31 @@ use super::read_repair_handler::ReadRepairVerbHandler;
 /// is created but before it starts accepting connections.
 pub fn register_all_verb_handlers(messaging: &MessagingService) {
     // Mutation
-    let mutation_handler: MessageHandler =
-        Arc::new(|msg| MutationVerbHandler::handle(msg));
+    let mutation_handler: MessageHandler = Arc::new(|msg| MutationVerbHandler::handle(msg));
     messaging.register_handler(Verb::Mutation, mutation_handler);
 
     // ReadData
-    let read_data_handler: MessageHandler =
-        Arc::new(|msg| ReadDataVerbHandler::handle(msg));
+    let read_data_handler: MessageHandler = Arc::new(|msg| ReadDataVerbHandler::handle(msg));
     messaging.register_handler(Verb::ReadData, read_data_handler);
 
     // ReadDigest
-    let read_digest_handler: MessageHandler =
-        Arc::new(|msg| ReadDigestVerbHandler::handle(msg));
+    let read_digest_handler: MessageHandler = Arc::new(|msg| ReadDigestVerbHandler::handle(msg));
     messaging.register_handler(Verb::ReadDigest, read_digest_handler);
 
     // Hint
-    let hint_handler: MessageHandler =
-        Arc::new(|msg| HintVerbHandler::handle(msg));
+    let hint_handler: MessageHandler = Arc::new(|msg| HintVerbHandler::handle(msg));
     messaging.register_handler(Verb::Hint, hint_handler);
 
     // BatchStore
-    let batch_store_handler: MessageHandler =
-        Arc::new(|msg| BatchStoreVerbHandler::handle(msg));
+    let batch_store_handler: MessageHandler = Arc::new(|msg| BatchStoreVerbHandler::handle(msg));
     messaging.register_handler(Verb::BatchStore, batch_store_handler);
 
     // BatchRemove
-    let batch_remove_handler: MessageHandler =
-        Arc::new(|msg| BatchRemoveVerbHandler::handle(msg));
+    let batch_remove_handler: MessageHandler = Arc::new(|msg| BatchRemoveVerbHandler::handle(msg));
     messaging.register_handler(Verb::BatchRemove, batch_remove_handler);
 
     // ReadRepair
-    let read_repair_handler: MessageHandler =
-        Arc::new(|msg| ReadRepairVerbHandler::handle(msg));
+    let read_repair_handler: MessageHandler = Arc::new(|msg| ReadRepairVerbHandler::handle(msg));
     messaging.register_handler(Verb::ReadRepair, read_repair_handler);
 
     info!("Registered all data-path verb handlers");
@@ -98,7 +91,10 @@ mod tests {
                 "Handler for {verb} should return a response"
             );
             let resp = result.unwrap();
-            assert!(resp.is_response(), "Response for {verb} should have RESPONSE flag");
+            assert!(
+                resp.is_response(),
+                "Response for {verb} should have RESPONSE flag"
+            );
         }
     }
 
@@ -117,9 +113,7 @@ mod tests {
         use super::super::mutation_handler::MutationRequest;
         use crate::write::CoordinatedMutation;
         let req = MutationRequest {
-            mutation: CoordinatedMutation::simple(
-                "ks".into(), "tbl".into(), vec![1], vec![], 1000,
-            ),
+            mutation: CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000),
         };
         serde_json::to_vec(&req).unwrap()
     }
@@ -148,9 +142,7 @@ mod tests {
         use super::super::hint_handler::HintRequest;
         use crate::write::CoordinatedMutation;
         serde_json::to_vec(&HintRequest {
-            mutation: CoordinatedMutation::simple(
-                "ks".into(), "tbl".into(), vec![1], vec![], 1000,
-            ),
+            mutation: CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000),
             hint_id: 1,
             created_at: 1_700_000_000_000,
         })
@@ -165,7 +157,11 @@ mod tests {
             id: uuid::Uuid::new_v4(),
             batch_type: BatchType::Logged,
             mutations: vec![CoordinatedMutation::simple(
-                "ks".into(), "tbl".into(), vec![1], vec![], 1000,
+                "ks".into(),
+                "tbl".into(),
+                vec![1],
+                vec![],
+                1000,
             )],
             created_at: 1_700_000_000_000,
         })
@@ -184,9 +180,7 @@ mod tests {
         use super::super::read_repair_handler::ReadRepairRequest;
         use crate::write::CoordinatedMutation;
         serde_json::to_vec(&ReadRepairRequest {
-            mutation: CoordinatedMutation::simple(
-                "ks".into(), "tbl".into(), vec![1], vec![], 1000,
-            ),
+            mutation: CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000),
         })
         .unwrap()
     }

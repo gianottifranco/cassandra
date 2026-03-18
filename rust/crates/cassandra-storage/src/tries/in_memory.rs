@@ -201,9 +201,7 @@ impl<'a, T> Cursor<T> for InMemoryTrieCursor<'a, T> {
     }
 
     fn content(&self) -> Option<&T> {
-        self.stack
-            .last()
-            .and_then(|f| f.node.content.as_ref())
+        self.stack.last().and_then(|f| f.node.content.as_ref())
     }
 }
 

@@ -185,9 +185,10 @@ mod tests {
             key_length: 256,
             key_provider: Some(KeyProviderConfig {
                 class_name: "FileKeyProvider".to_string(),
-                parameters: HashMap::from([
-                    ("keystore".to_string(), "/etc/keys/tde.keystore".to_string()),
-                ]),
+                parameters: HashMap::from([(
+                    "keystore".to_string(),
+                    "/etc/keys/tde.keystore".to_string(),
+                )]),
             }),
         };
         assert!(opts.validate().is_empty());

@@ -59,7 +59,10 @@ pub fn is_compatible_with(from: &CqlType, to: &CqlType) -> bool {
     }
     match (from, to) {
         // Numeric promotions (widening, same wire encoding family)
-        (CqlType::Tinyint, CqlType::Smallint | CqlType::Int | CqlType::Bigint | CqlType::Varint) => true,
+        (
+            CqlType::Tinyint,
+            CqlType::Smallint | CqlType::Int | CqlType::Bigint | CqlType::Varint,
+        ) => true,
         (CqlType::Smallint, CqlType::Int | CqlType::Bigint | CqlType::Varint) => true,
         (CqlType::Int, CqlType::Bigint | CqlType::Varint) => true,
         (CqlType::Bigint, CqlType::Varint) => true,

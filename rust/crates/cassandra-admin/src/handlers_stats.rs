@@ -214,8 +214,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let body = body_json(resp);
-        assert!(body["latency_histograms"]["read"]["p50"].is_f64()
-            || body["latency_histograms"]["read"]["p50"].is_i64());
+        assert!(
+            body["latency_histograms"]["read"]["p50"].is_f64()
+                || body["latency_histograms"]["read"]["p50"].is_i64()
+        );
     }
 
     #[test]
@@ -233,7 +235,12 @@ mod tests {
 
         let body = body_json(resp);
         assert_eq!(body["gc_enabled"], false);
-        assert!(body["note"].as_str().unwrap().contains("no garbage collector"));
+        assert!(
+            body["note"]
+                .as_str()
+                .unwrap()
+                .contains("no garbage collector")
+        );
     }
 
     #[test]

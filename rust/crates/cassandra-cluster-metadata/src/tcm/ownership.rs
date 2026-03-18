@@ -410,10 +410,7 @@ mod tests {
 
     #[test]
     fn replica_group_with_transient() {
-        let group = ReplicaGroup::with_transient(
-            vec![ep(7001), ep(7002)],
-            vec![ep(7003)],
-        );
+        let group = ReplicaGroup::with_transient(vec![ep(7001), ep(7002)], vec![ep(7003)]);
         assert_eq!(group.size(), 3);
         assert_eq!(group.full.len(), 2);
         assert_eq!(group.transient_replicas.len(), 1);
@@ -430,7 +427,10 @@ mod tests {
         let range_b = TokenRange::new(Token::from_raw(100), Token::from_raw(200));
 
         dp.add_read(range_a, ReplicaGroup::new(vec![ep(7001), ep(7002)]));
-        dp.add_write(range_a, ReplicaGroup::new(vec![ep(7001), ep(7002), ep(7003)]));
+        dp.add_write(
+            range_a,
+            ReplicaGroup::new(vec![ep(7001), ep(7002), ep(7003)]),
+        );
 
         dp.add_read(range_b, ReplicaGroup::new(vec![ep(7002), ep(7003)]));
         dp.add_write(range_b, ReplicaGroup::new(vec![ep(7002), ep(7003)]));

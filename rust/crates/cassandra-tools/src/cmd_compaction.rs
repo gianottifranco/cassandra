@@ -91,18 +91,9 @@ pub fn compaction_stats(client: &AdminClient) {
                         "compaction type", "keyspace", "table", "completed", "total", "unit"
                     );
                     for c in compactions {
-                        let ctype = c
-                            .get("task_type")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let ks = c
-                            .get("keyspace")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
-                        let tbl = c
-                            .get("table")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("?");
+                        let ctype = c.get("task_type").and_then(|v| v.as_str()).unwrap_or("?");
+                        let ks = c.get("keyspace").and_then(|v| v.as_str()).unwrap_or("?");
+                        let tbl = c.get("table").and_then(|v| v.as_str()).unwrap_or("?");
                         let completed = c
                             .get("completed")
                             .map(|v| v.to_string())
@@ -111,10 +102,7 @@ pub fn compaction_stats(client: &AdminClient) {
                             .get("total")
                             .map(|v| v.to_string())
                             .unwrap_or_else(|| "?".to_string());
-                        let unit = c
-                            .get("unit")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("bytes");
+                        let unit = c.get("unit").and_then(|v| v.as_str()).unwrap_or("bytes");
                         println!(
                             "{:<12} {:<20} {:<20} {:<12} {:<12} {}",
                             ctype, ks, tbl, completed, total, unit
@@ -140,21 +128,21 @@ pub fn compaction_history(client: &AdminClient) {
                 }
                 println!(
                     "{:<38} {:<20} {:<20} {:<12} {:<12} {:<12} {}",
-                    "id", "keyspace", "table", "compacted_at", "bytes_in", "bytes_out", "rows_merged"
+                    "id",
+                    "keyspace",
+                    "table",
+                    "compacted_at",
+                    "bytes_in",
+                    "bytes_out",
+                    "rows_merged"
                 );
                 for entry in history {
-                    let id = entry
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("?");
                     let ks = entry
                         .get("keyspace")
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
-                    let tbl = entry
-                        .get("table")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let tbl = entry.get("table").and_then(|v| v.as_str()).unwrap_or("?");
                     let at = entry
                         .get("compacted_at")
                         .and_then(|v| v.as_str())

@@ -229,15 +229,10 @@ define_cast!(
     }
 );
 
-define_cast!(
-    CastFloatToText,
-    CqlType::Float,
-    CqlType::Varchar,
-    |bytes| {
-        let v = f32::from_be_bytes(bytes.try_into().map_err(|_| "invalid float")?);
-        v.to_string().into_bytes()
-    }
-);
+define_cast!(CastFloatToText, CqlType::Float, CqlType::Varchar, |bytes| {
+    let v = f32::from_be_bytes(bytes.try_into().map_err(|_| "invalid float")?);
+    v.to_string().into_bytes()
+});
 
 define_cast!(
     CastDoubleToText,
@@ -249,35 +244,20 @@ define_cast!(
     }
 );
 
-define_cast!(
-    CastIntToBigint,
-    CqlType::Int,
-    CqlType::Bigint,
-    |bytes| {
-        let v = i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid int")?);
-        (v as i64).to_be_bytes().to_vec()
-    }
-);
+define_cast!(CastIntToBigint, CqlType::Int, CqlType::Bigint, |bytes| {
+    let v = i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid int")?);
+    (v as i64).to_be_bytes().to_vec()
+});
 
-define_cast!(
-    CastIntToFloat,
-    CqlType::Int,
-    CqlType::Float,
-    |bytes| {
-        let v = i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid int")?);
-        (v as f32).to_be_bytes().to_vec()
-    }
-);
+define_cast!(CastIntToFloat, CqlType::Int, CqlType::Float, |bytes| {
+    let v = i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid int")?);
+    (v as f32).to_be_bytes().to_vec()
+});
 
-define_cast!(
-    CastIntToDouble,
-    CqlType::Int,
-    CqlType::Double,
-    |bytes| {
-        let v = i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid int")?);
-        (v as f64).to_be_bytes().to_vec()
-    }
-);
+define_cast!(CastIntToDouble, CqlType::Int, CqlType::Double, |bytes| {
+    let v = i32::from_be_bytes(bytes.try_into().map_err(|_| "invalid int")?);
+    (v as f64).to_be_bytes().to_vec()
+});
 
 // ── typeAsBlob / blobAsType ───────────────────────────────────────────
 

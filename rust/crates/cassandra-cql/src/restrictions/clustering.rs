@@ -74,10 +74,7 @@ pub fn validate_clustering(
                     }
                     RestrictionKind::In
                 }
-                op @ (RelationOp::Lt
-                | RelationOp::Gt
-                | RelationOp::Lte
-                | RelationOp::Gte) => {
+                op @ (RelationOp::Lt | RelationOp::Gt | RelationOp::Lte | RelationOp::Gte) => {
                     if i < last_restricted {
                         return Err(RestrictionError::InvalidClusteringOrder(
                             "Slice restrictions are only supported on the last clustering column"
@@ -157,10 +154,7 @@ mod tests {
     #[test]
     fn contiguous_prefix() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Eq),
-            rel("ck2", RelationOp::Eq),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Eq), rel("ck2", RelationOp::Eq)];
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }
@@ -180,10 +174,7 @@ mod tests {
     #[test]
     fn slice_on_last() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Eq),
-            rel("ck2", RelationOp::Gt),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Eq), rel("ck2", RelationOp::Gt)];
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }
@@ -191,10 +182,7 @@ mod tests {
     #[test]
     fn slice_not_on_last_rejected() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Gt),
-            rel("ck2", RelationOp::Eq),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Gt), rel("ck2", RelationOp::Eq)];
         let result = validate_clustering(&relations, &table);
         assert!(result.is_err());
     }
@@ -202,10 +190,7 @@ mod tests {
     #[test]
     fn in_on_last() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Eq),
-            rel("ck2", RelationOp::In),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Eq), rel("ck2", RelationOp::In)];
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }

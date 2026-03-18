@@ -65,7 +65,9 @@ pub enum HandshakeError {
     #[error("CRC mismatch in handshake")]
     CrcMismatch,
 
-    #[error("Version mismatch: local [{min_local}..{max_local}], remote [{min_remote}..{max_remote}]")]
+    #[error(
+        "Version mismatch: local [{min_local}..{max_local}], remote [{min_remote}..{max_remote}]"
+    )]
     VersionMismatch {
         min_local: i32,
         max_local: i32,
@@ -158,28 +160,16 @@ where
     stream.read_exact(&mut accept_buf).await?;
 
     let accept_crc = crc32c(&accept_buf[..8]);
-    let stored_crc = u32::from_be_bytes([
-        accept_buf[8],
-        accept_buf[9],
-        accept_buf[10],
-        accept_buf[11],
-    ]);
+    let stored_crc =
+        u32::from_be_bytes([accept_buf[8], accept_buf[9], accept_buf[10], accept_buf[11]]);
     if accept_crc != stored_crc {
         return Err(HandshakeError::CrcMismatch);
     }
 
-    let max_version = i32::from_be_bytes([
-        accept_buf[0],
-        accept_buf[1],
-        accept_buf[2],
-        accept_buf[3],
-    ]);
-    let use_version = i32::from_be_bytes([
-        accept_buf[4],
-        accept_buf[5],
-        accept_buf[6],
-        accept_buf[7],
-    ]);
+    let max_version =
+        i32::from_be_bytes([accept_buf[0], accept_buf[1], accept_buf[2], accept_buf[3]]);
+    let use_version =
+        i32::from_be_bytes([accept_buf[4], accept_buf[5], accept_buf[6], accept_buf[7]]);
 
     if use_version < MIN_MESSAGING_VERSION || use_version > CURRENT_MESSAGING_VERSION {
         return Err(HandshakeError::VersionMismatch {
@@ -340,13 +330,7 @@ mod tests {
         let sender_addr: SocketAddr = "192.168.1.1:7000".parse().unwrap();
 
         let (client_result, server_result) = tokio::join!(
-            perform_outbound_handshake(
-                &mut client,
-                ConnectionType::Small,
-                true,
-                true,
-                sender_addr,
-            ),
+            perform_outbound_handshake(&mut client, ConnectionType::Small, true, true, sender_addr,),
             accept_inbound_handshake(&mut server),
         );
 
@@ -399,10 +383,7 @@ mod tests {
 
         // Write bad magic manually
         let bad_magic = 0xDEADBEEFu32;
-        client
-            .write_all(&bad_magic.to_be_bytes())
-            .await
-            .unwrap();
+        client.write_all(&bad_magic.to_be_bytes()).await.unwrap();
         client.write_all(&[0u8; 4]).await.unwrap(); // flags
         client.write_all(&[0u8; 2]).await.unwrap(); // addr_len = 0
         client.write_all(&[0u8; 4]).await.unwrap(); // crc (wrong but won't matter)

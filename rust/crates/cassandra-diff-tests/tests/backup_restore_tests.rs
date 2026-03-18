@@ -204,18 +204,14 @@ fn multiple_snapshots_coexist() {
     engine.apply_mutation(&m).unwrap();
     engine.flush_cf("ks.multi_snap").unwrap();
 
-    let manifest1 = engine
-        .snapshot("snap-a", "ks", "multi_snap", None)
-        .unwrap();
+    let manifest1 = engine.snapshot("snap-a", "ks", "multi_snap", None).unwrap();
 
     // Write more
     let m = make_mutation("ks", "multi_snap", b"pk2", b"ck", "v", b"data2", 2);
     engine.apply_mutation(&m).unwrap();
     engine.flush_cf("ks.multi_snap").unwrap();
 
-    let manifest2 = engine
-        .snapshot("snap-b", "ks", "multi_snap", None)
-        .unwrap();
+    let manifest2 = engine.snapshot("snap-b", "ks", "multi_snap", None).unwrap();
 
     assert!(!manifest1.files.is_empty());
     assert!(!manifest2.files.is_empty());

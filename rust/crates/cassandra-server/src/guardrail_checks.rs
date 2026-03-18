@@ -60,10 +60,7 @@ pub fn check_create_table(
 }
 
 /// Check guardrails for CREATE INDEX.
-pub fn check_create_index(
-    config: &GuardrailsConfig,
-    indexes_on_table: i64,
-) -> GuardrailResult {
+pub fn check_create_index(config: &GuardrailsConfig, indexes_on_table: i64) -> GuardrailResult {
     if let Some(v) = check_threshold(config, "secondary_indexes_per_table", indexes_on_table + 1) {
         if v.action == GuardrailAction::Fail {
             return GuardrailResult::Rejected(v.message);
@@ -418,11 +415,10 @@ mod tests {
             ..Default::default()
         };
         let mut m = test_mutation();
-        m.rows[0].cells[0].collection_op =
-            Some(cassandra_coordinator::CollectionOp::Append(vec![
-                b"a".to_vec(),
-                b"b".to_vec(),
-            ]));
+        m.rows[0].cells[0].collection_op = Some(cassandra_coordinator::CollectionOp::Append(vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+        ]));
         let result = check_write_guardrails(&guardrails, &m);
         assert!(matches!(result, GuardrailResult::Warned(_)));
     }

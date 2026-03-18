@@ -27,8 +27,8 @@
 //! - `org.apache.cassandra.net.ResourceLimits.Limit`
 //! - `org.apache.cassandra.net.ResourceLimits.EndpointAndGlobal`
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Default per-connection byte limit (4 MiB).
 pub const DEFAULT_CONNECTION_LIMIT: usize = 4 * 1024 * 1024;

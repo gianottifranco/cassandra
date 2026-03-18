@@ -267,11 +267,10 @@ impl CqlValue {
                     minimum: 1,
                     got: data.len(),
                 })?;
-                let (days, n2) =
-                    decode_vint(&data[n1..]).map_err(|_| CodecError::TooShort {
-                        minimum: 1,
-                        got: data.len().saturating_sub(n1),
-                    })?;
+                let (days, n2) = decode_vint(&data[n1..]).map_err(|_| CodecError::TooShort {
+                    minimum: 1,
+                    got: data.len().saturating_sub(n1),
+                })?;
                 let (nanoseconds, _) =
                     decode_vint(&data[n1 + n2..]).map_err(|_| CodecError::TooShort {
                         minimum: 1,
@@ -287,7 +286,10 @@ impl CqlValue {
             // Java oracle: ListType / SetType / MapType serializers.
             CqlType::List(inner, _) | CqlType::Set(inner, _) => {
                 if data.len() < 4 {
-                    return Err(CodecError::TooShort { minimum: 4, got: data.len() });
+                    return Err(CodecError::TooShort {
+                        minimum: 4,
+                        got: data.len(),
+                    });
                 }
                 let count = BigEndian::read_i32(&data[0..4]) as usize;
                 let mut pos = 4;
@@ -305,7 +307,10 @@ impl CqlValue {
             }
             CqlType::Map(key_type, value_type, _) => {
                 if data.len() < 4 {
-                    return Err(CodecError::TooShort { minimum: 4, got: data.len() });
+                    return Err(CodecError::TooShort {
+                        minimum: 4,
+                        got: data.len(),
+                    });
                 }
                 let count = BigEndian::read_i32(&data[0..4]) as usize;
                 let mut pos = 4;
@@ -338,7 +343,11 @@ impl CqlValue {
             }
             // UDT: same wire format as Tuple (length-prefixed optional fields).
             // Java oracle: UserType serializer.
-            CqlType::Udt { field_names, field_types, .. } => {
+            CqlType::Udt {
+                field_names,
+                field_types,
+                ..
+            } => {
                 let mut pos = 0;
                 let mut fields = Vec::with_capacity(field_names.len());
                 for (name, field_type) in field_names.iter().zip(field_types.iter()) {
@@ -361,7 +370,10 @@ impl CqlValue {
 /// Negative length is treated as an empty slice.
 fn read_length_prefixed(data: &[u8], pos: usize) -> Result<(&[u8], usize), CodecError> {
     if pos + 4 > data.len() {
-        return Err(CodecError::TooShort { minimum: pos + 4, got: data.len() });
+        return Err(CodecError::TooShort {
+            minimum: pos + 4,
+            got: data.len(),
+        });
     }
     let len = BigEndian::read_i32(&data[pos..]);
     if len < 0 {
@@ -369,7 +381,10 @@ fn read_length_prefixed(data: &[u8], pos: usize) -> Result<(&[u8], usize), Codec
     }
     let len = len as usize;
     if pos + 4 + len > data.len() {
-        return Err(CodecError::TooShort { minimum: pos + 4 + len, got: data.len() });
+        return Err(CodecError::TooShort {
+            minimum: pos + 4 + len,
+            got: data.len(),
+        });
     }
     Ok((&data[pos + 4..pos + 4 + len], 4 + len))
 }

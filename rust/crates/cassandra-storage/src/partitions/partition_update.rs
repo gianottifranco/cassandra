@@ -85,9 +85,7 @@ impl PartitionUpdate {
 
     /// Returns `true` if this update has no data.
     pub fn is_empty(&self) -> bool {
-        self.rows.is_empty()
-            && self.static_row.is_none()
-            && self.deletion_info.is_live()
+        self.rows.is_empty() && self.static_row.is_none() && self.deletion_info.is_live()
     }
 }
 

@@ -11,8 +11,8 @@
 //! across reader threads via `Arc<KeyCache>`.
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -56,8 +56,7 @@ pub struct KeyCache {
 impl KeyCache {
     /// Create a new key cache with the given configuration.
     pub fn new(config: KeyCacheConfig) -> Arc<Self> {
-        let cap = NonZeroUsize::new(config.max_entries)
-            .expect("max_entries must be > 0");
+        let cap = NonZeroUsize::new(config.max_entries).expect("max_entries must be > 0");
         Arc::new(Self {
             inner: Mutex::new(LruCache::new(cap)),
             hits: AtomicU64::new(0),

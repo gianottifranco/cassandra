@@ -29,7 +29,9 @@ pub fn apply_distinct(
             .flat_map(|v| {
                 let bytes = v.as_deref().unwrap_or(&[]);
                 let len = (bytes.len() as u32).to_be_bytes();
-                len.into_iter().chain(bytes.iter().copied()).collect::<Vec<_>>()
+                len.into_iter()
+                    .chain(bytes.iter().copied())
+                    .collect::<Vec<_>>()
             })
             .collect();
 
@@ -95,47 +97,23 @@ mod tests {
 
     #[test]
     fn order_by_asc() {
-        let rows = vec![
-            vec![int_val(3)],
-            vec![int_val(1)],
-            vec![int_val(2)],
-        ];
+        let rows = vec![vec![int_val(3)], vec![int_val(1)], vec![int_val(2)]];
         let result = apply_order_by(rows, &[(0, CqlType::Int, false)]);
-        assert_eq!(
-            result[0][0].as_ref().unwrap(),
-            &1i32.to_be_bytes().to_vec()
-        );
-        assert_eq!(
-            result[2][0].as_ref().unwrap(),
-            &3i32.to_be_bytes().to_vec()
-        );
+        assert_eq!(result[0][0].as_ref().unwrap(), &1i32.to_be_bytes().to_vec());
+        assert_eq!(result[2][0].as_ref().unwrap(), &3i32.to_be_bytes().to_vec());
     }
 
     #[test]
     fn order_by_desc() {
-        let rows = vec![
-            vec![int_val(1)],
-            vec![int_val(3)],
-            vec![int_val(2)],
-        ];
+        let rows = vec![vec![int_val(1)], vec![int_val(3)], vec![int_val(2)]];
         let result = apply_order_by(rows, &[(0, CqlType::Int, true)]);
-        assert_eq!(
-            result[0][0].as_ref().unwrap(),
-            &3i32.to_be_bytes().to_vec()
-        );
-        assert_eq!(
-            result[2][0].as_ref().unwrap(),
-            &1i32.to_be_bytes().to_vec()
-        );
+        assert_eq!(result[0][0].as_ref().unwrap(), &3i32.to_be_bytes().to_vec());
+        assert_eq!(result[2][0].as_ref().unwrap(), &1i32.to_be_bytes().to_vec());
     }
 
     #[test]
     fn limit_truncates() {
-        let rows = vec![
-            vec![int_val(1)],
-            vec![int_val(2)],
-            vec![int_val(3)],
-        ];
+        let rows = vec![vec![int_val(1)], vec![int_val(2)], vec![int_val(3)]];
         let result = apply_limit(rows, 2);
         assert_eq!(result.len(), 2);
     }
@@ -149,16 +127,9 @@ mod tests {
 
     #[test]
     fn order_by_with_nulls() {
-        let rows = vec![
-            vec![int_val(2)],
-            vec![None],
-            vec![int_val(1)],
-        ];
+        let rows = vec![vec![int_val(2)], vec![None], vec![int_val(1)]];
         let result = apply_order_by(rows, &[(0, CqlType::Int, false)]);
         assert!(result[0][0].is_none()); // nulls first
-        assert_eq!(
-            result[1][0].as_ref().unwrap(),
-            &1i32.to_be_bytes().to_vec()
-        );
+        assert_eq!(result[1][0].as_ref().unwrap(), &1i32.to_be_bytes().to_vec());
     }
 }

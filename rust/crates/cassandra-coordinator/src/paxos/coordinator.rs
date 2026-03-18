@@ -204,7 +204,9 @@ impl PaxosReplica {
 
         if resp.accepted {
             if let Some(ref storage) = self.storage {
-                if let Err(e) = storage.save_proposal(&msg.partition_key, Uuid::nil(), &msg.proposal) {
+                if let Err(e) =
+                    storage.save_proposal(&msg.partition_key, Uuid::nil(), &msg.proposal)
+                {
                     warn!(error = %e, "Failed to persist Paxos proposal");
                 }
             }

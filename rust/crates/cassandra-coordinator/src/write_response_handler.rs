@@ -445,11 +445,7 @@ impl DatacenterWriteResponseHandler {
             let got = acks.get(dc).copied().unwrap_or(0);
             let failed = failures.get(dc).copied().unwrap_or(0);
             // Count total replicas in this DC
-            let dc_total = self
-                .endpoint_dc
-                .values()
-                .filter(|d| *d == dc)
-                .count();
+            let dc_total = self.endpoint_dc.values().filter(|d| *d == dc).count();
             let remaining = dc_total.saturating_sub(got + failed);
             if got + remaining < required {
                 return true;

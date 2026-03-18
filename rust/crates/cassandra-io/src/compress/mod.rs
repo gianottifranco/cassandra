@@ -120,14 +120,38 @@ mod tests {
 
     #[test]
     fn test_compressor_type_from_str() {
-        assert_eq!("lz4".parse::<CompressorType>().unwrap(), CompressorType::Lz4);
-        assert_eq!("LZ4".parse::<CompressorType>().unwrap(), CompressorType::Lz4);
-        assert_eq!("snappy".parse::<CompressorType>().unwrap(), CompressorType::Snappy);
-        assert_eq!("zstd".parse::<CompressorType>().unwrap(), CompressorType::Zstd);
-        assert_eq!("zstandard".parse::<CompressorType>().unwrap(), CompressorType::Zstd);
-        assert_eq!("deflate".parse::<CompressorType>().unwrap(), CompressorType::Deflate);
-        assert_eq!("noop".parse::<CompressorType>().unwrap(), CompressorType::Noop);
-        assert_eq!("none".parse::<CompressorType>().unwrap(), CompressorType::Noop);
+        assert_eq!(
+            "lz4".parse::<CompressorType>().unwrap(),
+            CompressorType::Lz4
+        );
+        assert_eq!(
+            "LZ4".parse::<CompressorType>().unwrap(),
+            CompressorType::Lz4
+        );
+        assert_eq!(
+            "snappy".parse::<CompressorType>().unwrap(),
+            CompressorType::Snappy
+        );
+        assert_eq!(
+            "zstd".parse::<CompressorType>().unwrap(),
+            CompressorType::Zstd
+        );
+        assert_eq!(
+            "zstandard".parse::<CompressorType>().unwrap(),
+            CompressorType::Zstd
+        );
+        assert_eq!(
+            "deflate".parse::<CompressorType>().unwrap(),
+            CompressorType::Deflate
+        );
+        assert_eq!(
+            "noop".parse::<CompressorType>().unwrap(),
+            CompressorType::Noop
+        );
+        assert_eq!(
+            "none".parse::<CompressorType>().unwrap(),
+            CompressorType::Noop
+        );
     }
 
     #[test]

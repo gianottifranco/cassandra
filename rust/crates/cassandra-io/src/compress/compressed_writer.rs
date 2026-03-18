@@ -17,8 +17,8 @@ use std::path::Path;
 use byteorder::{BigEndian, WriteBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
 
-use crate::compress::{create_compressor, ICompressor};
 use crate::compress::metadata::{CompressionMetadata, CompressionParams};
+use crate::compress::{ICompressor, create_compressor};
 
 /// A sequential writer that transparently compresses data in fixed-size chunks.
 pub struct CompressedSequentialWriter {
@@ -70,8 +70,7 @@ impl CompressedSequentialWriter {
         let checksum = crc.finalize();
 
         // Write: compressed_len(u32 BE) | compressed_data | crc32(u32 BE)
-        self.inner
-            .write_u32::<BigEndian>(compressed.len() as u32)?;
+        self.inner.write_u32::<BigEndian>(compressed.len() as u32)?;
         self.inner.write_all(&compressed)?;
         self.inner.write_u32::<BigEndian>(checksum)?;
 
@@ -161,8 +160,7 @@ mod tests {
 
         // Metadata round-trip
         let meta_bytes = std::fs::read(&meta_path).unwrap();
-        let meta =
-            CompressionMetadata::read_from(&mut meta_bytes.as_slice()).unwrap();
+        let meta = CompressionMetadata::read_from(&mut meta_bytes.as_slice()).unwrap();
         assert_eq!(meta.data_length, 100);
         assert_eq!(meta.chunk_count, 1);
     }
@@ -185,8 +183,7 @@ mod tests {
         writer.finish(&meta_path).unwrap();
 
         let meta_bytes = std::fs::read(&meta_path).unwrap();
-        let meta =
-            CompressionMetadata::read_from(&mut meta_bytes.as_slice()).unwrap();
+        let meta = CompressionMetadata::read_from(&mut meta_bytes.as_slice()).unwrap();
         assert_eq!(meta.chunk_count, 3); // 64 + 64 + 32
         assert_eq!(meta.data_length, 160);
     }
@@ -206,8 +203,7 @@ mod tests {
         writer.finish(&meta_path).unwrap();
 
         let meta_bytes = std::fs::read(&meta_path).unwrap();
-        let meta =
-            CompressionMetadata::read_from(&mut meta_bytes.as_slice()).unwrap();
+        let meta = CompressionMetadata::read_from(&mut meta_bytes.as_slice()).unwrap();
         assert_eq!(meta.chunk_count, 1);
         assert_eq!(meta.data_length, 3);
     }

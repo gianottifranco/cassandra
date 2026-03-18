@@ -133,12 +133,8 @@ pub fn run(file: &str, size_mb: u64) {
 
     for (chunk_idx, chunk) in partitions.chunks(partitions_per_file).enumerate() {
         let out_gen = desc.generation + 1 + chunk_idx as u64;
-        let mut out_desc = SSTableDescriptor::new(
-            &desc.directory,
-            &desc.keyspace,
-            &desc.table,
-            out_gen,
-        );
+        let mut out_desc =
+            SSTableDescriptor::new(&desc.directory, &desc.keyspace, &desc.table, out_gen);
         out_desc.format = desc.format;
 
         let writer = SSTableWriter::new(out_desc.clone());

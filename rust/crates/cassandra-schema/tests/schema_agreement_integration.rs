@@ -6,15 +6,17 @@ use cassandra_schema::catalog::{SchemaCatalog, SchemaSnapshot};
 use cassandra_schema::distributed_schema::DistributedSchema;
 use cassandra_schema::keyspace::{KeyspaceMetadata, KeyspaceParams};
 use cassandra_schema::schema_agreement::{
-    check_schema_agreement, compute_schema_version, SchemaAgreementStatus,
+    SchemaAgreementStatus, check_schema_agreement, compute_schema_version,
 };
-use cassandra_schema::schema_change::{SchemaChangeEvent, SchemaChangeListener, SchemaChangeNotifier};
+use cassandra_schema::schema_change::{
+    SchemaChangeEvent, SchemaChangeListener, SchemaChangeNotifier,
+};
 use cassandra_schema::trigger::TriggerDefinition;
 use cassandra_schema::user_function::{UserAggregate, UserFunction};
 use cassandra_schema::user_type::UserType;
 use cassandra_schema::view::ViewMetadata;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn base_keyspace() -> KeyspaceMetadata {
     KeyspaceMetadata::new("test_ks", KeyspaceParams::default())
@@ -51,8 +53,7 @@ fn schema_with_views_types_functions_deterministic() {
 
 #[test]
 fn two_nodes_same_schema_agree() {
-    let ks = base_keyspace()
-        .with_view(ViewMetadata::new("v1", "test_ks", "t1"));
+    let ks = base_keyspace().with_view(ViewMetadata::new("v1", "test_ks", "t1"));
 
     let mut snap = SchemaSnapshot::empty();
     snap.keyspaces.insert("test_ks".to_string(), ks);
@@ -112,9 +113,13 @@ fn adding_function_changes_version() {
     snap1.keyspaces.insert("test_ks".to_string(), ks1);
     let v1 = compute_schema_version(&snap1);
 
-    let ks2 = base_keyspace().with_function(
-        UserFunction::new("test_ks", "f1", "int", "java", "return 1;"),
-    );
+    let ks2 = base_keyspace().with_function(UserFunction::new(
+        "test_ks",
+        "f1",
+        "int",
+        "java",
+        "return 1;",
+    ));
     let mut snap2 = SchemaSnapshot::empty();
     snap2.keyspaces.insert("test_ks".to_string(), ks2);
     let v2 = compute_schema_version(&snap2);
@@ -129,9 +134,8 @@ fn adding_aggregate_changes_version() {
     snap1.keyspaces.insert("test_ks".to_string(), ks1);
     let v1 = compute_schema_version(&snap1);
 
-    let ks2 = base_keyspace().with_aggregate(
-        UserAggregate::new("test_ks", "avg1", "int", "sfn").with_arg_type("int"),
-    );
+    let ks2 = base_keyspace()
+        .with_aggregate(UserAggregate::new("test_ks", "avg1", "int", "sfn").with_arg_type("int"));
     let mut snap2 = SchemaSnapshot::empty();
     snap2.keyspaces.insert("test_ks".to_string(), ks2);
     let v2 = compute_schema_version(&snap2);
@@ -177,7 +181,13 @@ fn distributed_schema_version_updates_on_mutations() {
 
     // Verify snapshot reflects the change
     assert!(ds.snapshot().keyspace("test_ks").is_some());
-    assert!(ds.snapshot().keyspace("test_ks").unwrap().view("v1").is_some());
+    assert!(
+        ds.snapshot()
+            .keyspace("test_ks")
+            .unwrap()
+            .view("v1")
+            .is_some()
+    );
 }
 
 struct CountingListener {

@@ -122,10 +122,7 @@ pub fn create_storage_metrics_table(metrics: Arc<MetricsRegistry>) -> Box<dyn Vi
                     "pending_compactions",
                     m.pending_compactions.get().to_string(),
                 ),
-                metric_row(
-                    "storage_load_bytes",
-                    m.storage_load_bytes.get().to_string(),
-                ),
+                metric_row("storage_load_bytes", m.storage_load_bytes.get().to_string()),
                 metric_row(
                     "connected_native_clients",
                     m.connected_native_clients.get().to_string(),

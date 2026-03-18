@@ -8,7 +8,9 @@
 //! - `org.apache.cassandra.db.compaction.AbstractCompactionTask`
 
 use crate::compaction::errors::{CompactionReason, CompactionType};
-use crate::compaction::{create_strategy, CompactionStrategy, CompactionStrategyType, SSTableMetadata};
+use crate::compaction::{
+    CompactionStrategy, CompactionStrategyType, SSTableMetadata, create_strategy,
+};
 use crate::sstable::format::SSTableId;
 
 // ─── TaskPriority ───────────────────────────────────────────────────────────
@@ -118,8 +120,7 @@ mod tests {
         let ctrl = CompactionController::new(CompactionStrategyType::SizeTiered);
 
         // Create enough similarly-sized SSTables to trigger STCS (default min_threshold=4).
-        let sstables: Vec<SSTableMetadata> =
-            (1..=5).map(|id| make_meta(id, 100)).collect();
+        let sstables: Vec<SSTableMetadata> = (1..=5).map(|id| make_meta(id, 100)).collect();
 
         let tasks = ctrl.get_next_background_tasks(&sstables);
         assert!(!tasks.is_empty(), "STCS should produce at least one task");
@@ -164,8 +165,7 @@ mod tests {
 
         // LCS via the trait interface treats everything as L0 and triggers when
         // count >= l0_threshold (default 4).
-        let sstables: Vec<SSTableMetadata> =
-            (1..=5).map(|id| make_meta(id, 100)).collect();
+        let sstables: Vec<SSTableMetadata> = (1..=5).map(|id| make_meta(id, 100)).collect();
 
         let tasks = ctrl.get_next_background_tasks(&sstables);
         assert!(!tasks.is_empty(), "LCS should produce at least one task");

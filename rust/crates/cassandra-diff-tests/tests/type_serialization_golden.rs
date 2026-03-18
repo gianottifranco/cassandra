@@ -24,8 +24,7 @@ fn assert_golden(cql_type: &CqlType, value: CqlValue, expected: &[u8]) {
         .unwrap_or_else(|e| panic!("deserialize failed for {:?}: {}", cql_type, e));
     // For floats, compare bytes (NaN != NaN)
     match (&value, &deserialized) {
-        (CqlValue::Float(_), CqlValue::Float(_))
-        | (CqlValue::Double(_), CqlValue::Double(_)) => {
+        (CqlValue::Float(_), CqlValue::Float(_)) | (CqlValue::Double(_), CqlValue::Double(_)) => {
             assert_eq!(
                 value.serialize_value(),
                 deserialized.serialize_value(),
@@ -101,11 +100,7 @@ fn golden_bigint_neg1() {
 
 #[test]
 fn golden_smallint_0() {
-    assert_golden(
-        &CqlType::Smallint,
-        CqlValue::Smallint(0),
-        &[0x00, 0x00],
-    );
+    assert_golden(&CqlType::Smallint, CqlValue::Smallint(0), &[0x00, 0x00]);
 }
 
 #[test]
@@ -177,20 +172,12 @@ fn golden_varchar() {
 
 #[test]
 fn golden_varchar_empty() {
-    assert_golden(
-        &CqlType::Varchar,
-        CqlValue::Varchar(String::new()),
-        &[],
-    );
+    assert_golden(&CqlType::Varchar, CqlValue::Varchar(String::new()), &[]);
 }
 
 #[test]
 fn golden_ascii() {
-    assert_golden(
-        &CqlType::Ascii,
-        CqlValue::Ascii("test".into()),
-        b"test",
-    );
+    assert_golden(&CqlType::Ascii, CqlValue::Ascii("test".into()), b"test");
 }
 
 #[test]
@@ -206,8 +193,8 @@ fn golden_blob() {
 fn golden_uuid() {
     // UUID 550e8400-e29b-41d4-a716-446655440000
     let uuid_bytes: [u8; 16] = [
-        0x55, 0x0E, 0x84, 0x00, 0xE2, 0x9B, 0x41, 0xD4, 0xA7, 0x16, 0x44, 0x66, 0x55, 0x44,
-        0x00, 0x00,
+        0x55, 0x0E, 0x84, 0x00, 0xE2, 0x9B, 0x41, 0xD4, 0xA7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00,
+        0x00,
     ];
     assert_golden(&CqlType::Uuid, CqlValue::Uuid(uuid_bytes), &uuid_bytes);
 }
@@ -215,8 +202,8 @@ fn golden_uuid() {
 #[test]
 fn golden_timeuuid() {
     let uuid_bytes: [u8; 16] = [
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00,
     ];
     assert_golden(
         &CqlType::Timeuuid,
@@ -353,20 +340,13 @@ fn golden_set_text_empty() {
 #[test]
 fn golden_map_text_int() {
     // map<text, int> {"a": 1}
-    let val = CqlValue::Map(vec![(
-        CqlValue::Varchar("a".into()),
-        CqlValue::Int(1),
-    )]);
+    let val = CqlValue::Map(vec![(CqlValue::Varchar("a".into()), CqlValue::Int(1))]);
     let expected: Vec<u8> = vec![
         0x00, 0x00, 0x00, 0x01, // count = 1
         0x00, 0x00, 0x00, 0x01, 0x61, // key "a" (len=1, 'a')
         0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, // value 1
     ];
-    let ty = CqlType::Map(
-        Box::new(CqlType::Varchar),
-        Box::new(CqlType::Int),
-        false,
-    );
+    let ty = CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false);
     assert_golden(&ty, val, &expected);
 }
 

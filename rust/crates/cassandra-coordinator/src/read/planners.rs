@@ -179,12 +179,7 @@ mod tests {
     /// Mock catalog with multiple indexes for best-index selection testing.
     struct MultiIndexCatalog;
     impl SchemaCatalogStub for MultiIndexCatalog {
-        fn get_index_for_column(
-            &self,
-            ks: &str,
-            tbl: &str,
-            col: &str,
-        ) -> Option<(String, String)> {
+        fn get_index_for_column(&self, ks: &str, tbl: &str, col: &str) -> Option<(String, String)> {
             if ks == "ks" && tbl == "t1" {
                 match col {
                     "email" => Some(("email_legacy_idx".to_string(), "legacy".to_string())),

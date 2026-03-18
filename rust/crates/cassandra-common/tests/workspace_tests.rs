@@ -191,9 +191,7 @@ fn check_no_unsafe_recursive(dir: &Path, crates_dir: &Path, allowlist: &[&str]) 
                 .strip_prefix(crates_dir)
                 .unwrap_or(&path)
                 .to_string_lossy();
-            let is_allowed = allowlist
-                .iter()
-                .any(|allowed| relative.ends_with(allowed));
+            let is_allowed = allowlist.iter().any(|allowed| relative.ends_with(allowed));
             if is_allowed {
                 continue;
             }

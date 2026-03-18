@@ -236,13 +236,13 @@ mod tests {
     fn rt_all_byte_widths() {
         // Force each byte width by using known zigzag values
         let cases: &[(i64, usize)] = &[
-            (0, 1),          // zigzag=0, 1 byte
-            (63, 1),         // zigzag=126, 1 byte
-            (64, 2),         // zigzag=128, 2 bytes
-            (8191, 2),       // zigzag=16382 < 2^14, 2 bytes
-            (8192, 3),       // zigzag=16384 >= 2^14, 3 bytes
-            (i64::MIN, 9),   // zigzag=u64::MAX, 9 bytes
-            (i64::MAX, 9),   // zigzag=u64::MAX-1, 9 bytes
+            (0, 1),        // zigzag=0, 1 byte
+            (63, 1),       // zigzag=126, 1 byte
+            (64, 2),       // zigzag=128, 2 bytes
+            (8191, 2),     // zigzag=16382 < 2^14, 2 bytes
+            (8192, 3),     // zigzag=16384 >= 2^14, 3 bytes
+            (i64::MIN, 9), // zigzag=u64::MAX, 9 bytes
+            (i64::MAX, 9), // zigzag=u64::MAX-1, 9 bytes
         ];
         for &(v, expected_len) in cases {
             let bytes = encode_vint(v);
@@ -256,10 +256,7 @@ mod tests {
     fn decode_partial_returns_eof() {
         let full = encode_vint(i64::MAX);
         assert_eq!(full.len(), 9);
-        assert_eq!(
-            decode_vint(&full[..4]),
-            Err(VintError::UnexpectedEof)
-        );
+        assert_eq!(decode_vint(&full[..4]), Err(VintError::UnexpectedEof));
     }
 
     #[test]

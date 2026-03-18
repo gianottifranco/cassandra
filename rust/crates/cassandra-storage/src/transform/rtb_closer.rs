@@ -7,10 +7,8 @@
 
 use cassandra_common::tombstone::DeletionTime;
 
-use crate::rows::unfiltered::{
-    ClusteringBound, ClusteringBoundKind, RangeTombstoneMarker,
-};
 use super::transformation::Transformation;
+use crate::rows::unfiltered::{ClusteringBound, ClusteringBoundKind, RangeTombstoneMarker};
 
 /// Ensures range tombstone markers are properly paired.
 ///
@@ -39,13 +37,14 @@ impl RTBoundCloser {
 
     /// Generate a close marker for the currently open range tombstone.
     pub fn close_marker(&self) -> Option<RangeTombstoneMarker> {
-        self.open_deletion.map(|deletion| RangeTombstoneMarker::Close {
-            bound: ClusteringBound {
-                kind: ClusteringBoundKind::InclusiveEnd,
-                values: self.last_bound_values.clone(),
-            },
-            deletion,
-        })
+        self.open_deletion
+            .map(|deletion| RangeTombstoneMarker::Close {
+                bound: ClusteringBound {
+                    kind: ClusteringBoundKind::InclusiveEnd,
+                    values: self.last_bound_values.clone(),
+                },
+                deletion,
+            })
     }
 }
 
@@ -56,12 +55,11 @@ impl Default for RTBoundCloser {
 }
 
 impl Transformation for RTBoundCloser {
-    fn apply_to_marker(
-        &mut self,
-        marker: RangeTombstoneMarker,
-    ) -> Option<RangeTombstoneMarker> {
+    fn apply_to_marker(&mut self, marker: RangeTombstoneMarker) -> Option<RangeTombstoneMarker> {
         match &marker {
-            RangeTombstoneMarker::Open { deletion, bound, .. } => {
+            RangeTombstoneMarker::Open {
+                deletion, bound, ..
+            } => {
                 self.open_deletion = Some(*deletion);
                 self.last_bound_values = bound.values.clone();
             }

@@ -7,9 +7,9 @@
 
 use std::io::{Read, Write};
 
+use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
-use flate2::Compression;
 
 use crate::compress::{CompressorType, ICompressor};
 use crate::error::IoError;
@@ -40,12 +40,12 @@ impl DeflateCompressor {
 impl ICompressor for DeflateCompressor {
     fn compress(&self, input: &[u8], output: &mut Vec<u8>) -> Result<(), IoError> {
         let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(self.level));
-        encoder.write_all(input).map_err(|e| {
-            IoError::Compression(format!("Deflate compression failed: {e}"))
-        })?;
-        let compressed = encoder.finish().map_err(|e| {
-            IoError::Compression(format!("Deflate compression finish failed: {e}"))
-        })?;
+        encoder
+            .write_all(input)
+            .map_err(|e| IoError::Compression(format!("Deflate compression failed: {e}")))?;
+        let compressed = encoder
+            .finish()
+            .map_err(|e| IoError::Compression(format!("Deflate compression finish failed: {e}")))?;
         output.extend_from_slice(&compressed);
         Ok(())
     }
@@ -53,9 +53,9 @@ impl ICompressor for DeflateCompressor {
     fn decompress(&self, input: &[u8], _uncompressed_length: usize) -> Result<Vec<u8>, IoError> {
         let mut decoder = DeflateDecoder::new(input);
         let mut decompressed = Vec::new();
-        decoder.read_to_end(&mut decompressed).map_err(|e| {
-            IoError::Compression(format!("Deflate decompression failed: {e}"))
-        })?;
+        decoder
+            .read_to_end(&mut decompressed)
+            .map_err(|e| IoError::Compression(format!("Deflate decompression failed: {e}")))?;
         Ok(decompressed)
     }
 
@@ -77,9 +77,7 @@ mod tests {
         let input: Vec<u8> = (0..4096).map(|i| (i * 7 + 13) as u8).collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -88,9 +86,7 @@ mod tests {
         let input: Vec<u8> = vec![];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, 0)
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, 0).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -99,9 +95,7 @@ mod tests {
         let input: Vec<u8> = vec![0xAB; 1_000_000];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -112,9 +106,7 @@ mod tests {
             .collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 

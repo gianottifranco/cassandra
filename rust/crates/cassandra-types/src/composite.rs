@@ -80,10 +80,7 @@ mod tests {
             eoc: EOC_NONE,
         }];
         let bytes = serialize_composite(&components);
-        assert_eq!(
-            bytes,
-            vec![0x00, 0x03, 0x01, 0x02, 0x03, 0x00]
-        );
+        assert_eq!(bytes, vec![0x00, 0x03, 0x01, 0x02, 0x03, 0x00]);
         let back = deserialize_composite(&bytes).unwrap();
         assert_eq!(back, components);
     }
@@ -91,8 +88,14 @@ mod tests {
     #[test]
     fn roundtrip_multiple() {
         let components = vec![
-            Component { data: b"abc".to_vec(), eoc: EOC_NONE },
-            Component { data: vec![0xFF], eoc: EOC_END },
+            Component {
+                data: b"abc".to_vec(),
+                eoc: EOC_NONE,
+            },
+            Component {
+                data: vec![0xFF],
+                eoc: EOC_END,
+            },
         ];
         let bytes = serialize_composite(&components);
         let back = deserialize_composite(&bytes).unwrap();
@@ -129,7 +132,10 @@ mod tests {
 
     #[test]
     fn eoc_values() {
-        let c = Component { data: vec![1], eoc: EOC_END };
+        let c = Component {
+            data: vec![1],
+            eoc: EOC_END,
+        };
         let bytes = serialize_composite(&[c]);
         // Last byte should be EOC_END (0x01)
         assert_eq!(*bytes.last().unwrap(), 0x01);

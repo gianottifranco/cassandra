@@ -38,17 +38,15 @@ impl ZstdCompressor {
 
 impl ICompressor for ZstdCompressor {
     fn compress(&self, input: &[u8], output: &mut Vec<u8>) -> Result<(), IoError> {
-        let compressed = zstd::encode_all(input, self.level).map_err(|e| {
-            IoError::Compression(format!("Zstd compression failed: {e}"))
-        })?;
+        let compressed = zstd::encode_all(input, self.level)
+            .map_err(|e| IoError::Compression(format!("Zstd compression failed: {e}")))?;
         output.extend_from_slice(&compressed);
         Ok(())
     }
 
     fn decompress(&self, input: &[u8], _uncompressed_length: usize) -> Result<Vec<u8>, IoError> {
-        zstd::decode_all(input).map_err(|e| {
-            IoError::Compression(format!("Zstd decompression failed: {e}"))
-        })
+        zstd::decode_all(input)
+            .map_err(|e| IoError::Compression(format!("Zstd decompression failed: {e}")))
     }
 
     fn compressor_type(&self) -> CompressorType {
@@ -69,9 +67,7 @@ mod tests {
         let input: Vec<u8> = (0..4096).map(|i| (i * 7 + 13) as u8).collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -80,9 +76,7 @@ mod tests {
         let input: Vec<u8> = vec![];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, 0)
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, 0).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -91,9 +85,7 @@ mod tests {
         let input: Vec<u8> = vec![0xAB; 1_000_000];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -104,9 +96,7 @@ mod tests {
             .collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 

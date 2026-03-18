@@ -57,7 +57,10 @@ impl ColumnFilter {
 
     /// Returns `true` if all columns are fetched.
     pub fn fetches_all_columns(&self) -> bool {
-        matches!(self, Self::AllColumns | Self::AllRegularsAndQueriedStatics(_))
+        matches!(
+            self,
+            Self::AllColumns | Self::AllRegularsAndQueriedStatics(_)
+        )
     }
 }
 

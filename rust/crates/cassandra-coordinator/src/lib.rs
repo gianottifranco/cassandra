@@ -54,8 +54,6 @@ pub mod write;
 pub mod write_response_handler;
 
 pub use self::tracing::TraceSession;
-pub use tracing_cleanup::{ExpirableSessionStore, InMemorySessionStore, TracingCleanupTask};
-pub use tracing_manager::{TracingConfig, TracingManager};
 pub use batch::{
     BatchCoordinator, BatchEntry, BatchGuardrails, BatchLogManager, BatchLogMetrics, BatchType,
     ReplayResult,
@@ -74,6 +72,8 @@ pub use read::{
     ReadResponse, ReadResult, ResolvedData, ShortReadProtection, ShortReadRetry,
     SinglePartitionReadCommand, SpeculativeRetryPolicy, TombstoneThresholds, TombstoneTracker,
 };
+pub use tracing_cleanup::{ExpirableSessionStore, InMemorySessionStore, TracingCleanupTask};
+pub use tracing_manager::{TracingConfig, TracingManager};
 pub use write::{
     CellMutation, CollectionOp, CoordinatedMutation, DatacenterWritePlan, DcReplicaPlan,
     MutationKind, MutationRow, RangeTombstone, TombstoneMarker, ViewFanoutMetrics,
@@ -87,6 +87,6 @@ pub use write_response_handler::{
 pub use hint_delivery::{DeliveryResult, HintDeliveryMetrics, HintDeliveryService};
 pub use storage_proxy::{StorageProxy, StorageProxyConfig};
 pub use verb_handlers::{
-    register_all_verb_handlers, BatchRemoveVerbHandler, BatchStoreVerbHandler, HintVerbHandler,
-    MutationVerbHandler, ReadDataVerbHandler, ReadDigestVerbHandler, ReadRepairVerbHandler,
+    BatchRemoveVerbHandler, BatchStoreVerbHandler, HintVerbHandler, MutationVerbHandler,
+    ReadDataVerbHandler, ReadDigestVerbHandler, ReadRepairVerbHandler, register_all_verb_handlers,
 };

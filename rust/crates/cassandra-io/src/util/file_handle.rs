@@ -242,7 +242,10 @@ mod tests {
     fn test_multiple_handles_same_file() {
         let f = temp_file_with(b"shared file");
         let h1 = FileHandle::builder(f.path()).build().unwrap();
-        let h2 = FileHandle::builder(f.path()).with_mmap(true).build().unwrap();
+        let h2 = FileHandle::builder(f.path())
+            .with_mmap(true)
+            .build()
+            .unwrap();
 
         assert_eq!(h1.path(), h2.path());
         assert!(!h1.use_mmap);

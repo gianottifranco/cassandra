@@ -321,10 +321,7 @@ mod tests {
     fn from_json_integer() {
         let f = FromJsonFunction;
         let bytes = b"42";
-        let result = f
-            .execute(&[Some(bytes.as_slice())])
-            .unwrap()
-            .unwrap();
+        let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
         let v = i64::from_be_bytes(result.try_into().unwrap());
         assert_eq!(v, 42);
     }
@@ -341,10 +338,7 @@ mod tests {
     fn from_json_string() {
         let f = FromJsonFunction;
         let bytes = b"\"hello\"";
-        let result = f
-            .execute(&[Some(bytes.as_slice())])
-            .unwrap()
-            .unwrap();
+        let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
         assert_eq!(String::from_utf8(result).unwrap(), "hello");
     }
 }

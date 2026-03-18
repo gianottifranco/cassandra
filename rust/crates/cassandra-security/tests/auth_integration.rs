@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cassandra_security::auth::{hash_password, Credentials, PasswordAuthenticator, Authenticator};
+use cassandra_security::auth::{Authenticator, Credentials, PasswordAuthenticator, hash_password};
 use cassandra_security::authz::{Authorizer, CassandraAuthorizer, Permission, Resource};
 use cassandra_security::cache::AuthCacheConfig;
 use cassandra_security::roles::{InMemoryRoleManager, Role, RoleManager};
@@ -157,10 +157,11 @@ fn cache_invalidation() {
 
 #[test]
 fn mtls_identity_extraction() {
-    use cassandra_security::mtls::SubjectCnValidator;
     use cassandra_security::mtls::CertificateValidator;
+    use cassandra_security::mtls::SubjectCnValidator;
 
-    let mut params = rcgen::CertificateParams::new(vec!["service.example.com".to_string()]).unwrap();
+    let mut params =
+        rcgen::CertificateParams::new(vec!["service.example.com".to_string()]).unwrap();
     params
         .distinguished_name
         .push(rcgen::DnType::CommonName, "service.example.com");

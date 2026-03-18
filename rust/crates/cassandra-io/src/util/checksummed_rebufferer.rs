@@ -102,10 +102,7 @@ mod tests {
     }
 
     /// Write test data, compute per-chunk CRC32s, return (path, metadata).
-    fn write_test_file(
-        data: &[u8],
-        chunk_size: usize,
-    ) -> (NamedTempFile, DataIntegrityMetadata) {
+    fn write_test_file(data: &[u8], chunk_size: usize) -> (NamedTempFile, DataIntegrityMetadata) {
         use std::io::Write;
 
         let mut tmp = NamedTempFile::new().unwrap();

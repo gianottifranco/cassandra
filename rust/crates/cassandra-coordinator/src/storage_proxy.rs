@@ -34,9 +34,7 @@ use crate::paxos::coordinator::CasResult;
 use crate::read::{
     CoordinatedRead, ReadCoordinator, ReadError, ReadResult, SinglePartitionReadCommand,
 };
-use crate::write::{
-    CoordinatedMutation, WriteCoordinator, WriteError, WriteResult, WriteType,
-};
+use crate::write::{CoordinatedMutation, WriteCoordinator, WriteError, WriteResult, WriteType};
 use crate::write_response_handler::WriteResponseHandler;
 
 // ─── Configuration ──────────────────────────────────────────────
@@ -196,18 +194,10 @@ impl StorageProxy {
                 continue; // Local replica handled by coordinator directly.
             }
             let payload = serde_json::to_vec(&mutation).unwrap_or_default();
-            let msg = Message::request(
-                Verb::Mutation,
-                self.messaging.next_id(),
-                payload,
-            );
+            let msg = Message::request(Verb::Mutation, self.messaging.next_id(), payload);
             if let Err(e) = self
                 .messaging
-                .send_and_wait(
-                    replica.0,
-                    msg,
-                    self.config.write_timeout,
-                )
+                .send_and_wait(replica.0, msg, self.config.write_timeout)
                 .await
             {
                 warn!(replica = %replica, error = %e, "Remote mutation failed");
@@ -301,11 +291,7 @@ impl StorageProxy {
                 continue;
             }
             let payload = serde_json::to_vec(&mutation).unwrap_or_default();
-            let msg = Message::request(
-                Verb::Mutation,
-                self.messaging.next_id(),
-                payload,
-            );
+            let msg = Message::request(Verb::Mutation, self.messaging.next_id(), payload);
             let handler_clone = Arc::clone(&handler);
             let replica_ep = *replica;
             let messaging = Arc::clone(&self.messaging);
@@ -315,10 +301,7 @@ impl StorageProxy {
 
             // Send asynchronously and record ack/failure
             tokio::spawn(async move {
-                match messaging
-                    .send_and_wait(replica_ep.0, msg, timeout)
-                    .await
-                {
+                match messaging.send_and_wait(replica_ep.0, msg, timeout).await {
                     Ok(_) => {
                         handler_clone.on_response(&replica_ep);
                     }
@@ -412,9 +395,10 @@ impl StorageProxy {
         F1: Fn() -> R + Send + Sync,
         F2: Fn(Option<&[u8]>) -> bool + Send + Sync,
     {
-        let router = self.consensus_router.as_ref().ok_or(
-            "Consensus router not configured — CAS operations unavailable",
-        )?;
+        let router = self
+            .consensus_router
+            .as_ref()
+            .ok_or("Consensus router not configured — CAS operations unavailable")?;
 
         debug!(
             keyspace,
@@ -478,9 +462,10 @@ impl StorageProxy {
         keyspace: &str,
         mutations: Vec<Vec<u8>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let router = self.consensus_router.as_ref().ok_or(
-            "Consensus router not configured — CAS operations unavailable",
-        )?;
+        let router = self
+            .consensus_router
+            .as_ref()
+            .ok_or("Consensus router not configured — CAS operations unavailable")?;
 
         debug!(keyspace, "StorageProxy.cas_accord");
 
@@ -522,13 +507,8 @@ mod tests {
             ep,
             Arc::clone(&hint_store),
         ));
-        let read_coord = Arc::new(ReadCoordinator::new(
-            Arc::clone(&cluster),
-            ep,
-        ));
-        let messaging = Arc::new(MessagingService::new(
-            "127.0.0.1:7000".parse().unwrap(),
-        ));
+        let read_coord = Arc::new(ReadCoordinator::new(Arc::clone(&cluster), ep));
+        let messaging = Arc::new(MessagingService::new("127.0.0.1:7000".parse().unwrap()));
         let batch_log = Arc::new(BatchLogManager::new());
 
         StorageProxy::new(
