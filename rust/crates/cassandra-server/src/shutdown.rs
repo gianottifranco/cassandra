@@ -6,8 +6,8 @@
 //! - `org.apache.cassandra.service.CassandraDaemon.stop()`
 //! - `org.apache.cassandra.transport.Server.stop()`
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -79,7 +79,10 @@ impl ShutdownCoordinator {
             }
 
             if tokio::time::Instant::now() >= deadline {
-                warn!(remaining = count, "Drain timeout reached with in-flight requests");
+                warn!(
+                    remaining = count,
+                    "Drain timeout reached with in-flight requests"
+                );
                 return false;
             }
 
@@ -106,7 +109,8 @@ pub async fn signal_handler(coordinator: Arc<ShutdownCoordinator>) {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
 
         tokio::select! {
             _ = ctrl_c => {

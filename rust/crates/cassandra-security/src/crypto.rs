@@ -49,9 +49,9 @@ pub struct AesCbcProvider;
 impl CryptoProvider for AesCbcProvider {
     fn encrypt(&self, key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SecurityError> {
         use aes::Aes128;
-        use cbc::cipher::block_padding::Pkcs7;
         use cbc::cipher::BlockEncryptMut;
         use cbc::cipher::KeyIvInit;
+        use cbc::cipher::block_padding::Pkcs7;
 
         match key.len() {
             16 => {
@@ -75,9 +75,9 @@ impl CryptoProvider for AesCbcProvider {
 
     fn decrypt(&self, key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, SecurityError> {
         use aes::Aes128;
-        use cbc::cipher::block_padding::Pkcs7;
         use cbc::cipher::BlockDecryptMut;
         use cbc::cipher::KeyIvInit;
+        use cbc::cipher::block_padding::Pkcs7;
 
         match key.len() {
             16 => {
@@ -129,7 +129,12 @@ impl CryptoProvider for NoOpCryptoProvider {
         Ok(plaintext.to_vec())
     }
 
-    fn decrypt(&self, _key: &[u8], _iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, SecurityError> {
+    fn decrypt(
+        &self,
+        _key: &[u8],
+        _iv: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, SecurityError> {
         Ok(ciphertext.to_vec())
     }
 
@@ -178,8 +183,9 @@ impl KeyProvider for FileKeyProvider {
         if hex_path.exists() {
             let hex_str = std::fs::read_to_string(&hex_path)
                 .map_err(|e| SecurityError::ConfigError(format!("read key '{}': {}", alias, e)))?;
-            let decoded = hex_decode(hex_str.trim())
-                .map_err(|e| SecurityError::ConfigError(format!("hex decode '{}': {}", alias, e)))?;
+            let decoded = hex_decode(hex_str.trim()).map_err(|e| {
+                SecurityError::ConfigError(format!("hex decode '{}': {}", alias, e))
+            })?;
             return Ok(decoded);
         }
 
@@ -279,7 +285,11 @@ mod tests {
     #[test]
     fn file_key_provider_hex() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("mykey.hex"), "0102030405060708090a0b0c0d0e0f10").unwrap();
+        std::fs::write(
+            dir.path().join("mykey.hex"),
+            "0102030405060708090a0b0c0d0e0f10",
+        )
+        .unwrap();
 
         let provider = FileKeyProvider::new(dir.path());
         let key = provider.get_key("mykey").unwrap();

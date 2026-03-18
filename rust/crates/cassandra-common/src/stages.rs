@@ -216,6 +216,9 @@ mod tests {
     #[test]
     fn stage_display() {
         assert_eq!(format!("{}", Stage::Read), "ReadStage");
-        assert_eq!(format!("{}", Stage::NativeTransport), "Native-Transport-Requests");
+        assert_eq!(
+            format!("{}", Stage::NativeTransport),
+            "Native-Transport-Requests"
+        );
     }
 }

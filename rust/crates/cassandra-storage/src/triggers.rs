@@ -95,12 +95,7 @@ impl TriggerExecutor {
     ///
     /// Returns a vec of augmented mutation byte blobs produced by the triggers.
     /// If a trigger returns an error, it is logged and skipped (non-fatal).
-    pub fn execute(
-        &self,
-        keyspace: &str,
-        table: &str,
-        mutation: &[u8],
-    ) -> Vec<Vec<u8>> {
+    pub fn execute(&self, keyspace: &str, table: &str, mutation: &[u8]) -> Vec<Vec<u8>> {
         let key = (keyspace.to_string(), table.to_string());
         let Some(triggers) = self.triggers.get(&key) else {
             return Vec::new();

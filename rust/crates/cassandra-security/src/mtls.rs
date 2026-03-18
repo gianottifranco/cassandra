@@ -6,9 +6,9 @@
 //! - `org.apache.cassandra.auth.MutualTlsAuthenticator`
 //! - `org.apache.cassandra.auth.MutualTlsWithPasswordFallbackAuthenticator`
 
+use crate::SecurityError;
 use crate::auth::AuthenticatedUser;
 use crate::identity_mapping::IdentityRoleMapper;
-use crate::SecurityError;
 
 /// Extracts an identity string from a client certificate.
 pub trait CertificateValidator: Send + Sync {
@@ -29,11 +29,9 @@ impl CertificateValidator for SubjectCnValidator {
         for rdn in cert.subject().iter() {
             for attr in rdn.iter() {
                 if attr.attr_type() == &x509_parser::oid_registry::OID_X509_COMMON_NAME {
-                    let cn = attr
-                        .as_str()
-                        .map_err(|e| {
-                            SecurityError::AuthError(format!("invalid CN encoding: {}", e))
-                        })?;
+                    let cn = attr.as_str().map_err(|e| {
+                        SecurityError::AuthError(format!("invalid CN encoding: {}", e))
+                    })?;
                     return Ok(cn.to_string());
                 }
             }

@@ -29,10 +29,7 @@ pub struct SSTableScrubber;
 impl SSTableScrubber {
     /// Scrub an SSTable: read partition by partition, skip corrupt ones,
     /// write recoverable partitions to a new SSTable.
-    pub fn scrub(
-        input: &SSTableDescriptor,
-        output: &SSTableDescriptor,
-    ) -> io::Result<ScrubResult> {
+    pub fn scrub(input: &SSTableDescriptor, output: &SSTableDescriptor) -> io::Result<ScrubResult> {
         let data_path = input.component_path(Component::Data);
         let file_size = fs::metadata(&data_path)?.len();
         let mut reader = BufReader::new(File::open(&data_path)?);
@@ -56,9 +53,7 @@ impl SSTableScrubber {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!(
-                        "scrub: skipping corrupt partition at offset {pos}: {e}"
-                    );
+                    eprintln!("scrub: skipping corrupt partition at offset {pos}: {e}");
                     partitions_skipped += 1;
                     // Try to find the next valid partition by scanning forward.
                     // Since we cannot reliably find the next partition boundary
@@ -84,9 +79,7 @@ impl SSTableScrubber {
 
     /// Attempt to read one partition from the data file.
     /// Returns Ok(None) when there are no more partitions.
-    fn read_partition<R: Read>(
-        reader: &mut R,
-    ) -> io::Result<Option<(Vec<u8>, PartitionData)>> {
+    fn read_partition<R: Read>(reader: &mut R) -> io::Result<Option<(Vec<u8>, PartitionData)>> {
         let pk_len = match reader.read_u32::<BigEndian>() {
             Ok(l) => l,
             Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -194,10 +187,7 @@ mod tests {
         let result = SSTableScrubber::scrub(&input, &output).unwrap();
         // Some partitions should be recovered, at least one skipped
         assert!(result.partitions_recovered > 0);
-        assert!(
-            result.partitions_recovered < 5
-                || result.partitions_skipped > 0
-        );
+        assert!(result.partitions_recovered < 5 || result.partitions_skipped > 0);
     }
 
     #[test]

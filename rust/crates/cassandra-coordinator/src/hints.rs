@@ -167,9 +167,10 @@ impl HintStore {
 
     /// Create with full configuration.
     pub fn with_config(config: HintConfig) -> Self {
-        let segment_manager = config.hints_directory.as_ref().map(|dir| {
-            Arc::new(HintSegmentManager::new(dir.clone()))
-        });
+        let segment_manager = config
+            .hints_directory
+            .as_ref()
+            .map(|dir| Arc::new(HintSegmentManager::new(dir.clone())));
         Self {
             hints: Arc::new(RwLock::new(HashMap::new())),
             config,
@@ -245,8 +246,9 @@ impl HintStore {
             }
 
             // Estimate size for metrics.
-            let estimated_size =
-                serde_json::to_vec(&hint).map(|v| v.len() as u64).unwrap_or(256);
+            let estimated_size = serde_json::to_vec(&hint)
+                .map(|v| v.len() as u64)
+                .unwrap_or(256);
             self.metrics
                 .hint_store_size_bytes
                 .fetch_add(estimated_size, Ordering::Relaxed);
@@ -317,10 +319,7 @@ impl HintStore {
     }
 
     /// Compute and store the oldest hint timestamp from a locked guard.
-    fn update_oldest_hint_timestamp_locked(
-        &self,
-        hints: &HashMap<Endpoint, VecDeque<Hint>>,
-    ) {
+    fn update_oldest_hint_timestamp_locked(&self, hints: &HashMap<Endpoint, VecDeque<Hint>>) {
         let oldest = hints
             .values()
             .filter_map(|q| q.front().map(|h| h.created_at))
@@ -371,15 +370,14 @@ impl HintStore {
                 .fetch_sub(live_count + expired_count, Ordering::Relaxed);
 
             // Update metrics.
-            let drained_size: u64 = live.iter()
+            let drained_size: u64 = live
+                .iter()
                 .map(|h| serde_json::to_vec(h).map(|v| v.len() as u64).unwrap_or(256))
                 .sum();
-            self.metrics
-                .hint_store_size_bytes
-                .fetch_sub(
-                    drained_size.min(self.metrics.hint_store_size_bytes.load(Ordering::Relaxed)),
-                    Ordering::Relaxed,
-                );
+            self.metrics.hint_store_size_bytes.fetch_sub(
+                drained_size.min(self.metrics.hint_store_size_bytes.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
 
             info!(target = %target, count = live_count, "Draining hints for replay");
             self.update_oldest_hint_timestamp_locked(&hints);
@@ -432,22 +430,20 @@ impl HintStore {
 
         for seg_path in &segments {
             match HintSegmentReader::open(seg_path) {
-                Ok(mut reader) => {
-                    match reader.read_all() {
-                        Ok(hints) => {
-                            for h in hints {
-                                if h.created_at >= cutoff {
-                                    live.push(h);
-                                } else {
-                                    expired_count += 1;
-                                }
+                Ok(mut reader) => match reader.read_all() {
+                    Ok(hints) => {
+                        for h in hints {
+                            if h.created_at >= cutoff {
+                                live.push(h);
+                            } else {
+                                expired_count += 1;
                             }
                         }
-                        Err(e) => {
-                            warn!(error = %e, path = %seg_path.display(), "Failed to read hint segment");
-                        }
                     }
-                }
+                    Err(e) => {
+                        warn!(error = %e, path = %seg_path.display(), "Failed to read hint segment");
+                    }
+                },
                 Err(e) => {
                     warn!(error = %e, path = %seg_path.display(), "Failed to open hint segment");
                 }
@@ -510,15 +506,14 @@ impl HintStore {
             self.total_hints.fetch_sub(count, Ordering::Relaxed);
 
             // Estimate size for metrics.
-            let size: u64 = queue.iter()
+            let size: u64 = queue
+                .iter()
                 .map(|h| serde_json::to_vec(h).map(|v| v.len() as u64).unwrap_or(256))
                 .sum();
-            self.metrics
-                .hint_store_size_bytes
-                .fetch_sub(
-                    size.min(self.metrics.hint_store_size_bytes.load(Ordering::Relaxed)),
-                    Ordering::Relaxed,
-                );
+            self.metrics.hint_store_size_bytes.fetch_sub(
+                size.min(self.metrics.hint_store_size_bytes.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
 
             info!(target = %target, count = count, "Deleted all hints for removed node");
         }
@@ -545,8 +540,12 @@ impl HintStore {
         let total = self.total_hints.load(Ordering::Relaxed);
         hints.clear();
         self.total_hints.store(0, Ordering::Relaxed);
-        self.metrics.hint_store_size_bytes.store(0, Ordering::Relaxed);
-        self.metrics.oldest_hint_timestamp.store(0, Ordering::Relaxed);
+        self.metrics
+            .hint_store_size_bytes
+            .store(0, Ordering::Relaxed);
+        self.metrics
+            .oldest_hint_timestamp
+            .store(0, Ordering::Relaxed);
         drop(hints);
 
         // Clear all segment writers and files.
@@ -573,7 +572,8 @@ impl HintStore {
     pub fn purge_hints_for_removed_nodes(&self, live_endpoints: &HashSet<Endpoint>) {
         let targets_to_remove: Vec<Endpoint> = {
             let hints = self.hints.read();
-            hints.keys()
+            hints
+                .keys()
                 .filter(|ep| !live_endpoints.contains(ep))
                 .copied()
                 .collect()
@@ -764,7 +764,10 @@ impl HintedHandoffManager {
             self.store
                 .total_hints
                 .fetch_sub(total_dropped, Ordering::Relaxed);
-            info!(dropped = total_dropped, "Dropped hints during topology change");
+            info!(
+                dropped = total_dropped,
+                "Dropped hints during topology change"
+            );
         }
 
         self.store.update_oldest_hint_timestamp();

@@ -67,7 +67,9 @@ fn rand_u64() -> u64 {
     // Mix time with a stack address for entropy
     let stack_val: u64 = 0;
     let addr = &stack_val as *const u64 as u64;
-    (t as u64).wrapping_mul(6364136223846793005).wrapping_add(addr)
+    (t as u64)
+        .wrapping_mul(6364136223846793005)
+        .wrapping_add(addr)
 }
 
 fn timeuuid_to_millis(bytes: &[u8]) -> Option<i64> {
@@ -399,10 +401,7 @@ mod tests {
         let timeuuid = now_f.execute(&[]).unwrap().unwrap();
 
         let to_ts = ToTimestampFromTimeuuid;
-        let ts = to_ts
-            .execute(&[Some(&timeuuid)])
-            .unwrap()
-            .unwrap();
+        let ts = to_ts.execute(&[Some(&timeuuid)]).unwrap().unwrap();
         let millis = i64::from_be_bytes(ts.try_into().unwrap());
         let actual_millis = current_millis();
         // Should be within 1 second

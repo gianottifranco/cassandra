@@ -105,7 +105,9 @@ impl DatabaseDescriptor {
     // ── Native transport limits ──────────────────────────────────────────
 
     pub fn native_transport_max_concurrent_connections(&self) -> i32 {
-        self.config.read().native_transport_max_concurrent_connections
+        self.config
+            .read()
+            .native_transport_max_concurrent_connections
     }
 
     pub fn native_transport_max_frame_size(&self) -> u64 {
@@ -113,7 +115,9 @@ impl DatabaseDescriptor {
     }
 
     pub fn native_transport_max_request_data_in_flight(&self) -> u64 {
-        self.config.read().native_transport_max_request_data_in_flight
+        self.config
+            .read()
+            .native_transport_max_request_data_in_flight
     }
 
     // ── Thread pools ─────────────────────────────────────────────────────

@@ -8,7 +8,7 @@
 //! - `org.apache.cassandra.transport.messages.ErrorMessage`
 
 use cassandra_common::CassandraError;
-use cassandra_coordinator::WriteError;
+use cassandra_coordinator::{ReadError, WriteError};
 use cassandra_native_protocol::error_codes;
 use cassandra_native_protocol::frame::Frame;
 use cassandra_native_protocol::message::Message;
@@ -27,24 +27,67 @@ impl From<ExecutorError> for CassandraError {
                 CassandraError::InvalidQuery(format!("Table '{}.{}' not found", ks, table))
             }
             ExecutorError::StorageError(msg) => CassandraError::ServerError(msg),
+            ExecutorError::ReadPath(read_err) => read_error_to_cassandra_error(read_err),
             ExecutorError::SchemaError(msg) => CassandraError::ConfigError(msg),
         }
     }
 }
 
+fn read_error_to_cassandra_error(err: ReadError) -> CassandraError {
+    match err {
+        ReadError::Timeout {
+            cl,
+            required,
+            received,
+            data_present,
+        } => CassandraError::ReadTimeout {
+            consistency: cl.to_string(),
+            received: received as i32,
+            block_for: required as i32,
+            data_present,
+        },
+        ReadError::ReadFailure {
+            cl,
+            required,
+            received,
+            num_failures,
+            data_present,
+            ..
+        } => CassandraError::ReadFailure {
+            consistency: cl.to_string(),
+            received: received as i32,
+            block_for: required as i32,
+            num_failures: num_failures as i32,
+            data_present,
+        },
+        ReadError::Unavailable {
+            cl,
+            required,
+            alive,
+        } => CassandraError::Unavailable {
+            consistency: cl.to_string(),
+            required: required as i32,
+            alive: alive as i32,
+        },
+        ReadError::TombstoneOverwhelming { .. } => CassandraError::ReadFailure {
+            consistency: "ONE".to_string(),
+            received: 0,
+            block_for: 1,
+            num_failures: 1,
+            data_present: false,
+        },
+        ReadError::DigestMismatch { .. }
+        | ReadError::QueryCancelled
+        | ReadError::CoordinatorBehind(_)
+        | ReadError::Internal(_) => CassandraError::ServerError(err.to_string()),
+    }
+}
+
 /// Convert an `ExecutorError` to a protocol error frame using proper error codes.
-pub fn executor_error_to_error_frame(
-    err: ExecutorError,
-    version: u8,
-    stream_id: i16,
-) -> Frame {
+pub fn executor_error_to_error_frame(err: ExecutorError, version: u8, stream_id: i16) -> Frame {
     let cassandra_err: CassandraError = err.into();
     let error_msg = error_codes::error_to_message(&cassandra_err);
-    response::encode_response(
-        &Message::Error(error_msg),
-        version,
-        stream_id,
-    )
+    response::encode_response(&Message::Error(error_msg), version, stream_id)
 }
 
 // ─── WriteError → CassandraError (WU-03) ────────────────────────
@@ -105,9 +148,10 @@ pub fn write_error_to_cassandra_error(err: WriteError) -> CassandraError {
             CassandraError::TruncateError("Cannot write during truncation".to_string())
         }
         WriteError::SchemaDisagreement(msg) => CassandraError::InvalidQuery(msg),
-        WriteError::MutationTooLarge { size, limit } => CassandraError::InvalidQuery(
-            format!("Mutation of {} bytes exceeds limit of {} bytes", size, limit),
-        ),
+        WriteError::MutationTooLarge { size, limit } => CassandraError::InvalidQuery(format!(
+            "Mutation of {} bytes exceeds limit of {} bytes",
+            size, limit
+        )),
         WriteError::Internal(msg) => CassandraError::ServerError(msg),
     }
 }
@@ -115,18 +159,10 @@ pub fn write_error_to_cassandra_error(err: WriteError) -> CassandraError {
 /// Convert a `WriteError` to a protocol error frame (WU-03).
 ///
 /// Similar to `executor_error_to_error_frame()` but for write-path errors.
-pub fn write_error_to_error_frame(
-    err: WriteError,
-    version: u8,
-    stream_id: i16,
-) -> Frame {
+pub fn write_error_to_error_frame(err: WriteError, version: u8, stream_id: i16) -> Frame {
     let cassandra_err = write_error_to_cassandra_error(err);
     let error_msg = error_codes::error_to_message(&cassandra_err);
-    response::encode_response(
-        &Message::Error(error_msg),
-        version,
-        stream_id,
-    )
+    response::encode_response(&Message::Error(error_msg), version, stream_id)
 }
 
 #[cfg(test)]
@@ -135,7 +171,32 @@ mod tests {
     use cassandra_coordinator::{ConsistencyLevel, WriteType};
     use cassandra_native_protocol::frame::Opcode;
     use cassandra_native_protocol::types;
+    use serde::Deserialize;
     use std::collections::HashMap;
+    use std::fs;
+    use std::path::PathBuf;
+
+    #[derive(Debug, Deserialize)]
+    struct ReadErrorFixture {
+        error_code: String,
+        error_name: String,
+        description: String,
+        fields: serde_json::Value,
+        java_class: String,
+        protocol_version: u8,
+    }
+
+    fn read_error_fixture(name: &str) -> ReadErrorFixture {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../diff-tests/golden/read_errors")
+            .join(name);
+        serde_json::from_str(&fs::read_to_string(path).expect("read error fixture should exist"))
+            .expect("read error fixture should parse")
+    }
+
+    fn parse_error_code(s: &str) -> i32 {
+        i32::from_str_radix(s.trim_start_matches("0x"), 16).unwrap()
+    }
 
     #[test]
     fn invalid_query_maps_to_invalid_query() {
@@ -197,6 +258,124 @@ mod tests {
         let mut body: &[u8] = &frame.body;
         let code = types::read_int(&mut body).unwrap();
         assert_eq!(code, 0x0000); // SERVER_ERROR
+    }
+
+    #[test]
+    fn read_timeout_matches_golden_fixture() {
+        let fixture = read_error_fixture("read_timeout.json");
+        assert_eq!(fixture.error_name, "READ_TIMEOUT");
+        assert_eq!(
+            fixture.java_class,
+            "org.apache.cassandra.exceptions.ReadTimeoutException"
+        );
+        assert_eq!(fixture.protocol_version, 4);
+        assert!(fixture.description.contains("timed out"));
+
+        let err = ExecutorError::ReadPath(ReadError::Timeout {
+            cl: ConsistencyLevel::Quorum,
+            required: fixture.fields["block_for"].as_u64().unwrap() as usize,
+            received: fixture.fields["received"].as_u64().unwrap() as usize,
+            data_present: fixture.fields["data_present"].as_bool().unwrap(),
+        });
+        let ce: CassandraError = err.into();
+
+        assert_eq!(ce.error_code(), Some(parse_error_code(&fixture.error_code)));
+        match ce {
+            CassandraError::ReadTimeout {
+                consistency,
+                received,
+                block_for,
+                data_present,
+            } => {
+                assert_eq!(consistency, fixture.fields["cl"].as_str().unwrap());
+                assert_eq!(received, fixture.fields["received"].as_i64().unwrap() as i32);
+                assert_eq!(block_for, fixture.fields["block_for"].as_i64().unwrap() as i32);
+                assert_eq!(data_present, fixture.fields["data_present"].as_bool().unwrap());
+            }
+            other => panic!("expected ReadTimeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_failure_matches_golden_fixture() {
+        let fixture = read_error_fixture("read_failure.json");
+        assert_eq!(fixture.error_name, "READ_FAILURE");
+        assert_eq!(
+            fixture.java_class,
+            "org.apache.cassandra.exceptions.ReadFailureException"
+        );
+        assert_eq!(fixture.protocol_version, 4);
+        assert!(fixture.description.contains("failed"));
+
+        let err = ExecutorError::ReadPath(ReadError::ReadFailure {
+            cl: ConsistencyLevel::LocalQuorum,
+            required: fixture.fields["block_for"].as_u64().unwrap() as usize,
+            received: fixture.fields["received"].as_u64().unwrap() as usize,
+            num_failures: fixture.fields["num_failures"].as_u64().unwrap() as usize,
+            data_present: fixture.fields["data_present"].as_bool().unwrap(),
+            failure_map: HashMap::new(),
+        });
+        let ce: CassandraError = err.into();
+
+        assert_eq!(ce.error_code(), Some(parse_error_code(&fixture.error_code)));
+        match ce {
+            CassandraError::ReadFailure {
+                consistency,
+                received,
+                block_for,
+                num_failures,
+                data_present,
+            } => {
+                assert_eq!(consistency, fixture.fields["cl"].as_str().unwrap());
+                assert_eq!(received, fixture.fields["received"].as_i64().unwrap() as i32);
+                assert_eq!(block_for, fixture.fields["block_for"].as_i64().unwrap() as i32);
+                assert_eq!(
+                    num_failures,
+                    fixture.fields["num_failures"].as_i64().unwrap() as i32
+                );
+                assert_eq!(data_present, fixture.fields["data_present"].as_bool().unwrap());
+            }
+            other => panic!("expected ReadFailure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tombstone_overwhelming_matches_golden_fixture() {
+        let fixture = read_error_fixture("tombstone_overwhelming.json");
+        assert_eq!(fixture.error_name, "READ_FAILURE");
+        assert_eq!(
+            fixture.java_class,
+            "org.apache.cassandra.db.filter.TombstoneOverwhelmingException"
+        );
+        assert_eq!(fixture.protocol_version, 4);
+        assert!(fixture.description.contains("tombstone"));
+
+        let err = ExecutorError::ReadPath(ReadError::TombstoneOverwhelming {
+            count: fixture.fields["scanned_tombstones"].as_u64().unwrap() as u32,
+            threshold: fixture.fields["threshold"].as_u64().unwrap() as u32,
+        });
+        let ce: CassandraError = err.into();
+
+        assert_eq!(ce.error_code(), Some(parse_error_code(&fixture.error_code)));
+        match ce {
+            CassandraError::ReadFailure {
+                consistency,
+                received,
+                block_for,
+                num_failures,
+                data_present,
+            } => {
+                assert_eq!(consistency, fixture.fields["cl"].as_str().unwrap());
+                assert_eq!(received, fixture.fields["received"].as_i64().unwrap() as i32);
+                assert_eq!(block_for, fixture.fields["block_for"].as_i64().unwrap() as i32);
+                assert_eq!(
+                    num_failures,
+                    fixture.fields["num_failures"].as_i64().unwrap() as i32
+                );
+                assert_eq!(data_present, fixture.fields["data_present"].as_bool().unwrap());
+            }
+            other => panic!("expected ReadFailure, got {other:?}"),
+        }
     }
 
     // ── WU-03: WriteError → CassandraError Tests ──────────────────
@@ -274,9 +453,9 @@ mod tests {
 
     #[test]
     fn write_schema_disagreement_maps_to_invalid_query() {
-        let ce = write_error_to_cassandra_error(
-            WriteError::SchemaDisagreement("table being altered".into()),
-        );
+        let ce = write_error_to_cassandra_error(WriteError::SchemaDisagreement(
+            "table being altered".into(),
+        ));
         assert_eq!(ce.error_code(), Some(0x2200));
     }
 

@@ -25,7 +25,7 @@
 use cassandra_types::{
     CqlType, CqlValue,
     comparator::compare_bytes,
-    type_compat::{is_compatible_with, test_assignment, AssignmentResult},
+    type_compat::{AssignmentResult, is_compatible_with, test_assignment},
     type_parser::parse_type,
     vint::{decode_vint, encode_vint},
 };
@@ -217,9 +217,7 @@ fn rt_map() {
     let ty = CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false);
     roundtrip(
         &ty,
-        CqlValue::Map(vec![
-            (CqlValue::Varchar("key".into()), CqlValue::Int(42)),
-        ]),
+        CqlValue::Map(vec![(CqlValue::Varchar("key".into()), CqlValue::Int(42))]),
     );
 }
 
@@ -228,13 +226,13 @@ fn rt_tuple() {
     let ty = CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar]);
     roundtrip(
         &ty,
-        CqlValue::Tuple(vec![Some(CqlValue::Int(1)), Some(CqlValue::Varchar("x".into()))]),
+        CqlValue::Tuple(vec![
+            Some(CqlValue::Int(1)),
+            Some(CqlValue::Varchar("x".into())),
+        ]),
     );
     // With null field
-    roundtrip(
-        &ty,
-        CqlValue::Tuple(vec![Some(CqlValue::Int(1)), None]),
-    );
+    roundtrip(&ty, CqlValue::Tuple(vec![Some(CqlValue::Int(1)), None]));
 }
 
 #[test]
@@ -316,10 +314,7 @@ fn golden_int_42() {
 fn golden_bigint_max() {
     // Java: LongType.instance.decompose(Long.MAX_VALUE)
     let bytes = CqlValue::Bigint(i64::MAX).serialize_value();
-    assert_eq!(
-        bytes,
-        vec![0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
-    );
+    assert_eq!(bytes, vec![0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
 }
 
 #[test]
@@ -341,14 +336,24 @@ fn golden_tinyint_neg() {
 #[test]
 fn golden_duration_zero() {
     // Duration(0, 0, 0) → vint(0), vint(0), vint(0) = [0x00, 0x00, 0x00]
-    let bytes = CqlValue::Duration { months: 0, days: 0, nanoseconds: 0 }.serialize_value();
+    let bytes = CqlValue::Duration {
+        months: 0,
+        days: 0,
+        nanoseconds: 0,
+    }
+    .serialize_value();
     assert_eq!(bytes, vec![0x00, 0x00, 0x00]);
 }
 
 #[test]
 fn golden_duration_one_day() {
     // Duration(0, 1, 0): months=0→[0x00], days=1→zigzag(1)=2→[0x02], nanos=0→[0x00]
-    let bytes = CqlValue::Duration { months: 0, days: 1, nanoseconds: 0 }.serialize_value();
+    let bytes = CqlValue::Duration {
+        months: 0,
+        days: 1,
+        nanoseconds: 0,
+    }
+    .serialize_value();
     assert_eq!(bytes, vec![0x00, 0x02, 0x00]);
 }
 
@@ -498,16 +503,12 @@ fn parser_reversed() {
 #[test]
 fn collection_serialization_map() {
     let ty = CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false);
-    let val = CqlValue::Map(vec![
-        (CqlValue::Varchar("hello".into()), CqlValue::Int(42)),
-    ]);
+    let val = CqlValue::Map(vec![(CqlValue::Varchar("hello".into()), CqlValue::Int(42))]);
     let bytes = val.serialize_value();
     let decoded = CqlValue::deserialize_value(&ty, &bytes).unwrap();
     assert_eq!(
         decoded,
-        CqlValue::Map(vec![
-            (CqlValue::Varchar("hello".into()), CqlValue::Int(42)),
-        ])
+        CqlValue::Map(vec![(CqlValue::Varchar("hello".into()), CqlValue::Int(42)),])
     );
 }
 

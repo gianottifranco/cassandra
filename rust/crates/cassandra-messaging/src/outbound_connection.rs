@@ -25,8 +25,8 @@
 //! - `org.apache.cassandra.net.OutboundConnectionInitiator`
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use futures_util::{FutureExt, SinkExt};
@@ -130,11 +130,8 @@ impl OutboundConnection {
 
                 debug!(remote = %config.remote, conn_type = %config.connection_type, "Connecting");
 
-                let connect_result = tokio::time::timeout(
-                    CONNECT_TIMEOUT,
-                    TcpStream::connect(config.remote),
-                )
-                .await;
+                let connect_result =
+                    tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(config.remote)).await;
 
                 let mut stream = match connect_result {
                     Ok(Ok(s)) => s,
@@ -197,11 +194,7 @@ impl OutboundConnection {
                         last_activity = Instant::now();
                     } else if last_activity.elapsed() >= HEARTBEAT_INTERVAL {
                         // Send ping heartbeat
-                        let ping = Message::request(
-                            crate::verb::Verb::Ping,
-                            0,
-                            Vec::new(),
-                        );
+                        let ping = Message::request(crate::verb::Verb::Ping, 0, Vec::new());
                         if let Err(e) = writer.send(ping).await {
                             warn!(remote = %config.remote, error = %e, "Heartbeat failed");
                             break;

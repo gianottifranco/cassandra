@@ -407,9 +407,7 @@ mod tests {
         let result = storage.append(make_entry(2, 1));
 
         assert!(result.is_err());
-        assert!(
-            matches!(result.unwrap_err(), LogStorageError::DuplicateEntry(e) if e == Epoch(1))
-        );
+        assert!(matches!(result.unwrap_err(), LogStorageError::DuplicateEntry(e) if e == Epoch(1)));
     }
 
     #[test]

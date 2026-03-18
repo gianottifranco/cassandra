@@ -80,7 +80,10 @@ impl InternodeAuthenticator for MutualTlsInternodeAuthenticator {
         // Verify the certificate was signed by one of our trusted CAs
         for ca_der in &self.trusted_cas {
             if let Ok((_, ca_cert)) = x509_parser::parse_x509_certificate(ca_der) {
-                if cert.verify_signature(Some(&ca_cert.tbs_certificate.subject_pki)).is_ok() {
+                if cert
+                    .verify_signature(Some(&ca_cert.tbs_certificate.subject_pki))
+                    .is_ok()
+                {
                     return Ok(());
                 }
             }

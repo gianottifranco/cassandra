@@ -175,8 +175,9 @@ fn decode_crc(src: &mut BytesMut) -> Result<Option<Frame>, std::io::Error> {
         ));
     }
 
-    let length_and_flags =
-        (header_bytes[0] as u32) | ((header_bytes[1] as u32) << 8) | ((header_bytes[2] as u32) << 16);
+    let length_and_flags = (header_bytes[0] as u32)
+        | ((header_bytes[1] as u32) << 8)
+        | ((header_bytes[2] as u32) << 16);
     let payload_len = (length_and_flags & 0x1FFFF) as usize;
     let self_contained = (length_and_flags >> 17) & 1 != 0;
 
@@ -262,8 +263,7 @@ fn decode_lz4(src: &mut BytesMut) -> Result<Option<Frame>, std::io::Error> {
 
     // Peek at header
     let header_data = [src[0], src[1], src[2], src[3], src[4]];
-    let stored_crc =
-        (src[5] as u32) | ((src[6] as u32) << 8) | ((src[7] as u32) << 16);
+    let stored_crc = (src[5] as u32) | ((src[6] as u32) << 8) | ((src[7] as u32) << 16);
     let computed_crc = crc24(&header_data);
     if stored_crc != computed_crc {
         return Err(std::io::Error::new(

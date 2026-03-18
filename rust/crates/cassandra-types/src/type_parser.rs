@@ -371,9 +371,7 @@ fn hex_decode_str(hex: &str) -> Result<String, ()> {
                 .and_then(|s| u8::from_str_radix(s, 16).ok())
         })
         .collect();
-    bytes
-        .and_then(|b| String::from_utf8(b).ok())
-        .ok_or(())
+    bytes.and_then(|b| String::from_utf8(b).ok()).ok_or(())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -446,10 +444,8 @@ mod tests {
     #[test]
     fn nested_collection() {
         // FrozenType(MapType(UTF8Type,FrozenType(ListType(Int32Type))))
-        let ty = parse_type(
-            "FrozenType(MapType(UTF8Type,FrozenType(ListType(Int32Type))))",
-        )
-        .unwrap();
+        let ty =
+            parse_type("FrozenType(MapType(UTF8Type,FrozenType(ListType(Int32Type))))").unwrap();
         assert!(matches!(ty, CqlType::Map(_, _, true)));
     }
 

@@ -31,9 +31,8 @@ impl ICompressor for Lz4Compressor {
     }
 
     fn decompress(&self, input: &[u8], _uncompressed_length: usize) -> Result<Vec<u8>, IoError> {
-        decompress_size_prepended(input).map_err(|e| {
-            IoError::Compression(format!("LZ4 decompression failed: {e}"))
-        })
+        decompress_size_prepended(input)
+            .map_err(|e| IoError::Compression(format!("LZ4 decompression failed: {e}")))
     }
 
     fn compressor_type(&self) -> CompressorType {
@@ -54,9 +53,7 @@ mod tests {
         let input: Vec<u8> = (0..4096).map(|i| (i * 7 + 13) as u8).collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -65,9 +62,7 @@ mod tests {
         let input: Vec<u8> = vec![];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, 0)
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, 0).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -76,9 +71,7 @@ mod tests {
         let input: Vec<u8> = vec![0xAB; 1_000_000];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -90,9 +83,7 @@ mod tests {
             .collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 

@@ -63,7 +63,7 @@ pub async fn handle_invalidate_cache(
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": format!("Failed to read body: {}", e)}),
-            )
+            );
         }
     };
 
@@ -77,7 +77,7 @@ fn handle_invalidate_cache_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": format!("Invalid JSON: {}", e)}),
-            )
+            );
         }
     };
 
@@ -87,7 +87,7 @@ fn handle_invalidate_cache_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": "Missing 'cache_type' field"}),
-            )
+            );
         }
     };
 
@@ -122,7 +122,7 @@ pub async fn handle_set_cache_capacity(
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": format!("Failed to read body: {}", e)}),
-            )
+            );
         }
     };
 
@@ -136,7 +136,7 @@ fn handle_set_cache_capacity_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": format!("Invalid JSON: {}", e)}),
-            )
+            );
         }
     };
 
@@ -146,7 +146,7 @@ fn handle_set_cache_capacity_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": "Missing 'cache_type' field"}),
-            )
+            );
         }
     };
 
@@ -163,7 +163,7 @@ fn handle_set_cache_capacity_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
             return json_response(
                 StatusCode::BAD_REQUEST,
                 &json!({"error": "Missing or invalid 'capacity_mb' field (expected unsigned integer)"}),
-            )
+            );
         }
     };
 
@@ -342,8 +342,7 @@ mod tests {
 
     #[test]
     fn set_cache_capacity_valid() {
-        let body =
-            serde_json::to_vec(&json!({"cache_type": "row", "capacity_mb": 256})).unwrap();
+        let body = serde_json::to_vec(&json!({"cache_type": "row", "capacity_mb": 256})).unwrap();
 
         let resp = handle_set_cache_capacity_inner(&body);
         assert_eq!(resp.status(), StatusCode::OK);

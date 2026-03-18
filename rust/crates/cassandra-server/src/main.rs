@@ -195,7 +195,9 @@ async fn main() -> anyhow::Result<()> {
     // 10. Native Transport Service lifecycle
     let nt_config = NativeTransportConfig::from_cassandra_config(&cassandra_config);
     let transport_service = Arc::new(NativeTransportService::new(nt_config.clone()));
-    transport_service.initialize().map_err(|e| anyhow::anyhow!(e))?;
+    transport_service
+        .initialize()
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     // 11. Resource limits, metrics, shutdown coordinator
     let resource_limits = Arc::new(ResourceLimits::new(
@@ -204,9 +206,8 @@ async fn main() -> anyhow::Result<()> {
         nt_config.max_request_data_in_flight,
     ));
     let transport_metrics = Arc::new(TransportMetrics::new());
-    let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(
-        std::time::Duration::from_secs(30),
-    ));
+    let shutdown_coordinator =
+        Arc::new(ShutdownCoordinator::new(std::time::Duration::from_secs(30)));
 
     // 12. Build NativeServer
     let native_auth = Arc::new(crate::server::NativeAuthWrapper::new(Arc::new(

@@ -100,10 +100,7 @@ impl ConfigWatcher {
             .map_err(|e| ConfigWatcherError::WatchError(e.to_string()))?;
 
         // Watch the parent directory (handles atomic file replacements)
-        let parent = config_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_path_buf();
+        let parent = config_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         watcher
             .watch(&parent, RecursiveMode::NonRecursive)
             .map_err(|e| ConfigWatcherError::WatchError(e.to_string()))?;
@@ -179,8 +176,7 @@ mod tests {
         )
         .unwrap();
 
-        let descriptor =
-            DatabaseDescriptor::new(Default::default(), GuardrailsConfig::default());
+        let descriptor = DatabaseDescriptor::new(Default::default(), GuardrailsConfig::default());
         ConfigWatcher::reload(&path, &None, &descriptor).unwrap();
         assert_eq!(descriptor.cluster_name(), "Reloaded");
     }
@@ -191,8 +187,7 @@ mod tests {
         let path = dir.path().join("cassandra.yaml");
         std::fs::write(&path, "cluster_name: \"\"").unwrap();
 
-        let descriptor =
-            DatabaseDescriptor::new(Default::default(), GuardrailsConfig::default());
+        let descriptor = DatabaseDescriptor::new(Default::default(), GuardrailsConfig::default());
         let result = ConfigWatcher::reload(&path, &None, &descriptor);
         assert!(result.is_err());
         // Original config unchanged

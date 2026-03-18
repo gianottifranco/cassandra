@@ -43,8 +43,8 @@ struct FrameFixture {
 
 #[test]
 fn golden_protocol_fixtures_load() {
-    let fixtures: ProtocolFixtures = golden::load_json("protocol/frames.json")
-        .expect("Failed to load protocol golden fixtures");
+    let fixtures: ProtocolFixtures =
+        golden::load_json("protocol/frames.json").expect("Failed to load protocol golden fixtures");
 
     assert_eq!(fixtures.protocol_version, 4);
     assert!(
@@ -53,10 +53,7 @@ fn golden_protocol_fixtures_load() {
     );
 
     for fixture in &fixtures.frames {
-        assert!(
-            !fixture.name.is_empty(),
-            "Fixture must have a name"
-        );
+        assert!(!fixture.name.is_empty(), "Fixture must have a name");
         assert!(
             !fixture.hex.is_empty(),
             "Fixture {} must have hex data",
@@ -232,17 +229,11 @@ fn golden_prepared_metadata_fixtures_load() {
         assert!(!name.is_empty(), "Fixture must have a name");
         assert!(!query.is_empty(), "Fixture {} must have a query", name);
 
-        let bind_count = fixture["bind_metadata"]["columns_count"]
-            .as_i64()
-            .unwrap();
+        let bind_count = fixture["bind_metadata"]["columns_count"].as_i64().unwrap();
         let result_count = fixture["result_metadata"]["columns_count"]
             .as_i64()
             .unwrap();
-        assert!(
-            bind_count >= 0,
-            "Fixture {} bind_count must be >= 0",
-            name
-        );
+        assert!(bind_count >= 0, "Fixture {} bind_count must be >= 0", name);
         assert!(
             result_count >= 0,
             "Fixture {} result_count must be >= 0",

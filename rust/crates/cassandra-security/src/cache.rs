@@ -178,12 +178,7 @@ where
 
     /// Refresh all entries by re-loading their values.
     pub fn refresh_all(&self) {
-        let keys: Vec<K> = self
-            .cache
-            .entries
-            .iter()
-            .map(|e| e.key().clone())
-            .collect();
+        let keys: Vec<K> = self.cache.entries.iter().map(|e| e.key().clone()).collect();
 
         for key in keys {
             if let Some(value) = (self.loader)(&key) {

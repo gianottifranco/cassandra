@@ -6,10 +6,10 @@
 //! protection for the SSTable read/write pipeline.
 
 use cassandra_storage::memtable::partition::{Cell, PartitionData, Row};
+use cassandra_storage::sstable::bti::{BtiReader, BtiWriter};
 use cassandra_storage::sstable::format::{SSTableDescriptor, SSTableFormat};
 use cassandra_storage::sstable::reader::SSTableReader;
 use cassandra_storage::sstable::writer::SSTableWriter;
-use cassandra_storage::sstable::bti::{BtiReader, BtiWriter};
 use tempfile::TempDir;
 
 // ─── Deterministic test data builders ─────────────────────────────────────
@@ -192,11 +192,11 @@ fn golden_regular_write_read_exact_match() {
             // Verify name cell
             assert_eq!(row.cells[0].column, "name");
             let expected_name = format!("name_{}_{}", i, j).into_bytes();
-            assert_eq!(row.cells[0].value.as_deref(), Some(expected_name.as_slice()));
             assert_eq!(
-                row.cells[0].timestamp,
-                1000 + i as i64 * 10 + j as i64
+                row.cells[0].value.as_deref(),
+                Some(expected_name.as_slice())
             );
+            assert_eq!(row.cells[0].timestamp, 1000 + i as i64 * 10 + j as i64);
             assert!(!row.cells[0].is_tombstone);
 
             // Verify age cell
@@ -240,10 +240,7 @@ fn golden_complex_tombstones_ttls_empty_large() {
     assert_eq!(row.cells[0].local_deletion_time, Some(200));
 
     // Row tombstone
-    let p = reader
-        .get_partition(b"ccc_row_tombstone")
-        .unwrap()
-        .unwrap();
+    let p = reader.get_partition(b"ccc_row_tombstone").unwrap().unwrap();
     let row = p.rows.get(&b"ck_row_tomb".to_vec()).unwrap();
     assert!(row.is_tombstone);
     assert_eq!(row.local_deletion_time, Some(300));

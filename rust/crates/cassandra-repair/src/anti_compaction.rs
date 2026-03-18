@@ -65,10 +65,7 @@ pub struct AntiCompactionResult {
 }
 
 /// Check whether a token range is fully covered by repaired ranges.
-pub fn is_range_fully_repaired(
-    range: (Token, Token),
-    repaired_ranges: &[(Token, Token)],
-) -> bool {
+pub fn is_range_fully_repaired(range: (Token, Token), repaired_ranges: &[(Token, Token)]) -> bool {
     let (start, end) = (range.0.value(), range.1.value());
     if start >= end {
         return false; // Empty or wrapping range not supported here
@@ -233,7 +230,11 @@ mod tests {
         let id = Uuid::new_v4();
         assert_eq!(RepairedState::Unrepaired.to_string(), "unrepaired");
         assert!(RepairedState::Repaired(id).to_string().contains("repaired"));
-        assert!(RepairedState::PendingRepair(id).to_string().contains("pending"));
+        assert!(
+            RepairedState::PendingRepair(id)
+                .to_string()
+                .contains("pending")
+        );
     }
 
     #[test]

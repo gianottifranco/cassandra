@@ -378,6 +378,7 @@ dependencies = [
  "cassandra-schema",
  "cassandra-storage",
  "cassandra-types",
+ "criterion",
  "dashmap",
  "futures-util",
  "parking_lot",

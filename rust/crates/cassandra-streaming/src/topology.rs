@@ -58,12 +58,7 @@ impl BootstrapStream {
                 .into_iter()
                 .map(|(s, e)| (Token(s), Token(e)))
                 .collect();
-            plan = plan.request_ranges(
-                Endpoint::new(addr),
-                keyspace,
-                vec![],
-                token_ranges,
-            );
+            plan = plan.request_ranges(Endpoint::new(addr), keyspace, vec![], token_ranges);
         }
 
         let mut futures = coordinator.execute_plan(plan, transport).await?;
@@ -100,12 +95,7 @@ impl DecommissionStream {
                 .into_iter()
                 .map(|(s, e)| (Token(s), Token(e)))
                 .collect();
-            plan = plan.transfer_ranges(
-                Endpoint::new(addr),
-                keyspace,
-                vec![],
-                token_ranges,
-            );
+            plan = plan.transfer_ranges(Endpoint::new(addr), keyspace, vec![], token_ranges);
         }
 
         let mut futures = coordinator.execute_plan(plan, transport).await?;
@@ -145,12 +135,8 @@ impl RebuildStream {
 
         let mut plan = StreamPlan::new(StreamOperation::Rebuild);
         for ks in keyspaces {
-            plan = plan.request_ranges(
-                Endpoint::new(source_addr),
-                ks,
-                vec![],
-                token_ranges.clone(),
-            );
+            plan =
+                plan.request_ranges(Endpoint::new(source_addr), ks, vec![], token_ranges.clone());
         }
 
         let mut futures = coordinator.execute_plan(plan, transport).await?;
@@ -226,16 +212,10 @@ mod tests {
 
         let mut plan = StreamPlan::new(StreamOperation::Bootstrap);
         for (addr, keyspace, ranges) in &sources {
-            let token_ranges: Vec<(Token, Token)> = ranges
-                .iter()
-                .map(|(s, e)| (Token(*s), Token(*e)))
-                .collect();
-            plan = plan.request_ranges(
-                Endpoint::new(*addr),
-                keyspace.clone(),
-                vec![],
-                token_ranges,
-            );
+            let token_ranges: Vec<(Token, Token)> =
+                ranges.iter().map(|(s, e)| (Token(*s), Token(*e))).collect();
+            plan =
+                plan.request_ranges(Endpoint::new(*addr), keyspace.clone(), vec![], token_ranges);
         }
 
         assert_eq!(plan.peer_count(), 2);

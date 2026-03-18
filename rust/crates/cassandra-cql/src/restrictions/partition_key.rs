@@ -22,7 +22,9 @@ pub fn validate_partition_key(
     let pk_columns = table.partition_key_columns();
 
     // Check for token-based restrictions
-    let has_token = relations.iter().any(|r| r.column.eq_ignore_ascii_case("token"));
+    let has_token = relations
+        .iter()
+        .any(|r| r.column.eq_ignore_ascii_case("token"));
     if has_token {
         return Ok(vec![ColumnRestriction {
             column_name: "token".to_string(),
@@ -70,8 +72,7 @@ pub fn validate_partition_key(
         if let Some(r) = restriction {
             if matches!(r.kind, RestrictionKind::In) && i < pk_columns.len() - 1 {
                 return Err(RestrictionError::MissingPartitionKey(
-                    "IN is only supported on the last column of the partition key"
-                        .to_string(),
+                    "IN is only supported on the last column of the partition key".to_string(),
                 ));
             }
         }

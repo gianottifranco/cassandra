@@ -17,8 +17,8 @@ use byteorder::{BigEndian, ReadBytesExt};
 use cassandra_storage::sstable::{
     bloom::BloomFilter,
     format::{
-        Component, SSTableDescriptor, SSTableFormat, DATA_MAGIC, DATA_VERSION, FILTER_MAGIC,
-        INDEX_MAGIC,
+        Component, DATA_MAGIC, DATA_VERSION, FILTER_MAGIC, INDEX_MAGIC, SSTableDescriptor,
+        SSTableFormat,
     },
 };
 

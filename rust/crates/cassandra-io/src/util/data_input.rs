@@ -75,9 +75,7 @@ pub trait DataInputPlus: Read {
         let len = u16::from_be_bytes(len_buf) as usize;
         let mut str_buf = vec![0u8; len];
         self.read_exact(&mut str_buf)?;
-        String::from_utf8(str_buf).map_err(|e| {
-            io::Error::new(io::ErrorKind::InvalidData, e)
-        })
+        String::from_utf8(str_buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
     /// Reads exactly enough bytes to fill `buf`, or returns an error.

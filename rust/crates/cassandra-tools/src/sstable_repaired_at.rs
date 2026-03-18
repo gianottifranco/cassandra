@@ -186,8 +186,11 @@ mod tests {
             "index_size": 256,
             "repaired_at": 0
         });
-        fs::write(&stats_path, serde_json::to_string_pretty(&stats_json).unwrap())
-            .expect("write stats");
+        fs::write(
+            &stats_path,
+            serde_json::to_string_pretty(&stats_json).unwrap(),
+        )
+        .expect("write stats");
 
         // Set repaired_at to a timestamp
         run(data_path.to_str().unwrap(), 1700000000000);

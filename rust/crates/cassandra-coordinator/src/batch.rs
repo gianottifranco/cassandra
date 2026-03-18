@@ -596,10 +596,7 @@ impl BatchCoordinator {
             let retry_count = self.batchlog.retry_count(&entry.id);
             if retry_count > 0 {
                 // Backoff: 2^retry_count seconds, capped at 5 min
-                let backoff_ms = std::cmp::min(
-                    (1u64 << retry_count.min(18)) * 1000,
-                    300_000,
-                );
+                let backoff_ms = std::cmp::min((1u64 << retry_count.min(18)) * 1000, 300_000);
                 let age_ms = {
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

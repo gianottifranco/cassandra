@@ -128,12 +128,14 @@ mod tests {
     #[test]
     fn write_and_read() {
         let journal = AccordJournal::new(true);
-        journal.write(
-            test_txn_id(100),
-            CommandStatus::PreAccepted,
-            Timestamp(100),
-            b"data".to_vec(),
-        ).unwrap();
+        journal
+            .write(
+                test_txn_id(100),
+                CommandStatus::PreAccepted,
+                Timestamp(100),
+                b"data".to_vec(),
+            )
+            .unwrap();
 
         let entries = journal.read_all();
         assert_eq!(entries.len(), 1);
@@ -143,15 +145,36 @@ mod tests {
     #[test]
     fn sequence_monotonic() {
         let journal = AccordJournal::new(true);
-        let s1 = journal.write(test_txn_id(1), CommandStatus::PreAccepted, Timestamp(1), vec![]).unwrap();
-        let s2 = journal.write(test_txn_id(2), CommandStatus::PreAccepted, Timestamp(2), vec![]).unwrap();
+        let s1 = journal
+            .write(
+                test_txn_id(1),
+                CommandStatus::PreAccepted,
+                Timestamp(1),
+                vec![],
+            )
+            .unwrap();
+        let s2 = journal
+            .write(
+                test_txn_id(2),
+                CommandStatus::PreAccepted,
+                Timestamp(2),
+                vec![],
+            )
+            .unwrap();
         assert!(s2 > s1);
     }
 
     #[test]
     fn disabled_journal_noop() {
         let journal = AccordJournal::new(false);
-        journal.write(test_txn_id(1), CommandStatus::PreAccepted, Timestamp(1), vec![]).unwrap();
+        journal
+            .write(
+                test_txn_id(1),
+                CommandStatus::PreAccepted,
+                Timestamp(1),
+                vec![],
+            )
+            .unwrap();
         assert!(journal.is_empty());
     }
 
@@ -159,7 +182,14 @@ mod tests {
     fn truncate_removes_old_entries() {
         let journal = AccordJournal::new(true);
         for i in 0..5 {
-            journal.write(test_txn_id(i), CommandStatus::PreAccepted, Timestamp(i), vec![]).unwrap();
+            journal
+                .write(
+                    test_txn_id(i),
+                    CommandStatus::PreAccepted,
+                    Timestamp(i),
+                    vec![],
+                )
+                .unwrap();
         }
         assert_eq!(journal.len(), 5);
 
@@ -171,8 +201,22 @@ mod tests {
     #[test]
     fn replay_returns_all() {
         let journal = AccordJournal::new(true);
-        journal.write(test_txn_id(1), CommandStatus::PreAccepted, Timestamp(1), vec![]).unwrap();
-        journal.write(test_txn_id(1), CommandStatus::Committed, Timestamp(1), vec![]).unwrap();
+        journal
+            .write(
+                test_txn_id(1),
+                CommandStatus::PreAccepted,
+                Timestamp(1),
+                vec![],
+            )
+            .unwrap();
+        journal
+            .write(
+                test_txn_id(1),
+                CommandStatus::Committed,
+                Timestamp(1),
+                vec![],
+            )
+            .unwrap();
 
         let entries = journal.replay();
         assert_eq!(entries.len(), 2);

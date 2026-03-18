@@ -32,8 +32,8 @@ use cassandra_messaging::verb::Verb;
 use cassandra_messaging::{Message, MessagingService};
 use tracing::{debug, warn};
 
-use crate::gossip::messages::{GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
 use crate::gossip::Gossiper;
+use crate::gossip::messages::{GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
 
 /// Create a SYN handler for the gossiper.
 ///
@@ -129,8 +129,14 @@ pub fn make_ack2_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
 
 /// Register all gossip verb handlers on the messaging service.
 pub fn register_gossip_handlers(gossiper: Arc<Gossiper>, messaging: &MessagingService) {
-    messaging.register_handler(Verb::GossipDigestSyn, make_syn_handler(Arc::clone(&gossiper)));
-    messaging.register_handler(Verb::GossipDigestAck, make_ack_handler(Arc::clone(&gossiper)));
+    messaging.register_handler(
+        Verb::GossipDigestSyn,
+        make_syn_handler(Arc::clone(&gossiper)),
+    );
+    messaging.register_handler(
+        Verb::GossipDigestAck,
+        make_ack_handler(Arc::clone(&gossiper)),
+    );
     messaging.register_handler(Verb::GossipDigestAck2, make_ack2_handler(gossiper));
 }
 
@@ -219,11 +225,7 @@ mod tests {
 
     #[test]
     fn malformed_payload_returns_failure() {
-        let gossiper = Arc::new(Gossiper::new(
-            ep(7001),
-            SeedProvider::new(vec![]),
-            1,
-        ));
+        let gossiper = Arc::new(Gossiper::new(ep(7001), SeedProvider::new(vec![]), 1));
 
         let handler = make_syn_handler(gossiper);
         let msg = Message::request(Verb::GossipDigestSyn, 1, b"not json".to_vec());

@@ -56,12 +56,30 @@ impl VirtualTable for LiveOperationsTable {
 
     fn columns(&self) -> Vec<VirtualColumn> {
         vec![
-            VirtualColumn { name: "id".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "type".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "status".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "progress".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "description".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "elapsed_secs".to_string(), cql_type: "text".to_string() },
+            VirtualColumn {
+                name: "id".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "type".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "status".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "progress".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "description".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "elapsed_secs".to_string(),
+                cql_type: "text".to_string(),
+            },
         ]
     }
 
@@ -107,11 +125,26 @@ impl VirtualTable for SstableTasksPopulatedTable {
 
     fn columns(&self) -> Vec<VirtualColumn> {
         vec![
-            VirtualColumn { name: "task_id".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "keyspace".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "table".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "task_type".to_string(), cql_type: "text".to_string() },
-            VirtualColumn { name: "progress".to_string(), cql_type: "text".to_string() },
+            VirtualColumn {
+                name: "task_id".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "keyspace".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "table".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "task_type".to_string(),
+                cql_type: "text".to_string(),
+            },
+            VirtualColumn {
+                name: "progress".to_string(),
+                cql_type: "text".to_string(),
+            },
         ]
     }
 

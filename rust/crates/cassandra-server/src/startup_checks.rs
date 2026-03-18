@@ -29,7 +29,9 @@ pub enum StartupError {
     #[error("Data directory is not writable: {path}")]
     DataDirectoryNotWritable { path: String },
 
-    #[error("Insufficient disk space in {path}: {available_mb} MiB available, {required_mb} MiB required")]
+    #[error(
+        "Insufficient disk space in {path}: {available_mb} MiB available, {required_mb} MiB required"
+    )]
     InsufficientDiskSpace {
         path: String,
         available_mb: u64,
@@ -96,14 +98,14 @@ fn check_data_directories(directories: &[String]) -> Result<(), StartupError> {
     for dir in directories {
         let path = Path::new(dir);
         if !path.exists() {
-            return Err(StartupError::DataDirectoryMissing {
-                path: dir.clone(),
-            });
+            return Err(StartupError::DataDirectoryMissing { path: dir.clone() });
         }
-        if path.metadata().map(|m| m.permissions().readonly()).unwrap_or(true) {
-            return Err(StartupError::DataDirectoryNotWritable {
-                path: dir.clone(),
-            });
+        if path
+            .metadata()
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(true)
+        {
+            return Err(StartupError::DataDirectoryNotWritable { path: dir.clone() });
         }
     }
     Ok(())

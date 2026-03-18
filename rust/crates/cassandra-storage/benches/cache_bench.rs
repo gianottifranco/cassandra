@@ -2,7 +2,7 @@
 
 //! Benchmarks for the cache subsystem.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use std::sync::Arc;
 
 use cassandra_storage::cache::chunk_cache::{ChunkCache, ChunkCacheConfig};

@@ -60,7 +60,7 @@ impl ConditionEvaluator {
                 return ConditionResult {
                     applied: false,
                     current_values: None,
-                }
+                };
             }
         };
 
@@ -71,7 +71,7 @@ impl ConditionEvaluator {
                     return ConditionResult {
                         applied: false,
                         current_values: Some(row.to_vec()),
-                    }
+                    };
                 }
             };
 
@@ -79,12 +79,8 @@ impl ConditionEvaluator {
             let cql_type = column_types.get(&condition.column);
             let expected = term_to_bytes(&condition.value);
 
-            let matches = eval_single_condition(
-                condition.op,
-                current_value,
-                expected.as_deref(),
-                cql_type,
-            );
+            let matches =
+                eval_single_condition(condition.op, current_value, expected.as_deref(), cql_type);
 
             if !matches {
                 return ConditionResult {
@@ -213,8 +209,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(30)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -232,8 +227,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(25)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(!result.applied);
         assert!(result.current_values.is_some());
     }
@@ -252,8 +246,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(25)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -271,8 +264,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(25)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -305,8 +297,7 @@ mod tests {
             value: Term::Literal(Literal::Null),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -333,8 +324,7 @@ mod tests {
             },
         ];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(!result.applied);
     }
 }

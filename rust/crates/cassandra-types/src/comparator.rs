@@ -63,9 +63,7 @@ pub fn compare_bytes(cql_type: &CqlType, left: &[u8], right: &[u8]) -> Ordering 
 
         // List/Set: element-wise comparison using inner type.
         // Java oracle: ListType.compare / SetType.compare
-        CqlType::List(inner, _) | CqlType::Set(inner, _) => {
-            cmp_collection_seq(inner, left, right)
-        }
+        CqlType::List(inner, _) | CqlType::Set(inner, _) => cmp_collection_seq(inner, left, right),
 
         // Map: compare key-value pairs in order.
         // Java oracle: MapType.compare

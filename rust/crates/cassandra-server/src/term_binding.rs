@@ -52,7 +52,10 @@ fn typed_literal_to_bytes(lit: &Literal, target: &CqlType) -> Option<Vec<u8>> {
             BigEndian::write_i32(&mut b, *n as i32);
             Some(b)
         }
-        (Literal::Integer(n), CqlType::Bigint | CqlType::Counter | CqlType::Timestamp | CqlType::Time) => {
+        (
+            Literal::Integer(n),
+            CqlType::Bigint | CqlType::Counter | CqlType::Timestamp | CqlType::Time,
+        ) => {
             let mut b = vec![0u8; 8];
             BigEndian::write_i64(&mut b, *n);
             Some(b)
@@ -109,9 +112,7 @@ fn typed_literal_to_bytes(lit: &Literal, target: &CqlType) -> Option<Vec<u8>> {
                 None // invalid: non-ASCII in ASCII column
             }
         }
-        (Literal::String(s), CqlType::Varchar | CqlType::Blob) => {
-            Some(s.as_bytes().to_vec())
-        }
+        (Literal::String(s), CqlType::Varchar | CqlType::Blob) => Some(s.as_bytes().to_vec()),
         (Literal::String(s), _) => Some(s.as_bytes().to_vec()),
 
         // UUID
@@ -241,8 +242,7 @@ mod tests {
 
     #[test]
     fn integer_to_bigint() {
-        let bytes =
-            typed_term_to_bytes(&Term::Literal(Literal::Integer(100)), &CqlType::Bigint);
+        let bytes = typed_term_to_bytes(&Term::Literal(Literal::Integer(100)), &CqlType::Bigint);
         assert_eq!(bytes.unwrap().len(), 8);
     }
 
@@ -273,10 +273,7 @@ mod tests {
     #[test]
     fn bind_marker_returns_none() {
         use cassandra_cql::ast::BindMarker;
-        let bytes = typed_term_to_bytes(
-            &Term::BindMarker(BindMarker::Anonymous),
-            &CqlType::Int,
-        );
+        let bytes = typed_term_to_bytes(&Term::BindMarker(BindMarker::Anonymous), &CqlType::Int);
         assert_eq!(bytes, None);
     }
 }

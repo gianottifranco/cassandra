@@ -8,9 +8,9 @@
 //! Provides chunked encrypt/decrypt, IV management, and header
 //! serialization for SSTable and commitlog encryption.
 
+use crate::SecurityError;
 use crate::crypto::{AesCbcProvider, CryptoProvider, KeyProvider, NoOpCryptoProvider};
 use crate::tde::TransparentDataEncryptionOptions;
-use crate::SecurityError;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -59,39 +59,52 @@ impl EncryptionHeader {
         let cipher_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + cipher_len > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at cipher".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at cipher".to_string(),
+            ));
         }
         let cipher = String::from_utf8(data[pos..pos + cipher_len].to_vec())
             .map_err(|e| SecurityError::ConfigError(format!("invalid cipher string: {e}")))?;
         pos += cipher_len;
 
         if pos + 2 > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at iv_len".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at iv_len".to_string(),
+            ));
         }
         let iv_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + iv_len > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at iv".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at iv".to_string(),
+            ));
         }
         let iv = data[pos..pos + iv_len].to_vec();
         pos += iv_len;
 
         if pos + 2 > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at alias_len".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at alias_len".to_string(),
+            ));
         }
         let alias_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + alias_len > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at alias".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at alias".to_string(),
+            ));
         }
         let key_alias = String::from_utf8(data[pos..pos + alias_len].to_vec())
             .map_err(|e| SecurityError::ConfigError(format!("invalid alias: {e}")))?;
         pos += alias_len;
 
         if pos + 4 > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at key_length".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at key_length".to_string(),
+            ));
         }
-        let key_length = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let key_length =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
         Ok((
@@ -138,10 +151,7 @@ impl EncryptionContext {
     }
 
     /// Create from an encryption header (for reading encrypted data).
-    pub fn from_header(
-        header: &EncryptionHeader,
-        key_provider: Arc<dyn KeyProvider>,
-    ) -> Self {
+    pub fn from_header(header: &EncryptionHeader, key_provider: Arc<dyn KeyProvider>) -> Self {
         let options = TransparentDataEncryptionOptions {
             enabled: true,
             cipher: header.cipher.clone(),
@@ -180,14 +190,13 @@ impl EncryptionContext {
     }
 
     /// Encrypt a chunk of data, returning (ciphertext, header).
-    pub fn encrypt_chunk(&self, plaintext: &[u8]) -> Result<(Vec<u8>, EncryptionHeader), SecurityError> {
+    pub fn encrypt_chunk(
+        &self,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, EncryptionHeader), SecurityError> {
         let provider = self.get_provider();
         let iv = provider.generate_iv();
-        let key_alias = self
-            .options
-            .key_alias
-            .as_deref()
-            .unwrap_or("default");
+        let key_alias = self.options.key_alias.as_deref().unwrap_or("default");
         let key = self.get_key(key_alias)?;
         let ciphertext = provider.encrypt(&key, &iv, plaintext)?;
 

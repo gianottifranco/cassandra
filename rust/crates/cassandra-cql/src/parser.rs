@@ -540,9 +540,9 @@ impl Parser {
                     let field_type = self.parse_cql_type()?;
                     AlterTypeOp::AlterFieldType(field_name, field_type)
                 } else {
-                    return Err(self.error(
-                        "expected ADD, RENAME, or ALTER after ALTER TYPE <name>".into(),
-                    ));
+                    return Err(
+                        self.error("expected ADD, RENAME, or ALTER after ALTER TYPE <name>".into())
+                    );
                 };
                 Ok(Statement::AlterType(AlterType {
                     keyspace: ks,
@@ -571,9 +571,8 @@ impl Parser {
                     options: opts,
                 }))
             }
-            _ => Err(self.error(
-                "expected KEYSPACE, TABLE, ROLE, TYPE, or MATERIALIZED after ALTER".into(),
-            )),
+            _ => Err(self
+                .error("expected KEYSPACE, TABLE, ROLE, TYPE, or MATERIALIZED after ALTER".into())),
         }
     }
 
@@ -971,7 +970,7 @@ impl Parser {
                     _ => {
                         return Err(self.error(
                             "Only INSERT, UPDATE, DELETE allowed in transactions".to_string(),
-                        ))
+                        ));
                     }
                 }
                 self.eat_if(TokenKind::Semicolon);

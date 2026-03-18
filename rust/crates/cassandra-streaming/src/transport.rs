@@ -63,7 +63,10 @@ impl StreamTransport {
     ) -> Result<StreamInitResponseMessage, StreamTransportError> {
         let msg_id = self.messaging.next_id();
         let wire = StreamMessage::Init(msg).to_message(msg_id)?;
-        let resp = self.messaging.send_and_wait(peer, wire, INIT_TIMEOUT).await?;
+        let resp = self
+            .messaging
+            .send_and_wait(peer, wire, INIT_TIMEOUT)
+            .await?;
         match StreamMessage::from_message(&resp)? {
             StreamMessage::InitResponse(r) => Ok(r),
             other => Err(StreamTransportError::Protocol(
@@ -126,11 +129,7 @@ pub fn decompress(data: &[u8]) -> Result<Vec<u8>, StreamTransportError> {
 }
 
 /// Verify a data chunk's checksum against its payload.
-pub fn verify_chunk_checksum(
-    data: &[u8],
-    checksum: &[u8; 16],
-    algorithm: &str,
-) -> bool {
+pub fn verify_chunk_checksum(data: &[u8], checksum: &[u8; 16], algorithm: &str) -> bool {
     let algo = match algorithm {
         "Crc32" => crate::transfer::ChecksumAlgorithm::Crc32,
         "Md5" => crate::transfer::ChecksumAlgorithm::Md5,
@@ -172,12 +171,13 @@ mod tests {
     #[test]
     fn checksum_verify_crc32() {
         let data = b"test data for checksum";
-        let checksum = ChunkChecksum::compute(
-            data,
-            crate::transfer::ChecksumAlgorithm::Crc32,
-        );
+        let checksum = ChunkChecksum::compute(data, crate::transfer::ChecksumAlgorithm::Crc32);
         assert!(verify_chunk_checksum(data, &checksum.hash, "Crc32"));
-        assert!(!verify_chunk_checksum(b"wrong data", &checksum.hash, "Crc32"));
+        assert!(!verify_chunk_checksum(
+            b"wrong data",
+            &checksum.hash,
+            "Crc32"
+        ));
     }
 
     #[test]

@@ -153,7 +153,8 @@ impl Write for SequentialWriter {
         while offset < buf.len() {
             let remaining = self.buffer_size - self.buffer.len();
             let to_copy = remaining.min(buf.len() - offset);
-            self.buffer.extend_from_slice(&buf[offset..offset + to_copy]);
+            self.buffer
+                .extend_from_slice(&buf[offset..offset + to_copy]);
             offset += to_copy;
             self.position += to_copy as u64;
 
@@ -189,7 +190,10 @@ mod tests {
         w.finish().unwrap();
 
         let mut contents = Vec::new();
-        File::open(&path).unwrap().read_to_end(&mut contents).unwrap();
+        File::open(&path)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
         assert_eq!(contents, b"hello world");
     }
 
@@ -198,9 +202,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("large.bin");
 
-        let mut w = SequentialWriter::new(&path)
-            .unwrap()
-            .with_buffer_size(16);
+        let mut w = SequentialWriter::new(&path).unwrap().with_buffer_size(16);
 
         // Write 100 bytes through a 16-byte buffer.
         let data: Vec<u8> = (0u8..100).collect();
@@ -208,7 +210,10 @@ mod tests {
         w.finish().unwrap();
 
         let mut contents = Vec::new();
-        File::open(&path).unwrap().read_to_end(&mut contents).unwrap();
+        File::open(&path)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
         assert_eq!(contents, data);
     }
 
@@ -228,7 +233,10 @@ mod tests {
         assert!(fin.exists(), "final file should exist");
 
         let mut contents = Vec::new();
-        File::open(&fin).unwrap().read_to_end(&mut contents).unwrap();
+        File::open(&fin)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
         assert_eq!(contents, b"renamed");
     }
 
@@ -249,9 +257,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("pos.bin");
 
-        let mut w = SequentialWriter::new(&path)
-            .unwrap()
-            .with_buffer_size(32);
+        let mut w = SequentialWriter::new(&path).unwrap().with_buffer_size(32);
 
         assert_eq!(w.position(), 0);
         w.write_all(&[0u8; 10]).unwrap();
@@ -274,7 +280,10 @@ mod tests {
         w.finish().unwrap();
 
         let mut contents = Vec::new();
-        File::open(&path).unwrap().read_to_end(&mut contents).unwrap();
+        File::open(&path)
+            .unwrap()
+            .read_to_end(&mut contents)
+            .unwrap();
 
         // int (4) + long (8) + short (2) = 14 bytes
         assert_eq!(contents.len(), 14);

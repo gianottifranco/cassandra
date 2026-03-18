@@ -8,6 +8,7 @@
 
 pub mod catalog;
 pub mod column;
+pub mod distributed_schema;
 pub mod dropped_column;
 pub mod index;
 pub mod keyspace;
@@ -15,16 +16,15 @@ pub mod persistence;
 pub mod schema_agreement;
 pub mod schema_change;
 pub mod schema_constants;
+pub mod system_keyspace_manager;
 pub mod system_keyspaces;
 pub mod system_local_data;
-pub mod system_keyspace_manager;
 pub mod table;
 pub mod table_id;
 pub mod trigger;
 pub mod user_function;
 pub mod user_type;
 pub mod view;
-pub mod distributed_schema;
 
 pub use catalog::{SchemaCatalog, SchemaSnapshot};
 pub use column::{ClusteringOrder, ColumnKind, ColumnMetadata};

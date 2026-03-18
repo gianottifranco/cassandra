@@ -395,7 +395,10 @@ mod tests {
 
     #[test]
     fn data_rate_display() {
-        assert_eq!(DataRateSpec::from_mebibytes_per_second(10).to_string(), "10MiB/s");
+        assert_eq!(
+            DataRateSpec::from_mebibytes_per_second(10).to_string(),
+            "10MiB/s"
+        );
         assert_eq!(DataRateSpec::from_bytes_per_second(0).to_string(), "0B/s");
     }
 

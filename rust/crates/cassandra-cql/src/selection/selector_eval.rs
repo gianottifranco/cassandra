@@ -208,7 +208,10 @@ mod tests {
 
     #[test]
     fn output_names() {
-        assert_eq!(SelectorEvaluator::output_name(&Selector::Column("id".into())), "id");
+        assert_eq!(
+            SelectorEvaluator::output_name(&Selector::Column("id".into())),
+            "id"
+        );
         assert_eq!(
             SelectorEvaluator::output_name(&Selector::Alias {
                 selector: Box::new(Selector::Column("id".into())),

@@ -454,7 +454,10 @@ impl InProgressSequences {
 
     /// Advance the sequence to the given step. Returns the new state.
     pub fn advance(&mut self, id: Uuid, step: u8) -> Result<SequenceState, SequenceError> {
-        let entry = self.sequences.get_mut(&id).ok_or(SequenceError::NotFound(id))?;
+        let entry = self
+            .sequences
+            .get_mut(&id)
+            .ok_or(SequenceError::NotFound(id))?;
         if entry.state == SequenceState::Complete {
             return Err(SequenceError::AlreadyComplete(id));
         }
@@ -464,7 +467,10 @@ impl InProgressSequences {
 
     /// Mark a sequence as complete.
     pub fn complete(&mut self, id: Uuid) -> Result<(), SequenceError> {
-        let entry = self.sequences.get_mut(&id).ok_or(SequenceError::NotFound(id))?;
+        let entry = self
+            .sequences
+            .get_mut(&id)
+            .ok_or(SequenceError::NotFound(id))?;
         entry.state = SequenceState::Complete;
         Ok(())
     }
@@ -494,7 +500,8 @@ impl InProgressSequences {
 
     /// Remove completed sequences from the registry.
     pub fn purge_completed(&mut self) {
-        self.sequences.retain(|_, e| e.state != SequenceState::Complete);
+        self.sequences
+            .retain(|_, e| e.state != SequenceState::Complete);
     }
 }
 
@@ -594,7 +601,10 @@ mod tests {
         let t2 = op.advance(Epoch(3)).unwrap();
         assert!(matches!(
             t2,
-            Transformation::UpdateNodeState { state: NodeState::Normal, .. }
+            Transformation::UpdateNodeState {
+                state: NodeState::Normal,
+                ..
+            }
         ));
 
         // Step 3+ -> None, complete
@@ -618,14 +628,8 @@ mod tests {
     #[test]
     fn bootstrap_and_replace_full_sequence() {
         let tokens = vec![Token::from_raw(50)];
-        let mut op = BootstrapAndReplace::new(
-            node_id(1),
-            node_id(2),
-            ep(7002),
-            tokens,
-            "dc1",
-            "rack1",
-        );
+        let mut op =
+            BootstrapAndReplace::new(node_id(1), node_id(2), ep(7002), tokens, "dc1", "rack1");
 
         assert_eq!(op.kind(), SequenceType::Replace);
         assert_eq!(op.node_id(), node_id(2));
@@ -638,7 +642,9 @@ mod tests {
 
         // Step 1 -> AssignTokens to new node
         let t1 = op.advance(Epoch(2)).unwrap();
-        assert!(matches!(t1, Transformation::AssignTokens { node_id: nid, .. } if nid == expected_new));
+        assert!(
+            matches!(t1, Transformation::AssignTokens { node_id: nid, .. } if nid == expected_new)
+        );
 
         // Step 2 -> Unregister old node
         let t2 = op.advance(Epoch(3)).unwrap();
@@ -661,7 +667,10 @@ mod tests {
         let t0 = op.advance(Epoch::FIRST).unwrap();
         assert!(matches!(
             t0,
-            Transformation::UpdateNodeState { state: NodeState::Leaving, .. }
+            Transformation::UpdateNodeState {
+                state: NodeState::Leaving,
+                ..
+            }
         ));
 
         // Step 1 -> Unregister
@@ -686,7 +695,10 @@ mod tests {
         let t0 = op.advance(Epoch::FIRST).unwrap();
         assert!(matches!(
             t0,
-            Transformation::UpdateNodeState { state: NodeState::Moving, .. }
+            Transformation::UpdateNodeState {
+                state: NodeState::Moving,
+                ..
+            }
         ));
 
         // Step 1 -> AssignTokens(new)
@@ -715,10 +727,7 @@ mod tests {
 
         assert_eq!(seqs.active_count(), 1);
         assert!(!seqs.is_empty());
-        assert_eq!(
-            seqs.get_state(&id),
-            Some(&SequenceState::NotStarted)
-        );
+        assert_eq!(seqs.get_state(&id), Some(&SequenceState::NotStarted));
 
         // Advance to step 1
         let state = seqs.advance(id, 1).unwrap();

@@ -47,9 +47,7 @@ impl PermissionsCache {
 
     pub fn invalidate_role(&self, role: &str) {
         // Invalidate all entries for this role
-        let keys: Vec<PermissionsCacheKey> = self
-            .cache
-            .entries_matching(|k| k.role == role);
+        let keys: Vec<PermissionsCacheKey> = self.cache.entries_matching(|k| k.role == role);
         for key in keys {
             self.cache.invalidate(&key);
         }

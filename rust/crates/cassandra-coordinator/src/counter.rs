@@ -358,8 +358,8 @@ mod tests {
     #[test]
     fn select_counter_leader_prefers_local() {
         let (write_coord, replicas) = setup_env();
-        let counter_coord = CounterCoordinator::new(write_coord, replicas)
-            .with_local_endpoint(ep(7002));
+        let counter_coord =
+            CounterCoordinator::new(write_coord, replicas).with_local_endpoint(ep(7002));
 
         struct DummySnitch;
         impl Snitch for DummySnitch {
@@ -381,8 +381,8 @@ mod tests {
     #[test]
     fn select_counter_leader_falls_back_to_closest() {
         let (write_coord, replicas) = setup_env();
-        let counter_coord = CounterCoordinator::new(write_coord, replicas)
-            .with_local_endpoint(ep(9999)); // Not in replicas
+        let counter_coord =
+            CounterCoordinator::new(write_coord, replicas).with_local_endpoint(ep(9999)); // Not in replicas
 
         struct DummySnitch;
         impl Snitch for DummySnitch {

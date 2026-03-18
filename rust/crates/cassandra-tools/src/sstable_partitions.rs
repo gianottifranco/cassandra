@@ -118,10 +118,7 @@ pub fn run(file: &str, top: usize) {
         display_count
     );
     println!();
-    println!(
-        "{:<40} {:>8} {:>10}",
-        "Partition Key", "Rows", "Cells"
-    );
+    println!("{:<40} {:>8} {:>10}", "Partition Key", "Rows", "Cells");
     println!("{:-<60}", "");
 
     for (pk, rows, cells) in partition_sizes.iter().take(display_count) {

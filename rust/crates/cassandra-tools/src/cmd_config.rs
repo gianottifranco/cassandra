@@ -64,10 +64,7 @@ pub fn set_timeout(client: &AdminClient, timeout_type: &str, timeout_ms: u64) {
     let key = format!("{}_request_timeout_in_ms", timeout_type);
     let body = json!({ "key": key, "value": timeout_ms.to_string() });
     match client.post_json("/api/v1/config", &body) {
-        Ok(_) => println!(
-            "Timeout '{}' set to {} ms.",
-            timeout_type, timeout_ms
-        ),
+        Ok(_) => println!("Timeout '{}' set to {} ms.", timeout_type, timeout_ms),
         Err(e) => eprintln!("Error setting {} timeout: {}", timeout_type, e),
     }
 }

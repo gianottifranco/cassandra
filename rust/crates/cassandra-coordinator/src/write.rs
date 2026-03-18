@@ -756,7 +756,10 @@ impl WriteCoordinator {
     /// 1. Reject if bootstrapping
     /// 2. Reject if write semaphore is full (Overloaded)
     /// 3. Reject if table is currently being truncated
-    fn check_preconditions(&self, mutation: &CoordinatedMutation) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, WriteError> {
+    fn check_preconditions(
+        &self,
+        mutation: &CoordinatedMutation,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, WriteError> {
         if self.is_bootstrapping {
             return Err(WriteError::IsBootstrapping);
         }
@@ -1246,11 +1249,8 @@ impl WriteCoordinator {
         if let Some(tm) = _trigger_manager {
             if tm.has_triggers_for(&mutation.keyspace, &mutation.table) {
                 let mutation_bytes = serde_json::to_vec(mutation).unwrap_or_default();
-                let augmented = tm.augment_mutation(
-                    &mutation.keyspace,
-                    &mutation.table,
-                    &mutation_bytes,
-                );
+                let augmented =
+                    tm.augment_mutation(&mutation.keyspace, &mutation.table, &mutation_bytes);
                 if !augmented.is_empty() {
                     debug!(
                         keyspace = %mutation.keyspace,
@@ -1318,12 +1318,10 @@ impl WriteCoordinator {
                     .fetch_add(view_result.mutations.len() as u64, Ordering::Relaxed);
 
                 // Backpressure check (WU-18): increment backlog before scheduling
-                let pending = self.view_update_backlog.fetch_add(
-                    view_result.mutations.len() as u64,
-                    Ordering::Relaxed,
-                );
-                if pending + view_result.mutations.len() as u64
-                    > self.view_update_backlog_threshold
+                let pending = self
+                    .view_update_backlog
+                    .fetch_add(view_result.mutations.len() as u64, Ordering::Relaxed);
+                if pending + view_result.mutations.len() as u64 > self.view_update_backlog_threshold
                 {
                     warn!(
                         backlog = pending + view_result.mutations.len() as u64,
@@ -1381,10 +1379,8 @@ impl WriteCoordinator {
                 }
 
                 // Decrement backlog after view mutations are processed (WU-18)
-                self.view_update_backlog.fetch_sub(
-                    view_result.mutations.len() as u64,
-                    Ordering::Relaxed,
-                );
+                self.view_update_backlog
+                    .fetch_sub(view_result.mutations.len() as u64, Ordering::Relaxed);
             }
         }
 
@@ -1972,10 +1968,7 @@ mod tests {
         .unwrap();
 
         // Before the write, backlog should be 0
-        assert_eq!(
-            coordinator.view_update_backlog.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(coordinator.view_update_backlog.load(Ordering::Relaxed), 0);
 
         let (_result, _fanout) = coordinator
             .coordinate_write_with_hooks(
@@ -1990,10 +1983,7 @@ mod tests {
 
         // After the write completes, backlog should return to 0
         // (incremented then decremented during processing)
-        assert_eq!(
-            coordinator.view_update_backlog.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(coordinator.view_update_backlog.load(Ordering::Relaxed), 0);
     }
 
     // ── WU-01: coordinate_write_async ─────────────────────────────
@@ -2038,12 +2028,7 @@ mod tests {
         let snitch = SimpleSnitch;
 
         let (plan, handler) = coordinator
-            .coordinate_write_async(
-                &test_mutation(),
-                ConsistencyLevel::One,
-                &strategy,
-                &snitch,
-            )
+            .coordinate_write_async(&test_mutation(), ConsistencyLevel::One, &strategy, &snitch)
             .unwrap();
 
         // Simulate one ack
@@ -2102,8 +2087,11 @@ mod tests {
         let mut m = test_mutation();
         assert_eq!(WriteCoordinator::max_collection_size(&m), 0);
 
-        m.rows[0].cells[0].collection_op =
-            Some(CollectionOp::Append(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]));
+        m.rows[0].cells[0].collection_op = Some(CollectionOp::Append(vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+        ]));
         assert_eq!(WriteCoordinator::max_collection_size(&m), 3);
     }
 

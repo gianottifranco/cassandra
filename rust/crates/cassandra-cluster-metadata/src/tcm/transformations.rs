@@ -210,9 +210,7 @@ impl ExtendedTransformation {
                 TransformationKind::CmsReconfig
             }
 
-            Self::AssignTokens { .. } | Self::UnassignTokens { .. } => {
-                TransformationKind::TokenOp
-            }
+            Self::AssignTokens { .. } | Self::UnassignTokens { .. } => TransformationKind::TokenOp,
         }
     }
 
@@ -402,9 +400,7 @@ mod tests {
             description: "create table".into(),
         };
         let _ = ExtendedTransformation::TakeSnapshot;
-        let _ = ExtendedTransformation::RestoreSnapshot {
-            epoch: Epoch(10),
-        };
+        let _ = ExtendedTransformation::RestoreSnapshot { epoch: Epoch(10) };
         let _ = ExtendedTransformation::AddCmsMember { node_id: nid(1) };
         let _ = ExtendedTransformation::RemoveCmsMember { node_id: nid(1) };
         let _ = ExtendedTransformation::AssignTokens {
@@ -673,10 +669,7 @@ mod tests {
     fn from_base_unregister() {
         let base = Transformation::Unregister { node_id: nid(1) };
         let ext = ExtendedTransformation::from_base(&base);
-        assert!(matches!(
-            ext,
-            ExtendedTransformation::UnregisterNode { .. }
-        ));
+        assert!(matches!(ext, ExtendedTransformation::UnregisterNode { .. }));
     }
 
     #[test]
@@ -798,11 +791,7 @@ mod tests {
         };
         let base = ext.to_base().unwrap();
         let back = ExtendedTransformation::from_base(&base);
-        if let ExtendedTransformation::AssignTokens {
-            node_id,
-            tokens: t,
-        } = back
-        {
+        if let ExtendedTransformation::AssignTokens { node_id, tokens: t } = back {
             assert_eq!(node_id, nid(3));
             assert_eq!(t, tokens);
         } else {

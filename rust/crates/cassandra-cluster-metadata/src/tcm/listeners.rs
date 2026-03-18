@@ -40,10 +40,7 @@ use crate::tcm::{Epoch, Transformation};
 #[derive(Debug, Clone)]
 pub enum MetadataChangeEvent {
     /// A schema change was committed.
-    SchemaChanged {
-        epoch: Epoch,
-        description: String,
-    },
+    SchemaChanged { epoch: Epoch, description: String },
     /// A topology change (node register/unregister/state change) was committed.
     TopologyChanged {
         epoch: Epoch,
@@ -51,22 +48,13 @@ pub enum MetadataChangeEvent {
         transformation: Transformation,
     },
     /// Replica placements were recomputed.
-    PlacementChanged {
-        epoch: Epoch,
-    },
+    PlacementChanged { epoch: Epoch },
     /// A metadata snapshot was taken.
-    SnapshotTaken {
-        epoch: Epoch,
-    },
+    SnapshotTaken { epoch: Epoch },
     /// The metadata log was truncated.
-    LogTruncated {
-        epoch: Epoch,
-    },
+    LogTruncated { epoch: Epoch },
     /// The epoch advanced (catch-all for any epoch bump).
-    EpochAdvanced {
-        old: Epoch,
-        new: Epoch,
-    },
+    EpochAdvanced { old: Epoch, new: Epoch },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -396,7 +384,9 @@ mod tests {
 
         registry.register(placement.clone());
 
-        registry.notify(&MetadataChangeEvent::PlacementChanged { epoch: Epoch::FIRST });
+        registry.notify(&MetadataChangeEvent::PlacementChanged {
+            epoch: Epoch::FIRST,
+        });
         registry.notify(&MetadataChangeEvent::TopologyChanged {
             epoch: Epoch(2),
             node_id: node_id(1),

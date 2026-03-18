@@ -49,7 +49,9 @@ impl CommandStore {
 
     /// Transition a command to Accepted status.
     pub fn accept(&self, txn_id: TxnId, execute_at: Timestamp) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status != CommandStatus::PreAccepted {
@@ -67,10 +69,15 @@ impl CommandStore {
 
     /// Transition a command to Committed status.
     pub fn commit(&self, txn_id: TxnId, execute_at: Timestamp) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
-        if !matches!(entry.status, CommandStatus::PreAccepted | CommandStatus::Accepted) {
+        if !matches!(
+            entry.status,
+            CommandStatus::PreAccepted | CommandStatus::Accepted
+        ) {
             return Err(AccordError::InvalidTransition {
                 from: entry.status,
                 to: CommandStatus::Committed,
@@ -85,7 +92,9 @@ impl CommandStore {
 
     /// Transition a command to Applied status.
     pub fn apply(&self, txn_id: TxnId) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status != CommandStatus::Committed {
@@ -102,7 +111,9 @@ impl CommandStore {
 
     /// Invalidate a transaction.
     pub fn invalidate(&self, txn_id: TxnId) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status.is_terminal() {
@@ -229,7 +240,9 @@ mod tests {
     fn len_tracks_commands() {
         let store = CommandStore::new();
         assert!(store.is_empty());
-        store.pre_accept(test_txn_id(), test_txn(), Timestamp(100)).unwrap();
+        store
+            .pre_accept(test_txn_id(), test_txn(), Timestamp(100))
+            .unwrap();
         assert_eq!(store.len(), 1);
     }
 }

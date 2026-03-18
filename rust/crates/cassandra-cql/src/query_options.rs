@@ -5,7 +5,7 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.cql3.QueryOptions`
 
-use cassandra_native_protocol::message::{query_flags, QueryParams};
+use cassandra_native_protocol::message::{QueryParams, query_flags};
 use cassandra_native_protocol::types::Consistency;
 
 /// CQL-semantic query options built from protocol-level `QueryParams`.
@@ -172,8 +172,7 @@ mod tests {
 
     #[test]
     fn with_paging_state() {
-        let opts = QueryOptions::for_internal_calls()
-            .with_paging_state(vec![0xDE, 0xAD]);
+        let opts = QueryOptions::for_internal_calls().with_paging_state(vec![0xDE, 0xAD]);
         assert_eq!(opts.paging_state, Some(vec![0xDE, 0xAD]));
     }
 }

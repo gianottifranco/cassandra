@@ -605,9 +605,7 @@ mod tests {
     fn count_star_accumulate() {
         let agg = CountStarAggregate;
         let state = agg.init_state();
-        let s = agg
-            .accumulate(state.as_deref(), Some(&[1, 2, 3]))
-            .unwrap();
+        let s = agg.accumulate(state.as_deref(), Some(&[1, 2, 3])).unwrap();
         let s = agg.accumulate(s.as_deref(), Some(&[4, 5, 6])).unwrap();
         let s = agg.accumulate(s.as_deref(), None).unwrap(); // null still counts for count(*)
         let result = agg.finalize(s.as_deref()).unwrap().unwrap();
@@ -618,9 +616,7 @@ mod tests {
     fn count_column_skips_null() {
         let agg = CountColumnAggregate;
         let state = agg.init_state();
-        let s = agg
-            .accumulate(state.as_deref(), Some(&[1, 2, 3]))
-            .unwrap();
+        let s = agg.accumulate(state.as_deref(), Some(&[1, 2, 3])).unwrap();
         let s = agg.accumulate(s.as_deref(), None).unwrap(); // null doesn't count
         let result = agg.finalize(s.as_deref()).unwrap().unwrap();
         assert_eq!(i64::from_be_bytes(result.try_into().unwrap()), 1);

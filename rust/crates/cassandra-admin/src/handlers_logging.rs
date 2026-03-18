@@ -85,18 +85,12 @@ fn handle_set_logging_level_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
 
 /// `POST /api/v1/operations/enableauditlog` — enable audit logging.
 pub fn handle_enable_audit_log(_state: &AdminState) -> Response<Full<Bytes>> {
-    json_response(
-        StatusCode::OK,
-        &json!({"status": "audit logging enabled"}),
-    )
+    json_response(StatusCode::OK, &json!({"status": "audit logging enabled"}))
 }
 
 /// `POST /api/v1/operations/disableauditlog` — disable audit logging.
 pub fn handle_disable_audit_log(_state: &AdminState) -> Response<Full<Bytes>> {
-    json_response(
-        StatusCode::OK,
-        &json!({"status": "audit logging disabled"}),
-    )
+    json_response(StatusCode::OK, &json!({"status": "audit logging disabled"}))
 }
 
 /// `GET /api/v1/audit/config` — returns current audit logging configuration.
@@ -417,7 +411,12 @@ mod tests {
             rt.block_on(resp.into_body().collect()).unwrap().to_bytes()
         };
         let parsed: serde_json::Value = serde_json::from_slice(&collected).unwrap();
-        assert!(parsed["error"].as_str().unwrap().contains("between 0.0 and 1.0"));
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("between 0.0 and 1.0")
+        );
     }
 
     #[test]

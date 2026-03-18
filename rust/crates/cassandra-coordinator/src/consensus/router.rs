@@ -12,13 +12,13 @@
 //! In Mixed mode, uses per-key migration state to route individual
 //! operations to the appropriate protocol.
 
-use cassandra_accord::service::AccordService;
 use cassandra_accord::migration::{KeyMigrationState, TableMigrationState};
+use cassandra_accord::service::AccordService;
 use cassandra_schema::table::TransactionalMode;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use parking_lot::RwLock;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -97,11 +97,7 @@ impl ConsensusRouter {
     }
 
     /// Get the per-key migration state for Mixed mode routing.
-    fn get_key_migration_state(
-        &self,
-        table_id: &Uuid,
-        partition_key: &[u8],
-    ) -> KeyMigrationState {
+    fn get_key_migration_state(&self, table_id: &Uuid, partition_key: &[u8]) -> KeyMigrationState {
         let states = self.migration_states.read();
         match states.get(table_id) {
             Some(table_state) => table_state.get_key_state(partition_key),
@@ -229,8 +225,7 @@ impl ConsensusRouter {
             KeyMigrationState::Accord => {
                 info!(
                     keyspace,
-                    table,
-                    "Mixed mode: key migrated, routing to Accord"
+                    table, "Mixed mode: key migrated, routing to Accord"
                 );
                 self.accord
                     .execute_transaction(keyspace, vec![mutation])

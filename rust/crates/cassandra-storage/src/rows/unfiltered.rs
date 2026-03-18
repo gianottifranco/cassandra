@@ -97,9 +97,9 @@ impl RangeTombstoneMarker {
     /// The clustering bound for ordering in the unfiltered stream.
     pub fn clustering_bound(&self) -> &ClusteringBound {
         match self {
-            Self::Open { bound, .. }
-            | Self::Close { bound, .. }
-            | Self::Boundary { bound, .. } => bound,
+            Self::Open { bound, .. } | Self::Close { bound, .. } | Self::Boundary { bound, .. } => {
+                bound
+            }
         }
     }
 
@@ -232,12 +232,7 @@ impl From<&Row> for RowData {
         if row.is_tombstone {
             let ldt = row.local_deletion_time.unwrap_or(i32::MAX);
             // Use the max cell timestamp as the deletion timestamp
-            let max_ts = row
-                .cells
-                .iter()
-                .map(|c| c.timestamp)
-                .max()
-                .unwrap_or(0);
+            let max_ts = row.cells.iter().map(|c| c.timestamp).max().unwrap_or(0);
             data.deletion = DeletionTime::new(max_ts, ldt);
         }
         for cell in &row.cells {

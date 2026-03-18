@@ -123,118 +123,282 @@ impl MetricsRegistry {
         ];
 
         let client_request_latency = HistogramVec::new(
-            HistogramOpts::new("cassandra_client_request_latency_seconds", "Client request latency in seconds")
-                .buckets(latency_buckets.clone()),
+            HistogramOpts::new(
+                "cassandra_client_request_latency_seconds",
+                "Client request latency in seconds",
+            )
+            .buckets(latency_buckets.clone()),
             &["operation"],
-        ).expect("histogram");
-        r.register(Box::new(client_request_latency.clone())).unwrap();
+        )
+        .expect("histogram");
+        r.register(Box::new(client_request_latency.clone()))
+            .unwrap();
 
         let read_count = reg_counter(r, "cassandra_read_count_total", "Total read operations");
         let write_count = reg_counter(r, "cassandra_write_count_total", "Total write operations");
-        let live_sstable_count = reg_gauge(r, "cassandra_live_sstable_count", "Live SSTables across all tables");
-        let pending_compactions = reg_gauge(r, "cassandra_pending_compactions", "Pending compaction tasks");
-        let connected_native_clients = reg_gauge(r, "cassandra_connected_native_clients", "Connected native clients");
-        let tombstone_scanned = reg_counter(r, "cassandra_tombstone_scanned_total", "Tombstones scanned during reads");
+        let live_sstable_count = reg_gauge(
+            r,
+            "cassandra_live_sstable_count",
+            "Live SSTables across all tables",
+        );
+        let pending_compactions = reg_gauge(
+            r,
+            "cassandra_pending_compactions",
+            "Pending compaction tasks",
+        );
+        let connected_native_clients = reg_gauge(
+            r,
+            "cassandra_connected_native_clients",
+            "Connected native clients",
+        );
+        let tombstone_scanned = reg_counter(
+            r,
+            "cassandra_tombstone_scanned_total",
+            "Tombstones scanned during reads",
+        );
 
         // Cache metrics
-        let key_cache_hit_rate = reg_gauge_f64(r, "cassandra_key_cache_hit_rate", "Key cache hit rate");
+        let key_cache_hit_rate =
+            reg_gauge_f64(r, "cassandra_key_cache_hit_rate", "Key cache hit rate");
         let key_cache_size = reg_gauge(r, "cassandra_key_cache_size", "Key cache entries");
-        let key_cache_hits_total = reg_counter(r, "cassandra_key_cache_hits_total", "Key cache hits");
-        let key_cache_misses_total = reg_counter(r, "cassandra_key_cache_misses_total", "Key cache misses");
-        let row_cache_hit_rate = reg_gauge_f64(r, "cassandra_row_cache_hit_rate", "Row cache hit rate");
+        let key_cache_hits_total =
+            reg_counter(r, "cassandra_key_cache_hits_total", "Key cache hits");
+        let key_cache_misses_total =
+            reg_counter(r, "cassandra_key_cache_misses_total", "Key cache misses");
+        let row_cache_hit_rate =
+            reg_gauge_f64(r, "cassandra_row_cache_hit_rate", "Row cache hit rate");
         let row_cache_size = reg_gauge(r, "cassandra_row_cache_size", "Row cache entries");
-        let counter_cache_hit_rate = reg_gauge_f64(r, "cassandra_counter_cache_hit_rate", "Counter cache hit rate");
-        let counter_cache_size = reg_gauge(r, "cassandra_counter_cache_size", "Counter cache entries");
-        let chunk_cache_hit_rate = reg_gauge_f64(r, "cassandra_chunk_cache_hit_rate", "Chunk cache hit rate");
+        let counter_cache_hit_rate = reg_gauge_f64(
+            r,
+            "cassandra_counter_cache_hit_rate",
+            "Counter cache hit rate",
+        );
+        let counter_cache_size =
+            reg_gauge(r, "cassandra_counter_cache_size", "Counter cache entries");
+        let chunk_cache_hit_rate =
+            reg_gauge_f64(r, "cassandra_chunk_cache_hit_rate", "Chunk cache hit rate");
         let chunk_cache_size = reg_gauge(r, "cassandra_chunk_cache_size", "Chunk cache bytes");
-        let storage_load_bytes = reg_gauge(r, "cassandra_storage_load_bytes", "Data stored on node in bytes");
+        let storage_load_bytes = reg_gauge(
+            r,
+            "cassandra_storage_load_bytes",
+            "Data stored on node in bytes",
+        );
 
         let exceptions_count = IntCounterVec::new(
-            Opts::new("cassandra_exceptions_total", "Total exceptions by type"), &["type"],
-        ).expect("counter vec");
+            Opts::new("cassandra_exceptions_total", "Total exceptions by type"),
+            &["type"],
+        )
+        .expect("counter vec");
         r.register(Box::new(exceptions_count.clone())).unwrap();
 
         // Repair metrics
         let repair_trees_built = reg_gauge(r, "cassandra_repair_trees_built", "Repair trees built");
-        let repair_trees_exchanged = reg_gauge(r, "cassandra_repair_trees_exchanged", "Repair trees exchanged");
-        let repair_ranges_repaired = reg_gauge(r, "cassandra_repair_ranges_repaired", "Ranges repaired");
-        let repair_bytes_streamed = reg_gauge(r, "cassandra_repair_bytes_streamed", "Repair bytes streamed");
-        let repair_sessions_active = reg_gauge(r, "cassandra_repair_sessions_active", "Active repair sessions");
-        let repair_sessions_completed = reg_gauge(r, "cassandra_repair_sessions_completed", "Completed repair sessions");
-        let repair_sessions_failed = reg_gauge(r, "cassandra_repair_sessions_failed", "Failed repair sessions");
+        let repair_trees_exchanged = reg_gauge(
+            r,
+            "cassandra_repair_trees_exchanged",
+            "Repair trees exchanged",
+        );
+        let repair_ranges_repaired =
+            reg_gauge(r, "cassandra_repair_ranges_repaired", "Ranges repaired");
+        let repair_bytes_streamed = reg_gauge(
+            r,
+            "cassandra_repair_bytes_streamed",
+            "Repair bytes streamed",
+        );
+        let repair_sessions_active = reg_gauge(
+            r,
+            "cassandra_repair_sessions_active",
+            "Active repair sessions",
+        );
+        let repair_sessions_completed = reg_gauge(
+            r,
+            "cassandra_repair_sessions_completed",
+            "Completed repair sessions",
+        );
+        let repair_sessions_failed = reg_gauge(
+            r,
+            "cassandra_repair_sessions_failed",
+            "Failed repair sessions",
+        );
 
         // Commitlog metrics
-        let commitlog_bytes_written = reg_counter(r, "cassandra_commitlog_bytes_written_total", "Commitlog bytes written");
-        let commitlog_segments_active = reg_gauge(r, "cassandra_commitlog_segments_active", "Active commitlog segments");
-        let commitlog_pending_tasks = reg_gauge(r, "cassandra_commitlog_pending_tasks", "Pending commitlog tasks");
+        let commitlog_bytes_written = reg_counter(
+            r,
+            "cassandra_commitlog_bytes_written_total",
+            "Commitlog bytes written",
+        );
+        let commitlog_segments_active = reg_gauge(
+            r,
+            "cassandra_commitlog_segments_active",
+            "Active commitlog segments",
+        );
+        let commitlog_pending_tasks = reg_gauge(
+            r,
+            "cassandra_commitlog_pending_tasks",
+            "Pending commitlog tasks",
+        );
 
         // Compaction metrics
-        let compaction_bytes_compacted_total = reg_counter(r, "cassandra_compaction_bytes_compacted_total", "Bytes compacted");
-        let compaction_tasks_completed_total = reg_counter(r, "cassandra_compaction_tasks_completed_total", "Compaction tasks completed");
-        let compaction_pending_tasks = reg_gauge(r, "cassandra_compaction_pending_tasks", "Pending compaction tasks");
+        let compaction_bytes_compacted_total = reg_counter(
+            r,
+            "cassandra_compaction_bytes_compacted_total",
+            "Bytes compacted",
+        );
+        let compaction_tasks_completed_total = reg_counter(
+            r,
+            "cassandra_compaction_tasks_completed_total",
+            "Compaction tasks completed",
+        );
+        let compaction_pending_tasks = reg_gauge(
+            r,
+            "cassandra_compaction_pending_tasks",
+            "Pending compaction tasks",
+        );
 
         // Streaming metrics
-        let streaming_bytes_sent = reg_gauge(r, "cassandra_streaming_bytes_sent", "Streaming bytes sent");
-        let streaming_bytes_received = reg_gauge(r, "cassandra_streaming_bytes_received", "Streaming bytes received");
-        let streaming_sessions_active = reg_gauge(r, "cassandra_streaming_sessions_active", "Active streaming sessions");
-        let streaming_sessions_completed = reg_gauge(r, "cassandra_streaming_sessions_completed", "Completed streaming sessions");
-        let streaming_sessions_failed = reg_gauge(r, "cassandra_streaming_sessions_failed", "Failed streaming sessions");
+        let streaming_bytes_sent =
+            reg_gauge(r, "cassandra_streaming_bytes_sent", "Streaming bytes sent");
+        let streaming_bytes_received = reg_gauge(
+            r,
+            "cassandra_streaming_bytes_received",
+            "Streaming bytes received",
+        );
+        let streaming_sessions_active = reg_gauge(
+            r,
+            "cassandra_streaming_sessions_active",
+            "Active streaming sessions",
+        );
+        let streaming_sessions_completed = reg_gauge(
+            r,
+            "cassandra_streaming_sessions_completed",
+            "Completed streaming sessions",
+        );
+        let streaming_sessions_failed = reg_gauge(
+            r,
+            "cassandra_streaming_sessions_failed",
+            "Failed streaming sessions",
+        );
         let streaming_retries = reg_gauge(r, "cassandra_streaming_retries", "Streaming retries");
-        let streaming_checksum_failures = reg_gauge(r, "cassandra_streaming_checksum_failures", "Streaming checksum failures");
+        let streaming_checksum_failures = reg_gauge(
+            r,
+            "cassandra_streaming_checksum_failures",
+            "Streaming checksum failures",
+        );
 
         // Messaging metrics
-        let messaging_sent_total = reg_counter(r, "cassandra_messaging_sent_total", "Messages sent");
-        let messaging_received_total = reg_counter(r, "cassandra_messaging_received_total", "Messages received");
-        let messaging_dropped_total = reg_counter(r, "cassandra_messaging_dropped_total", "Messages dropped");
+        let messaging_sent_total =
+            reg_counter(r, "cassandra_messaging_sent_total", "Messages sent");
+        let messaging_received_total =
+            reg_counter(r, "cassandra_messaging_received_total", "Messages received");
+        let messaging_dropped_total =
+            reg_counter(r, "cassandra_messaging_dropped_total", "Messages dropped");
 
         // Table-level labeled metrics
         let table_read_latency = HistogramVec::new(
-            HistogramOpts::new("cassandra_table_read_latency_seconds", "Per-table read latency").buckets(latency_buckets.clone()),
+            HistogramOpts::new(
+                "cassandra_table_read_latency_seconds",
+                "Per-table read latency",
+            )
+            .buckets(latency_buckets.clone()),
             &["keyspace", "table"],
-        ).expect("histogram");
+        )
+        .expect("histogram");
         r.register(Box::new(table_read_latency.clone())).unwrap();
         let table_write_latency = HistogramVec::new(
-            HistogramOpts::new("cassandra_table_write_latency_seconds", "Per-table write latency").buckets(latency_buckets),
+            HistogramOpts::new(
+                "cassandra_table_write_latency_seconds",
+                "Per-table write latency",
+            )
+            .buckets(latency_buckets),
             &["keyspace", "table"],
-        ).expect("histogram");
+        )
+        .expect("histogram");
         r.register(Box::new(table_write_latency.clone())).unwrap();
         let table_tombstones_scanned_total = IntCounterVec::new(
-            Opts::new("cassandra_table_tombstones_scanned_total", "Per-table tombstones scanned"),
+            Opts::new(
+                "cassandra_table_tombstones_scanned_total",
+                "Per-table tombstones scanned",
+            ),
             &["keyspace", "table"],
-        ).expect("counter vec");
-        r.register(Box::new(table_tombstones_scanned_total.clone())).unwrap();
+        )
+        .expect("counter vec");
+        r.register(Box::new(table_tombstones_scanned_total.clone()))
+            .unwrap();
 
         // Paxos metrics
-        let paxos_propose_total = reg_counter(r, "cassandra_paxos_propose_total", "Paxos proposals");
+        let paxos_propose_total =
+            reg_counter(r, "cassandra_paxos_propose_total", "Paxos proposals");
         let paxos_commit_total = reg_counter(r, "cassandra_paxos_commit_total", "Paxos commits");
-        let paxos_contention_total = reg_counter(r, "cassandra_paxos_contention_total", "Paxos contentions");
+        let paxos_contention_total =
+            reg_counter(r, "cassandra_paxos_contention_total", "Paxos contentions");
 
         // Tracing metrics
-        let tracing_sessions_total = reg_counter(r, "cassandra_tracing_sessions_total", "Tracing sessions");
-        let tracing_active_sessions = reg_gauge(r, "cassandra_tracing_active_sessions", "Active tracing sessions");
+        let tracing_sessions_total =
+            reg_counter(r, "cassandra_tracing_sessions_total", "Tracing sessions");
+        let tracing_active_sessions = reg_gauge(
+            r,
+            "cassandra_tracing_active_sessions",
+            "Active tracing sessions",
+        );
 
         // TCM metrics
         let tcm_epoch = reg_gauge(r, "cassandra_tcm_epoch", "Current TCM epoch");
         let tcm_commits_total = reg_counter(r, "cassandra_tcm_commits_total", "TCM commits");
 
         Self {
-            registry, client_request_latency, read_count, write_count,
-            live_sstable_count, pending_compactions, connected_native_clients, tombstone_scanned,
-            key_cache_hit_rate, key_cache_size, key_cache_hits_total, key_cache_misses_total,
-            row_cache_hit_rate, row_cache_size, counter_cache_hit_rate, counter_cache_size,
-            chunk_cache_hit_rate, chunk_cache_size, storage_load_bytes, exceptions_count,
-            repair_trees_built, repair_trees_exchanged, repair_ranges_repaired,
-            repair_bytes_streamed, repair_sessions_active, repair_sessions_completed,
-            repair_sessions_failed, commitlog_bytes_written, commitlog_segments_active,
-            commitlog_pending_tasks, compaction_bytes_compacted_total,
-            compaction_tasks_completed_total, compaction_pending_tasks,
-            streaming_bytes_sent, streaming_bytes_received, streaming_sessions_active,
-            streaming_sessions_completed, streaming_sessions_failed, streaming_retries,
-            streaming_checksum_failures, messaging_sent_total, messaging_received_total,
-            messaging_dropped_total, table_read_latency, table_write_latency,
-            table_tombstones_scanned_total, paxos_propose_total, paxos_commit_total,
-            paxos_contention_total, tracing_sessions_total, tracing_active_sessions,
-            tcm_epoch, tcm_commits_total,
+            registry,
+            client_request_latency,
+            read_count,
+            write_count,
+            live_sstable_count,
+            pending_compactions,
+            connected_native_clients,
+            tombstone_scanned,
+            key_cache_hit_rate,
+            key_cache_size,
+            key_cache_hits_total,
+            key_cache_misses_total,
+            row_cache_hit_rate,
+            row_cache_size,
+            counter_cache_hit_rate,
+            counter_cache_size,
+            chunk_cache_hit_rate,
+            chunk_cache_size,
+            storage_load_bytes,
+            exceptions_count,
+            repair_trees_built,
+            repair_trees_exchanged,
+            repair_ranges_repaired,
+            repair_bytes_streamed,
+            repair_sessions_active,
+            repair_sessions_completed,
+            repair_sessions_failed,
+            commitlog_bytes_written,
+            commitlog_segments_active,
+            commitlog_pending_tasks,
+            compaction_bytes_compacted_total,
+            compaction_tasks_completed_total,
+            compaction_pending_tasks,
+            streaming_bytes_sent,
+            streaming_bytes_received,
+            streaming_sessions_active,
+            streaming_sessions_completed,
+            streaming_sessions_failed,
+            streaming_retries,
+            streaming_checksum_failures,
+            messaging_sent_total,
+            messaging_received_total,
+            messaging_dropped_total,
+            table_read_latency,
+            table_write_latency,
+            table_tombstones_scanned_total,
+            paxos_propose_total,
+            paxos_commit_total,
+            paxos_contention_total,
+            tracing_sessions_total,
+            tracing_active_sessions,
+            tcm_epoch,
+            tcm_commits_total,
         }
     }
 
@@ -251,24 +415,39 @@ impl MetricsRegistry {
 
     /// Record a client request latency observation.
     pub fn observe_request_latency(&self, operation: &str, duration_secs: f64) {
-        self.client_request_latency.with_label_values(&[operation]).observe(duration_secs);
+        self.client_request_latency
+            .with_label_values(&[operation])
+            .observe(duration_secs);
     }
 
     /// Increment read counter.
-    pub fn inc_reads(&self) { self.read_count.inc(); }
+    pub fn inc_reads(&self) {
+        self.read_count.inc();
+    }
 
     /// Increment write counter.
-    pub fn inc_writes(&self) { self.write_count.inc(); }
+    pub fn inc_writes(&self) {
+        self.write_count.inc();
+    }
 
     /// Record an exception.
     pub fn inc_exception(&self, exception_type: &str) {
-        self.exceptions_count.with_label_values(&[exception_type]).inc();
+        self.exceptions_count
+            .with_label_values(&[exception_type])
+            .inc();
     }
 
     /// Sync cache metrics from cache statistics snapshots.
-    pub fn sync_cache_metrics(&self,
-        key_hit_rate: f64, key_size: usize, row_hit_rate: f64, row_size: usize,
-        counter_hit_rate: f64, counter_size: usize, chunk_hit_rate: f64, chunk_size: usize,
+    pub fn sync_cache_metrics(
+        &self,
+        key_hit_rate: f64,
+        key_size: usize,
+        row_hit_rate: f64,
+        row_size: usize,
+        counter_hit_rate: f64,
+        counter_size: usize,
+        chunk_hit_rate: f64,
+        chunk_size: usize,
     ) {
         self.key_cache_hit_rate.set(key_hit_rate);
         self.key_cache_size.set(key_size as i64);
@@ -287,30 +466,47 @@ impl MetricsRegistry {
         self.repair_ranges_repaired.set(s.ranges_repaired as i64);
         self.repair_bytes_streamed.set(s.bytes_streamed as i64);
         self.repair_sessions_active.set(s.sessions_active as i64);
-        self.repair_sessions_completed.set(s.sessions_completed as i64);
+        self.repair_sessions_completed
+            .set(s.sessions_completed as i64);
         self.repair_sessions_failed.set(s.sessions_failed as i64);
     }
 
     /// Sync from commitlog stats.
-    pub fn sync_from_commitlog_stats(&self, bytes_written: u64, segments_active: i64, pending: i64) {
+    pub fn sync_from_commitlog_stats(
+        &self,
+        bytes_written: u64,
+        segments_active: i64,
+        pending: i64,
+    ) {
         self.commitlog_bytes_written.inc_by(bytes_written);
         self.commitlog_segments_active.set(segments_active);
         self.commitlog_pending_tasks.set(pending);
     }
 
     /// Sync from compaction stats.
-    pub fn sync_from_compaction_stats(&self, bytes_compacted: u64, tasks_completed: u64, pending: i64) {
-        self.compaction_bytes_compacted_total.inc_by(bytes_compacted);
-        self.compaction_tasks_completed_total.inc_by(tasks_completed);
+    pub fn sync_from_compaction_stats(
+        &self,
+        bytes_compacted: u64,
+        tasks_completed: u64,
+        pending: i64,
+    ) {
+        self.compaction_bytes_compacted_total
+            .inc_by(bytes_compacted);
+        self.compaction_tasks_completed_total
+            .inc_by(tasks_completed);
         self.compaction_pending_tasks.set(pending);
     }
 
     /// Sync from streaming stats.
     pub fn sync_from_streaming_stats(
         &self,
-        bytes_sent: i64, bytes_received: i64,
-        active: i64, completed: i64, failed: i64,
-        retries: i64, checksum_failures: i64,
+        bytes_sent: i64,
+        bytes_received: i64,
+        active: i64,
+        completed: i64,
+        failed: i64,
+        retries: i64,
+        checksum_failures: i64,
     ) {
         self.streaming_bytes_sent.set(bytes_sent);
         self.streaming_bytes_received.set(bytes_received);
@@ -403,11 +599,22 @@ mod tests {
     fn cache_metrics_in_text_output() {
         let registry = MetricsRegistry::new();
         let text = registry.gather_text();
-        for name in &["key_cache_hit_rate", "key_cache_size", "key_cache_hits_total",
-            "key_cache_misses_total", "row_cache_hit_rate", "row_cache_size",
-            "counter_cache_hit_rate", "counter_cache_size", "chunk_cache_hit_rate",
-            "chunk_cache_size"] {
-            assert!(text.contains(&format!("cassandra_{name}")), "missing {name}");
+        for name in &[
+            "key_cache_hit_rate",
+            "key_cache_size",
+            "key_cache_hits_total",
+            "key_cache_misses_total",
+            "row_cache_hit_rate",
+            "row_cache_size",
+            "counter_cache_hit_rate",
+            "counter_cache_size",
+            "chunk_cache_hit_rate",
+            "chunk_cache_size",
+        ] {
+            assert!(
+                text.contains(&format!("cassandra_{name}")),
+                "missing {name}"
+            );
         }
     }
 
@@ -484,10 +691,12 @@ mod tests {
     #[test]
     fn table_level_metrics() {
         let registry = MetricsRegistry::new();
-        registry.table_read_latency
+        registry
+            .table_read_latency
             .with_label_values(&["ks1", "tbl1"])
             .observe(0.005);
-        registry.table_tombstones_scanned_total
+        registry
+            .table_tombstones_scanned_total
             .with_label_values(&["ks1", "tbl1"])
             .inc();
         let text = registry.gather_text();

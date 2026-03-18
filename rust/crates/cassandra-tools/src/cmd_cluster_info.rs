@@ -44,31 +44,18 @@ pub fn status(client: &AdminClient) {
                     if let Some(nodes) = dc.get("nodes").and_then(|v| v.as_array()) {
                         for node in nodes {
                             let status_str = format_node_status(node);
-                            let address = node
-                                .get("address")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let load = node
-                                .get("load")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
+                            let address =
+                                node.get("address").and_then(|v| v.as_str()).unwrap_or("?");
+                            let load = node.get("load").and_then(|v| v.as_str()).unwrap_or("?");
                             let tokens = node
                                 .get("tokens")
                                 .and_then(|v| v.as_u64())
                                 .map(|t| t.to_string())
                                 .unwrap_or_else(|| "?".to_string());
-                            let owns = node
-                                .get("owns")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let host_id = node
-                                .get("host_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let rack = node
-                                .get("rack")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
+                            let owns = node.get("owns").and_then(|v| v.as_str()).unwrap_or("?");
+                            let host_id =
+                                node.get("host_id").and_then(|v| v.as_str()).unwrap_or("?");
+                            let rack = node.get("rack").and_then(|v| v.as_str()).unwrap_or("?");
 
                             println!(
                                 "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
@@ -133,34 +120,13 @@ pub fn ring(client: &AdminClient) {
 
             if let Some(nodes) = resp.get("nodes").and_then(|v| v.as_array()) {
                 for node in nodes {
-                    let address = node
-                        .get("address")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let rack = node
-                        .get("rack")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let status = node
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let state = node
-                        .get("state")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let load = node
-                        .get("load")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let owns = node
-                        .get("owns")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let token = node
-                        .get("token")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("?");
+                    let rack = node.get("rack").and_then(|v| v.as_str()).unwrap_or("?");
+                    let status = node.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                    let state = node.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+                    let load = node.get("load").and_then(|v| v.as_str()).unwrap_or("?");
+                    let owns = node.get("owns").and_then(|v| v.as_str()).unwrap_or("?");
+                    let token = node.get("token").and_then(|v| v.as_str()).unwrap_or("?");
 
                     println!(
                         "{:<16} {:<12} {:<8} {:<8} {:<12} {:<8} {}",

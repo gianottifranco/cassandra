@@ -20,10 +20,10 @@ use tracing::{debug, error, info};
 use crate::manager::StreamManager;
 use crate::metrics::StreamingMetrics;
 use crate::plan::StreamPlan;
+use crate::protocol::{StreamCompleteMessage, StreamInitMessage};
 use crate::sender::StreamSender;
 use crate::session::StreamSessionState;
 use crate::transport::StreamTransport;
-use crate::protocol::{StreamCompleteMessage, StreamInitMessage};
 
 /// Result of coordinating all streaming sessions.
 #[derive(Debug, Clone)]
@@ -43,9 +43,7 @@ pub struct StreamResultFuture {
 
 impl StreamResultFuture {
     /// Create a new result future with a watch channel.
-    pub fn new(
-        session_id: uuid::Uuid,
-    ) -> (Self, watch::Sender<StreamSessionState>) {
+    pub fn new(session_id: uuid::Uuid) -> (Self, watch::Sender<StreamSessionState>) {
         let (tx, rx) = watch::channel(StreamSessionState::Initialized);
         (Self { session_id, rx }, tx)
     }
@@ -214,9 +212,7 @@ impl StreamCoordinator {
     }
 
     /// Wait for all futures to complete and aggregate results.
-    pub async fn await_all(
-        futures: &mut [StreamResultFuture],
-    ) -> CoordinatorResult {
+    pub async fn await_all(futures: &mut [StreamResultFuture]) -> CoordinatorResult {
         let start = Instant::now();
         let mut completed = 0u32;
         let mut failed = 0u32;

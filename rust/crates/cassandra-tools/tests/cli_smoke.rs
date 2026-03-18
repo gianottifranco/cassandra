@@ -33,13 +33,22 @@ fn help_lists_all_command_groups() {
     assert!(stdout.contains("status"), "missing 'status'");
     assert!(stdout.contains("info"), "missing 'info'");
     assert!(stdout.contains("ring"), "missing 'ring'");
-    assert!(stdout.contains("describecluster"), "missing 'describecluster'");
+    assert!(
+        stdout.contains("describecluster"),
+        "missing 'describecluster'"
+    );
     assert!(stdout.contains("gossipinfo"), "missing 'gossipinfo'");
 
     // Compaction
     assert!(stdout.contains("compact"), "missing 'compact'");
-    assert!(stdout.contains("compactionstats"), "missing 'compactionstats'");
-    assert!(stdout.contains("compactionhistory"), "missing 'compactionhistory'");
+    assert!(
+        stdout.contains("compactionstats"),
+        "missing 'compactionstats'"
+    );
+    assert!(
+        stdout.contains("compactionhistory"),
+        "missing 'compactionhistory'"
+    );
 
     // Snapshots
     assert!(stdout.contains("snapshot"), "missing 'snapshot'");
@@ -58,7 +67,10 @@ fn help_lists_all_command_groups() {
     assert!(stdout.contains("clientstats"), "missing 'clientstats'");
 
     // Cache & hints
-    assert!(stdout.contains("invalidatekeycache"), "missing 'invalidatekeycache'");
+    assert!(
+        stdout.contains("invalidatekeycache"),
+        "missing 'invalidatekeycache'"
+    );
     assert!(stdout.contains("truncatehints"), "missing 'truncatehints'");
 
     // Config
@@ -67,23 +79,50 @@ fn help_lists_all_command_groups() {
     assert!(stdout.contains("reloadssl"), "missing 'reloadssl'");
 
     // Logging
-    assert!(stdout.contains("getlogginglevels"), "missing 'getlogginglevels'");
-    assert!(stdout.contains("enableauditlog"), "missing 'enableauditlog'");
+    assert!(
+        stdout.contains("getlogginglevels"),
+        "missing 'getlogginglevels'"
+    );
+    assert!(
+        stdout.contains("enableauditlog"),
+        "missing 'enableauditlog'"
+    );
     assert!(stdout.contains("enablefql"), "missing 'enablefql'");
 
     // SSTable tools
     assert!(stdout.contains("sstabledump"), "missing 'sstabledump'");
     assert!(stdout.contains("sstableverify"), "missing 'sstableverify'");
     assert!(stdout.contains("sstablesplit"), "missing 'sstablesplit'");
-    assert!(stdout.contains("sstablelevelreset"), "missing 'sstablelevelreset'");
-    assert!(stdout.contains("sstablerepairedset"), "missing 'sstablerepairedset'");
-    assert!(stdout.contains("sstableexpiredblockers"), "missing 'sstableexpiredblockers'");
-    assert!(stdout.contains("sstableofflinerelevel"), "missing 'sstableofflinerelevel'");
-    assert!(stdout.contains("sstablepartitions"), "missing 'sstablepartitions'");
+    assert!(
+        stdout.contains("sstablelevelreset"),
+        "missing 'sstablelevelreset'"
+    );
+    assert!(
+        stdout.contains("sstablerepairedset"),
+        "missing 'sstablerepairedset'"
+    );
+    assert!(
+        stdout.contains("sstableexpiredblockers"),
+        "missing 'sstableexpiredblockers'"
+    );
+    assert!(
+        stdout.contains("sstableofflinerelevel"),
+        "missing 'sstableofflinerelevel'"
+    );
+    assert!(
+        stdout.contains("sstablepartitions"),
+        "missing 'sstablepartitions'"
+    );
 
     // Utility tools
-    assert!(stdout.contains("bootstrapmonitor"), "missing 'bootstrapmonitor'");
-    assert!(stdout.contains("generatetokens"), "missing 'generatetokens'");
+    assert!(
+        stdout.contains("bootstrapmonitor"),
+        "missing 'bootstrapmonitor'"
+    );
+    assert!(
+        stdout.contains("generatetokens"),
+        "missing 'generatetokens'"
+    );
     assert!(stdout.contains("hashpassword"), "missing 'hashpassword'");
 
     // Repair / rebuild
@@ -149,7 +188,9 @@ fn sstable_split_missing_file() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("not found") || combined.contains("Error") || combined.contains("error"));
+    assert!(
+        combined.contains("not found") || combined.contains("Error") || combined.contains("error")
+    );
 }
 
 #[test]
@@ -163,20 +204,22 @@ fn sstable_partitions_missing_file() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(combined.contains("not found") || combined.contains("Error") || combined.contains("error"));
+    assert!(
+        combined.contains("not found") || combined.contains("Error") || combined.contains("error")
+    );
 }
 
 #[test]
 fn subcommand_help_works() {
-    for cmd in &["status", "compact", "repair", "snapshot", "generatetokens", "sstablesplit"] {
-        let output = cassandra_tools()
-            .args([cmd, "--help"])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "'{} --help' should succeed",
-            cmd
-        );
+    for cmd in &[
+        "status",
+        "compact",
+        "repair",
+        "snapshot",
+        "generatetokens",
+        "sstablesplit",
+    ] {
+        let output = cassandra_tools().args([cmd, "--help"]).output().unwrap();
+        assert!(output.status.success(), "'{} --help' should succeed", cmd);
     }
 }

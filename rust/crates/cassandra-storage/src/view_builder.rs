@@ -57,14 +57,9 @@ impl<'a> ViewBuilder<'a> {
         for (pk, columns, timestamp) in rows {
             rows_processed += 1;
 
-            let result = self.view_manager.generate_view_updates(
-                keyspace,
-                table,
-                pk,
-                columns,
-                *timestamp,
-                false,
-            );
+            let result = self
+                .view_manager
+                .generate_view_updates(keyspace, table, pk, columns, *timestamp, false);
 
             if result.had_errors {
                 errors.push(format!(

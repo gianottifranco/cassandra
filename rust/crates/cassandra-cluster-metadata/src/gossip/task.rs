@@ -152,10 +152,7 @@ impl GossipTask {
             if let Ok(syn_payload) = serde_json::to_vec(&syn) {
                 let msg_id = self.messaging.next_id();
                 let syn_msg = Message::request(Verb::GossipDigestSyn, msg_id, syn_payload);
-                let _ = self
-                    .messaging
-                    .send(dead_target.addr(), syn_msg)
-                    .await;
+                let _ = self.messaging.send(dead_target.addr(), syn_msg).await;
             }
         }
     }

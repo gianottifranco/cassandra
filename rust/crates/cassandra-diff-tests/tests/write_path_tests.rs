@@ -61,11 +61,7 @@ fn setup_cluster() -> (Arc<ClusterMetadata>, Arc<WriteCoordinator>) {
     cm.update_node(node(7003, vec![100]));
 
     let hint_store = Arc::new(HintStore::new(1000));
-    let coordinator = Arc::new(WriteCoordinator::new(
-        Arc::clone(&cm),
-        ep(7001),
-        hint_store,
-    ));
+    let coordinator = Arc::new(WriteCoordinator::new(Arc::clone(&cm), ep(7001), hint_store));
     (cm, coordinator)
 }
 
@@ -218,12 +214,8 @@ fn test_write_timeout_behavior() {
     cm.mark_dead(&ep(7002));
     cm.mark_dead(&ep(7003));
 
-    let result = coordinator.coordinate_write(
-        &test_mutation(),
-        ConsistencyLevel::All,
-        &strategy,
-        &snitch,
-    );
+    let result =
+        coordinator.coordinate_write(&test_mutation(), ConsistencyLevel::All, &strategy, &snitch);
     assert!(result.is_err());
     match result.unwrap_err() {
         WriteError::Unavailable {

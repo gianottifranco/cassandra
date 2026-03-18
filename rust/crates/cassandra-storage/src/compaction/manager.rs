@@ -7,15 +7,15 @@
 //! - `org.apache.cassandra.db.compaction.ActiveCompactions`
 //! - `org.apache.cassandra.db.compaction.CompactionTask`
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use uuid::Uuid;
 
+use crate::compaction::CompactionMetrics;
 use crate::compaction::active::*;
 use crate::compaction::errors::*;
 use crate::compaction::task::*;
-use crate::compaction::CompactionMetrics;
 use crate::memtable::partition::PartitionData;
 
 // ─── RateLimiter ────────────────────────────────────────────────────────────

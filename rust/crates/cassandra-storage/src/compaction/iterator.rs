@@ -11,8 +11,8 @@
 //! - `org.apache.cassandra.db.partitions.UnfilteredPartitionIterators`
 
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::compaction::errors::CompactionError;
 use crate::memtable::partition::PartitionData;
@@ -206,7 +206,10 @@ impl CompactionIterator {
             }
 
             // Collect all other entries with the same partition key.
-            while heap.peek().map_or(false, |e| e.partition_key == current_key) {
+            while heap
+                .peek()
+                .map_or(false, |e| e.partition_key == current_key)
+            {
                 let same = heap.pop().unwrap();
 
                 // Merge partition-level tombstone.
@@ -223,9 +226,7 @@ impl CompactionIterator {
                 }
 
                 // Refill from that source.
-                if let Some((next_key, next_pd)) =
-                    self.sources[same.source_idx].next_partition()
-                {
+                if let Some((next_key, next_pd)) = self.sources[same.source_idx].next_partition() {
                     self.stats.partitions_read += 1;
                     heap.push(MergeEntry {
                         partition_key: next_key,

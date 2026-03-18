@@ -161,9 +161,8 @@ impl LeveledManifest {
             version: self.version,
         };
 
-        let json = serde_json::to_string_pretty(&data).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         std::fs::write(path, json)
     }
@@ -171,9 +170,8 @@ impl LeveledManifest {
     /// Load a manifest from a JSON file on disk.
     pub fn load(path: &Path) -> std::io::Result<Self> {
         let contents = std::fs::read_to_string(path)?;
-        let data: ManifestData = serde_json::from_str(&contents).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
-        })?;
+        let data: ManifestData = serde_json::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
         let mut manifest = Self::with_path(path.to_path_buf());
         manifest.version = data.version;

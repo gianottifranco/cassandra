@@ -82,10 +82,7 @@ impl CompactionLogger {
             let json = serde_json::to_string(event).map_err(|e| {
                 std::io::Error::new(std::io::ErrorKind::Other, format!("JSON error: {e}"))
             })?;
-            let mut file = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)?;
+            let mut file = OpenOptions::new().create(true).append(true).open(path)?;
             writeln!(file, "{}", json)?;
         }
 

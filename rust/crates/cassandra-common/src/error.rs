@@ -83,7 +83,9 @@ pub enum CassandraError {
     },
 
     /// Read failure (0x1300).
-    #[error("Read failure: consistency={consistency}, received={received}, required={block_for}, failures={num_failures}")]
+    #[error(
+        "Read failure: consistency={consistency}, received={received}, required={block_for}, failures={num_failures}"
+    )]
     ReadFailure {
         consistency: String,
         received: i32,
@@ -101,7 +103,9 @@ pub enum CassandraError {
     },
 
     /// Write failure (0x1500).
-    #[error("Write failure: consistency={consistency}, received={received}, required={block_for}, failures={num_failures}")]
+    #[error(
+        "Write failure: consistency={consistency}, received={received}, required={block_for}, failures={num_failures}"
+    )]
     WriteFailure {
         consistency: String,
         received: i32,

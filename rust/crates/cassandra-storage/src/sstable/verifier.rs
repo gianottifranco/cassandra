@@ -193,9 +193,7 @@ impl SSTableVerifier {
                     issues.push(VerificationIssue {
                         severity: Severity::Error,
                         component: Component::Data,
-                        message: format!(
-                            "Data.db invalid marker byte: {marker:#04x}"
-                        ),
+                        message: format!("Data.db invalid marker byte: {marker:#04x}"),
                     });
                     return;
                 }
@@ -293,9 +291,7 @@ impl SSTableVerifier {
                 issues.push(VerificationIssue {
                     severity: Severity::Error,
                     component: Component::Index,
-                    message: format!(
-                        "Index.db offset {offset} exceeds Data.db size {data_size}"
-                    ),
+                    message: format!("Index.db offset {offset} exceeds Data.db size {data_size}"),
                 });
             }
 
@@ -354,10 +350,7 @@ impl SSTableVerifier {
         }
     }
 
-    fn verify_statistics(
-        desc: &SSTableDescriptor,
-        issues: &mut Vec<VerificationIssue>,
-    ) {
+    fn verify_statistics(desc: &SSTableDescriptor, issues: &mut Vec<VerificationIssue>) {
         let path = desc.component_path(Component::Statistics);
         let data = match fs::read_to_string(&path) {
             Ok(d) => d,
@@ -454,10 +447,7 @@ mod tests {
             .iter()
             .filter(|i| i.severity == Severity::Error)
             .collect();
-        assert!(
-            errors.is_empty(),
-            "Expected no errors, got: {errors:?}"
-        );
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
         assert!(result.is_valid());
     }
 
@@ -479,12 +469,9 @@ mod tests {
 
         let result = SSTableVerifier::verify(&desc);
         assert!(!result.is_valid());
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.severity == Severity::Error
-                && i.component == Component::Data
-                && i.message.contains("CRC")));
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Error
+            && i.component == Component::Data
+            && i.message.contains("CRC")));
     }
 
     #[test]
@@ -501,10 +488,11 @@ mod tests {
 
         let result = SSTableVerifier::verify(&desc);
         assert!(!result.is_valid());
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.severity == Severity::Error
-                && i.component == Component::Filter));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.component == Component::Filter)
+        );
     }
 }

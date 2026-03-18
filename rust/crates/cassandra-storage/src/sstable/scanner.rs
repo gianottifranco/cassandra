@@ -14,9 +14,7 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 use byteorder::{BigEndian, ReadBytesExt};
 
-use super::format::{
-    Component, SSTableDescriptor, END_OF_PARTITION, INDEX_MAGIC, ROW_MARKER,
-};
+use super::format::{Component, END_OF_PARTITION, INDEX_MAGIC, ROW_MARKER, SSTableDescriptor};
 use super::reader::read_row_from_reader;
 use crate::memtable::partition::PartitionData;
 
@@ -258,12 +256,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let desc = write_sstable(&dir);
 
-        let mut scanner = ForwardScanner::with_range(
-            &desc,
-            Some(vec![3]),
-            Some(vec![6]),
-        )
-        .unwrap();
+        let mut scanner = ForwardScanner::with_range(&desc, Some(vec![3]), Some(vec![6])).unwrap();
 
         let mut keys = Vec::new();
         while let Some(sp) = scanner.next_partition().unwrap() {
@@ -288,12 +281,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let desc = write_sstable(&dir);
 
-        let mut scanner = ForwardScanner::with_range(
-            &desc,
-            Some(vec![5]),
-            Some(vec![5]),
-        )
-        .unwrap();
+        let mut scanner = ForwardScanner::with_range(&desc, Some(vec![5]), Some(vec![5])).unwrap();
 
         let sp = scanner.next_partition().unwrap().unwrap();
         assert_eq!(sp.key, vec![5]);
@@ -308,12 +296,8 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let desc = write_sstable(&dir);
 
-        let mut scanner = ForwardScanner::with_range(
-            &desc,
-            Some(vec![100]),
-            Some(vec![200]),
-        )
-        .unwrap();
+        let mut scanner =
+            ForwardScanner::with_range(&desc, Some(vec![100]), Some(vec![200])).unwrap();
 
         assert!(scanner.next_partition().unwrap().is_none());
     }
@@ -323,12 +307,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let desc = write_sstable(&dir);
 
-        let mut scanner = ForwardScanner::with_range(
-            &desc,
-            None,
-            Some(vec![2]),
-        )
-        .unwrap();
+        let mut scanner = ForwardScanner::with_range(&desc, None, Some(vec![2])).unwrap();
 
         let mut keys = Vec::new();
         while let Some(sp) = scanner.next_partition().unwrap() {

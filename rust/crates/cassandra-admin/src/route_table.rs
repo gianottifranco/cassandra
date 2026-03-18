@@ -19,7 +19,10 @@ use crate::http_admin::AdminState;
 
 /// Type alias for async handler functions.
 pub type AsyncHandler = Box<
-    dyn Fn(Request<Incoming>, Arc<AdminState>) -> Pin<Box<dyn Future<Output = Response<Full<Bytes>>> + Send>>
+    dyn Fn(
+            Request<Incoming>,
+            Arc<AdminState>,
+        ) -> Pin<Box<dyn Future<Output = Response<Full<Bytes>>> + Send>>
         + Send
         + Sync,
 >;
@@ -80,8 +83,10 @@ impl RouteTable {
 
     /// Register an async DELETE handler for an exact path.
     pub fn delete(&mut self, path: &str, handler: AsyncHandler) {
-        self.routes
-            .insert((Method::DELETE, path.to_string()), RouteEntry::Async(handler));
+        self.routes.insert(
+            (Method::DELETE, path.to_string()),
+            RouteEntry::Async(handler),
+        );
     }
 
     /// Dispatch a request to the matching handler, or return 404.
