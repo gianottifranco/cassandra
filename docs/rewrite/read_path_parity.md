@@ -1,124 +1,75 @@
-# Read Path Parity — Rust vs Java
+# Read Path Parity
 
-> Status: **Phase 1 Complete** — Modular read coordinator, digest/data resolution, speculative retry, short-read protection, paging state, tombstone tracking, read repair, range reads.
+## Scope closed in ISS-1
 
-## Overview
+This slice closes the client-visible single-partition read-path semantics that were still bypassing the Rust coordinator stack in `cassandra-server`.
 
-This document tracks the parity status of the Cassandra Rust read path
-against the Java baseline (`StorageProxy.fetchRows()`, `AbstractReadExecutor`).
-The goal is functional equivalence, not line-by-line translation.
+Delivered in this change:
 
-## Architecture Comparison
+- native-protocol `page_size` and `paging_state` now flow through `QueryProcessor -> QueryExecutor -> server` for single-partition `SELECT`
+- result metadata now sets `HAS_MORE_PAGES` and emits a stable serialized paging cursor
+- tombstone scan warnings are surfaced as native-protocol warnings on read responses
+- tombstone overwhelming reads now fail through the read-path error mapping instead of being hidden as generic executor failures
+- `PER PARTITION LIMIT` is preserved in the planned `SelectPlan` and enforced on the single-partition local path
+- resumed pages now respect the remaining global `LIMIT` budget instead of reapplying the full limit on every page
+- local reads now project single-column partition/clustering keys back into `SELECT` results, which fixes reversed-order and paging assertions on primary-key-only projections
+- index-backed reads keep a guard-rail: paging requests return a warning and a single page until partition-aware cursors are implemented for index/range coordinators
 
-| Component | Java Class | Rust Module | Status |
-|-----------|-----------|-------------|--------|
-| Read coordinator | `StorageProxy.fetchRows()` | `cassandra-coordinator::read` | ✅ Implemented |
-| Read command model | `ReadCommand`, `SinglePartitionReadCommand` | `read::command` | ✅ Implemented |
-| Read response | `ReadResponse` | `read::response` | ✅ Implemented |
-| Digest resolver | `DigestResolver` | `read::resolver::DigestResolver` | ✅ Implemented |
-| Data resolver | `DataResolver` | `read::resolver::DataResolver` | ✅ Implemented |
-| Read executors | `AbstractReadExecutor` subclasses | `read::executor` | ✅ Implemented |
-| Speculative retry | `SpeculativeRetryPolicy` | `read::speculative_retry` | ✅ Implemented |
-| Short-read protection | `ShortReadProtection` | `read::short_read` | ✅ Implemented |
-| Paging state | `PagingState` | `read::paging` | ✅ Implemented |
-| Tombstone tracking | `TombstoneCounter` | `read::response::TombstoneTracker` | ✅ Implemented |
-| Read repair | `BlockingReadRepair`, `ReadRepairStrategy` | `read::repair` | ✅ Implemented |
-| Consistency levels | `ConsistencyLevel` | `cassandra-coordinator::consistency` | ✅ Complete |
+## Java parity notes
 
-## Error Code Mapping
+Primary Java references for this slice:
 
-| Error | Java Exception | Rust Variant | Protocol Code |
-|-------|---------------|--------------|---------------|
-| Unavailable | `UnavailableException` | `ReadError::Unavailable` | `0x1000` |
-| Timeout | `ReadTimeoutException` | `ReadError::Timeout` | `0x1200` |
-| Read Failure | `ReadFailureException` | `ReadError::ReadFailure` | `0x1300` |
-| Tombstone Overwhelming | `TombstoneOverwhelmingException` | `ReadError::TombstoneOverwhelming` | `0x1300` |
-| Digest Mismatch | — (internal, triggers data read) | `ReadError::DigestMismatch` | `0x1200` |
-| Query Cancelled | — | `ReadError::QueryCancelled` | `0x1200` |
-| Coordinator Behind | — | `ReadError::CoordinatorBehind` | `0x1200` |
+- `org.apache.cassandra.service.reads.*`
+- `org.apache.cassandra.service.pager.*`
+- `org.apache.cassandra.db.filter.DataLimits`
+- `org.apache.cassandra.service.StorageProxy`
 
-## Read Execution Strategy
+Rust now mirrors the following observable behaviors on the closed path:
 
-| Strategy | Java Class | Rust Type | Trigger |
-|----------|-----------|-----------|---------|
-| Never speculating | `NeverSpeculatingReadExecutor` | `ReadExecutorType::NeverSpeculating` | `speculative_retry = 'NONE'` |
-| Speculating | `SpeculatingReadExecutor` | `ReadExecutorType::Speculating` | `speculative_retry = '99PERCENTILE'` or `'50ms'` |
-| Always speculating | `AlwaysSpeculatingReadExecutor` | `ReadExecutorType::AlwaysSpeculating` | `speculative_retry = 'ALWAYS'` |
+- request `page_size` truncates the current page without losing the continuation position
+- the continuation token is deterministic for the same partition/key ordering
+- resumed pages preserve both `LIMIT` and `PER PARTITION LIMIT` budgets
+- primary-key-only projections (`SELECT pk`, `SELECT ck`) survive paging and reversed ordering on the single-partition local path
+- tombstone warning thresholds propagate to the client warning channel
+- read-path failures map to protocol-level read errors instead of generic server errors
 
-## Consistency Level Behavior (Read)
+## Intentional guard-rails still open
 
-All standard CLs implemented with correct `block_for` semantics:
+These are not hidden. They remain explicit until the full distributed read coordinator is wired into `cassandra-server`:
 
-| CL | block_for | Data replicas | Digest replicas |
-|----|----------|---------------|-----------------|
-| ONE | 1 | 1 | 0 |
-| TWO | 2 | 1 | 1 |
-| THREE | 3 | 1 | 2 |
-| QUORUM | ⌊RF/2⌋+1 | 1 | ⌊RF/2⌋ |
-| ALL | RF | 1 | RF-1 |
-| LOCAL_ONE | 1 | 1 | 0 |
-| LOCAL_QUORUM | ⌊local_RF/2⌋+1 | 1 | ⌊local_RF/2⌋ |
-| SERIAL | N/A (CAS only) | — | — |
-| LOCAL_SERIAL | N/A (CAS only) | — | — |
+- range reads and token walks still do not expose stable cross-partition paging cursors from the native server path
+- index-backed reads return a warning when paging is requested; the backend still needs partition-aware resume tokens
+- speculative retry, digest mismatch repair, and replica fan-out are implemented in `cassandra-coordinator`, but `cassandra-server` still executes local reads directly for query serving
+- tracing currently wraps the response correctly, but per-stage read-coordinator trace events are not yet emitted from the local query path
 
-## Digest Mismatch Resolution
+## Validation
 
-1. Coordinator sends 1 data + N-1 digest requests
-2. DigestResolver compares data digest against all digest responses
-3. On mismatch: DataResolver re-reads full data from all replicas
-4. Merge reconciliation via timestamp-based LWW
-5. Read repair mutations sent to stale replicas
-6. Merged result returned to client
+Focused coverage added here:
 
-## Short-Read Protection
+- `cassandra-server::query_processor::tests::select_exposes_paging_state_across_pages`
+- `cassandra-server::query_processor::tests::select_respects_global_limit_across_pages`
+- `cassandra-server::query_processor::tests::select_respects_reversed_per_partition_limit_before_paging`
+- `cassandra-server::query_processor::tests::select_surfaces_tombstone_warnings`
+- `cassandra-server::server::tests::encode_query_result_sets_has_more_pages_and_returns_warnings`
+- `cassandra-server::error_mapping::tests::{read_timeout_matches_golden_fixture,read_failure_matches_golden_fixture,tombstone_overwhelming_matches_golden_fixture}`
+- offline golden fixtures under `rust/diff-tests/golden/read_errors/` pin the visible read-timeout/read-failure/tombstone-failure contract
+- `cassandra-coordinator` benchmark `read_path`
 
-- Detects when a replica returns fewer rows than expected due to tombstones
-- Re-queries the replica starting after the last returned clustering key
-- Maximum 3 retries to prevent infinite loops
-- Transparently integrates with paging
+Suggested commands:
 
-## Paging State
+```bash
+cd rust
+cargo test -p cassandra-server query_processor::tests::select_exposes_paging_state_across_pages
+cargo test -p cassandra-server query_processor::tests::select_respects_global_limit_across_pages
+cargo test -p cassandra-server query_processor::tests::select_respects_reversed_per_partition_limit_before_paging
+cargo test -p cassandra-server query_processor::tests::select_surfaces_tombstone_warnings
+cargo test -p cassandra-server server::tests::encode_query_result_sets_has_more_pages_and_returns_warnings
+cargo test -p cassandra-server error_mapping::tests::read_timeout_matches_golden_fixture
+cargo test -p cassandra-server error_mapping::tests::read_failure_matches_golden_fixture
+cargo test -p cassandra-server error_mapping::tests::tombstone_overwhelming_matches_golden_fixture
+cargo bench -p cassandra-coordinator --bench read_path --no-run
+```
 
-- Serialized as: `[pk_len:4][pk:N][rm_len:4][rm:M][remaining:4][remaining_in_partition:4]`
-- Round-trip serialization/deserialization for native protocol
-- Tracks per-partition and per-query remaining counts
+## Next logical cut
 
-## Tombstone Guardrails
-
-| Guardrail | Default | Action |
-|-----------|---------|--------|
-| Tombstone warn threshold | 1,000 | Log warning |
-| Tombstone fail threshold | 100,000 | Abort read with `TombstoneOverwhelming` |
-
-## Read Repair
-
-| Strategy | Behavior | Default |
-|----------|----------|---------|
-| BLOCKING | Repair before returning to client | ✅ Default |
-| NONE | No read repair | Per-table config |
-
-## Known Gaps
-
-| Gap | Severity | Closure Plan |
-|-----|----------|-------------|
-| Async messaging integration | Medium | Wire `MessagingService.send()` in read fan-out |
-| Real latency percentiles | Low | Wire read metrics into speculative retry delay |
-| Index/SAI read path | Medium | Implement via index executor pattern |
-| Range read concurrency limiter | Low | Add configurable concurrency per range query |
-| DC-aware read executor | Medium | Add `LOCAL_QUORUM`/`LOCAL_ONE` DC filtering |
-| MV read repair filtering | Low | Skip repair mutations that would trigger MV updates |
-
-## Test Coverage
-
-| Module | Tests | Coverage |
-|--------|-------|----------|
-| `read/mod.rs` | 12 | CL ONE/QUORUM/ALL, unavailable, dead nodes, speculative always, error codes, metrics, range reads |
-| `read/command.rs` | 12 | Single partition, range, limits, slices, column filter, display, reversed |
-| `read/response.rs` | 8 | Digest determinism, digest difference, tombstone thresholds, data response, partition filtering |
-| `read/resolver.rs` | 8 | Digest match/mismatch, data merge by timestamp, repair generation, tombstone wins, multi-row merge |
-| `read/executor.rs` | 6 | Never/always/speculating executors, no speculation when not enough replicas, CL=ONE, type from policy |
-| `read/speculative_retry.rs` | 10 | Parse NONE/ALWAYS/percentile/fixed, may_speculate, delay computation, display |
-| `read/paging.rs` | 7 | State roundtrip, empty row mark, has_more, deserialize too short, page size control |
-| `read/short_read.rs` | 6 | Detection with tombstones, fully satisfied, no tombstones, max retries, disabled, bounds |
-| `read/repair.rs` | 5 | Strategy parse, blocking stages, none skips, execute clears, is_enabled |
-| **Total (read modules)** | **74** | — |
+Wire `cassandra-server` reads through `StorageProxy` / `ReadCoordinator` for real replica fan-out and reuse the same paging/warning/error contracts already exercised on the local path. That unlocks digest mismatch handling, speculative retry, read repair, and range-read parity without changing the client-facing response contract introduced in this slice.

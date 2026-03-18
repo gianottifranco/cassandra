@@ -142,6 +142,7 @@ pub struct SelectPlan {
     pub where_clause: Vec<Relation>,
     pub order_by: Vec<(String, ClusteringOrder)>,
     pub limit: Option<Term>,
+    pub per_partition_limit: Option<Term>,
     pub allow_filtering: bool,
     /// Validated restrictions (None if table metadata was not available).
     pub restrictions: Option<RestrictionSet>,
@@ -560,13 +561,12 @@ pub fn plan(
 
                 // Validate WHERE clause restrictions.
                 if !s.where_clause.is_empty() {
-                    let restriction_set =
-                        crate::restrictions::statement_restrictions::build(
-                            &s.where_clause,
-                            table_meta,
-                            s.allow_filtering,
-                        )
-                        .map_err(|e| PlanError::InvalidQuery(e.to_string()))?;
+                    let restriction_set = crate::restrictions::statement_restrictions::build(
+                        &s.where_clause,
+                        table_meta,
+                        s.allow_filtering,
+                    )
+                    .map_err(|e| PlanError::InvalidQuery(e.to_string()))?;
                     Some(restriction_set)
                 } else {
                     Some(crate::restrictions::RestrictionSet::default())
@@ -588,6 +588,7 @@ pub fn plan(
                 where_clause: s.where_clause.clone(),
                 order_by: s.order_by.clone(),
                 limit: s.limit.clone(),
+                per_partition_limit: s.per_partition_limit.clone(),
                 allow_filtering: s.allow_filtering,
                 restrictions,
                 ann_clause,
@@ -707,15 +708,13 @@ pub fn plan(
             let ks = resolve_keyspace(ci.keyspace.as_deref(), active_keyspace)?;
 
             // Validate keyspace and table exist
-            let ks_meta = schema
-                .keyspace(&ks)
-                .ok_or_else(|| PlanError::InvalidQuery(format!("Keyspace '{}' does not exist", ks)))?;
+            let ks_meta = schema.keyspace(&ks).ok_or_else(|| {
+                PlanError::InvalidQuery(format!("Keyspace '{}' does not exist", ks))
+            })?;
 
-            let table_meta = ks_meta
-                .table(&ci.table)
-                .ok_or_else(|| {
-                    PlanError::InvalidQuery(format!("Table '{}.{}' does not exist", ks, ci.table))
-                })?;
+            let table_meta = ks_meta.table(&ci.table).ok_or_else(|| {
+                PlanError::InvalidQuery(format!("Table '{}.{}' does not exist", ks, ci.table))
+            })?;
 
             // Validate column exists
             if table_meta.column(&ci.column).is_none() {
@@ -808,18 +807,20 @@ pub fn plan(
                     });
                 }
             }
-            Ok(QueryPlan::CreateMaterializedView(CreateMaterializedViewPlan {
-                keyspace: ks,
-                name: cmv.name.clone(),
-                if_not_exists: cmv.if_not_exists,
-                base_table: cmv.select.table.clone(),
-                select_columns: cmv.select.columns.clone(),
-                where_clause: cmv.select.where_clause.clone(),
-                partition_key: cmv.partition_key.clone(),
-                clustering_key: cmv.clustering_key.clone(),
-                clustering_order: cmv.clustering_order.clone(),
-                options: cmv.options.clone(),
-            }))
+            Ok(QueryPlan::CreateMaterializedView(
+                CreateMaterializedViewPlan {
+                    keyspace: ks,
+                    name: cmv.name.clone(),
+                    if_not_exists: cmv.if_not_exists,
+                    base_table: cmv.select.table.clone(),
+                    select_columns: cmv.select.columns.clone(),
+                    where_clause: cmv.select.where_clause.clone(),
+                    partition_key: cmv.partition_key.clone(),
+                    clustering_key: cmv.clustering_key.clone(),
+                    clustering_order: cmv.clustering_order.clone(),
+                    options: cmv.options.clone(),
+                },
+            ))
         }
 
         Statement::DropMaterializedView(dmv) => {
@@ -843,11 +844,13 @@ pub fn plan(
 
         Statement::AlterMaterializedView(amv) => {
             let ks = resolve_keyspace(amv.keyspace.as_deref(), active_keyspace)?;
-            Ok(QueryPlan::AlterMaterializedView(AlterMaterializedViewPlan {
-                keyspace: ks,
-                name: amv.name.clone(),
-                options: amv.options.clone(),
-            }))
+            Ok(QueryPlan::AlterMaterializedView(
+                AlterMaterializedViewPlan {
+                    keyspace: ks,
+                    name: amv.name.clone(),
+                    options: amv.options.clone(),
+                },
+            ))
         }
 
         Statement::CreateType(ct) => {
@@ -862,7 +865,9 @@ pub fn plan(
                     }
                 }
             }
-            let fields = ct.fields.iter()
+            let fields = ct
+                .fields
+                .iter()
                 .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
                 .collect();
             Ok(QueryPlan::CreateType(CreateTypePlan {
@@ -892,15 +897,15 @@ pub fn plan(
             }))
         }
 
-        Statement::AlterType(_at) => {
-            Err(PlanError::InvalidQuery(
-                "ALTER TYPE is not yet fully supported".into(),
-            ))
-        }
+        Statement::AlterType(_at) => Err(PlanError::InvalidQuery(
+            "ALTER TYPE is not yet fully supported".into(),
+        )),
 
         Statement::CreateFunction(cf) => {
             let ks = resolve_keyspace(cf.keyspace.as_deref(), active_keyspace)?;
-            let args: Vec<(String, String)> = cf.args.iter()
+            let args: Vec<(String, String)> = cf
+                .args
+                .iter()
                 .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
                 .collect();
             Ok(QueryPlan::CreateFunction(CreateFunctionPlan {
@@ -918,9 +923,7 @@ pub fn plan(
 
         Statement::DropFunction(df) => {
             let ks = resolve_keyspace(df.keyspace.as_deref(), active_keyspace)?;
-            let arg_types: Vec<String> = df.arg_types.iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
+            let arg_types: Vec<String> = df.arg_types.iter().map(|t| format!("{:?}", t)).collect();
             Ok(QueryPlan::DropFunction(DropFunctionPlan {
                 keyspace: ks,
                 name: df.name.clone(),
@@ -931,9 +934,7 @@ pub fn plan(
 
         Statement::CreateAggregate(ca) => {
             let ks = resolve_keyspace(ca.keyspace.as_deref(), active_keyspace)?;
-            let arg_types: Vec<String> = ca.arg_types.iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
+            let arg_types: Vec<String> = ca.arg_types.iter().map(|t| format!("{:?}", t)).collect();
             let initcond = ca.initcond.as_ref().map(|t| format!("{:?}", t));
             Ok(QueryPlan::CreateAggregate(CreateAggregatePlan {
                 keyspace: ks,
@@ -950,9 +951,7 @@ pub fn plan(
 
         Statement::DropAggregate(da) => {
             let ks = resolve_keyspace(da.keyspace.as_deref(), active_keyspace)?;
-            let arg_types: Vec<String> = da.arg_types.iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
+            let arg_types: Vec<String> = da.arg_types.iter().map(|t| format!("{:?}", t)).collect();
             Ok(QueryPlan::DropAggregate(DropAggregatePlan {
                 keyspace: ks,
                 name: da.name.clone(),
@@ -1224,8 +1223,7 @@ mod tests {
             .add_column(ColumnMetadata::regular("email", CqlType::Varchar))
             .add_column(ColumnMetadata::regular("name", CqlType::Varchar))
             .build();
-        let ks =
-            KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
         let mut snapshot = SchemaSnapshot::empty();
         snapshot.keyspaces.insert("test_ks".to_string(), ks);
         snapshot
@@ -1234,8 +1232,7 @@ mod tests {
     #[test]
     fn plan_create_index_basic() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX email_idx ON test_ks.users (email)").unwrap();
+        let stmt = parser::parse("CREATE INDEX email_idx ON test_ks.users (email)").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         assert!(p.is_schema_altering());
         match p {
@@ -1254,8 +1251,7 @@ mod tests {
     #[test]
     fn plan_create_index_auto_name() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX ON test_ks.users (email)").unwrap();
+        let stmt = parser::parse("CREATE INDEX ON test_ks.users (email)").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         match p {
             QueryPlan::CreateIndex(ci) => {
@@ -1268,26 +1264,21 @@ mod tests {
     #[test]
     fn plan_create_index_on_partition_key_fails() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX ON test_ks.users (id)").unwrap();
+        let stmt = parser::parse("CREATE INDEX ON test_ks.users (id)").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
     }
 
     #[test]
     fn plan_create_index_nonexistent_column_fails() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX ON test_ks.users (nonexistent)").unwrap();
+        let stmt = parser::parse("CREATE INDEX ON test_ks.users (nonexistent)").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
     }
 
     #[test]
     fn plan_create_index_if_not_exists() {
         let schema = schema_with_table();
-        let stmt = parser::parse(
-            "CREATE INDEX IF NOT EXISTS ON test_ks.users (email)",
-        )
-        .unwrap();
+        let stmt = parser::parse("CREATE INDEX IF NOT EXISTS ON test_ks.users (email)").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         match p {
             QueryPlan::CreateIndex(ci) => assert!(ci.if_not_exists),
@@ -1298,8 +1289,7 @@ mod tests {
     #[test]
     fn plan_drop_index_if_exists() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("DROP INDEX IF EXISTS test_ks.some_idx").unwrap();
+        let stmt = parser::parse("DROP INDEX IF EXISTS test_ks.some_idx").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         match p {
             QueryPlan::DropIndex(di) => {
@@ -1314,8 +1304,7 @@ mod tests {
     #[test]
     fn plan_drop_index_nonexistent_fails() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("DROP INDEX test_ks.nonexistent_idx").unwrap();
+        let stmt = parser::parse("DROP INDEX test_ks.nonexistent_idx").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
     }
 
@@ -1392,10 +1381,8 @@ mod tests {
     #[test]
     fn plan_delete_using_timestamp() {
         let schema = test_schema();
-        let stmt = parser::parse(
-            "DELETE FROM test_ks.users USING TIMESTAMP 7000 WHERE id = 1",
-        )
-        .unwrap();
+        let stmt =
+            parser::parse("DELETE FROM test_ks.users USING TIMESTAMP 7000 WHERE id = 1").unwrap();
         let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
         match p {
             QueryPlan::Delete(dp) => {
@@ -1409,10 +1396,8 @@ mod tests {
     #[test]
     fn plan_insert_no_using_clause() {
         let schema = test_schema();
-        let stmt = parser::parse(
-            "INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com')",
-        )
-        .unwrap();
+        let stmt =
+            parser::parse("INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com')").unwrap();
         let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
         match p {
             QueryPlan::Insert(ip) => {

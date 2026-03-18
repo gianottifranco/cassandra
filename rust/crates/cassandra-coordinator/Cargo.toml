@@ -29,3 +29,8 @@ cassandra-accord = { version = "0.1.0", path = "../cassandra-accord" }
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "read_path"
+harness = false

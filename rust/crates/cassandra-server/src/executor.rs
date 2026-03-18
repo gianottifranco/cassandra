@@ -15,19 +15,21 @@ use tracing::{debug, info};
 use cassandra_security::Resource as SecurityResource;
 use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 
+use crate::term_binding::typed_term_to_bytes;
+use cassandra_coordinator::{
+    PagingState, PartitionResult, ReadError, TombstoneThresholds, TombstoneTracker,
+};
 use cassandra_cql::ast::{
     ClusteringOrder as AstClusteringOrder, DescribeTarget, Literal, RelationOp, SelectColumns,
     Selector, Term,
 };
-use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::planner::{
-    AlterKeyspacePlan, AlterMaterializedViewPlan, AlterRolePlan, BatchPlan,
-    CreateAggregatePlan, CreateFunctionPlan, CreateIndexPlan, CreateKeyspacePlan,
-    CreateMaterializedViewPlan, CreateRolePlan, CreateTablePlan, CreateTriggerPlan,
-    CreateTypePlan, DeletePlan, DropAggregatePlan, DropFunctionPlan, DropIndexPlan,
-    DropKeyspacePlan, DropMaterializedViewPlan, DropRolePlan, DropTablePlan, DropTriggerPlan,
-    DescribePlan, DropTypePlan, GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan,
-    SelectPlan, UpdatePlan, UsePlan,
+    AlterKeyspacePlan, AlterMaterializedViewPlan, AlterRolePlan, BatchPlan, CreateAggregatePlan,
+    CreateFunctionPlan, CreateIndexPlan, CreateKeyspacePlan, CreateMaterializedViewPlan,
+    CreateRolePlan, CreateTablePlan, CreateTriggerPlan, CreateTypePlan, DeletePlan, DescribePlan,
+    DropAggregatePlan, DropFunctionPlan, DropIndexPlan, DropKeyspacePlan, DropMaterializedViewPlan,
+    DropRolePlan, DropTablePlan, DropTriggerPlan, DropTypePlan, GrantPlan, InsertPlan,
+    ListRolesPlan, QueryPlan, RevokePlan, SelectPlan, UpdatePlan, UsePlan,
 };
 use cassandra_cql::prepared::PreparedCache;
 use cassandra_cql::triggers::{MutationEvent, MutationType, TriggerRegistry};
@@ -59,6 +61,8 @@ pub enum ExecutorError {
     TableNotFound(String, String),
     #[error("Storage error: {0}")]
     StorageError(String),
+    #[error(transparent)]
+    ReadPath(#[from] ReadError),
     #[allow(dead_code)]
     #[error("Schema error: {0}")]
     SchemaError(String),
@@ -79,6 +83,8 @@ pub enum QueryResult {
     Rows {
         columns: Vec<ResultColumn>,
         rows: Vec<Vec<Option<Vec<u8>>>>,
+        paging_state: Option<Vec<u8>>,
+        warnings: Vec<String>,
     },
     Void,
     SetKeyspace(String),
@@ -140,6 +146,15 @@ impl QueryExecutor {
         plan: &QueryPlan,
         user: Option<&str>,
     ) -> Result<QueryResult, ExecutorError> {
+        self.execute_with_query_params(plan, user, None)
+    }
+
+    pub fn execute_with_query_params(
+        &self,
+        plan: &QueryPlan,
+        user: Option<&str>,
+        params: Option<&cassandra_native_protocol::message::QueryParams>,
+    ) -> Result<QueryResult, ExecutorError> {
         let result = match plan {
             QueryPlan::Use(u) => self.execute_use(u),
             QueryPlan::CreateKeyspace(ck) => self.execute_create_keyspace(ck),
@@ -151,7 +166,7 @@ impl QueryExecutor {
             QueryPlan::Insert(ins) => self.execute_insert(ins),
             QueryPlan::Update(upd) => self.execute_update(upd),
             QueryPlan::Delete(del) => self.execute_delete(del),
-            QueryPlan::Select(sel) => self.execute_select(sel, user),
+            QueryPlan::Select(sel) => self.execute_select(sel, user, params),
             QueryPlan::Truncate(_) => {
                 info!("TRUNCATE executed (stub)");
                 Ok(QueryResult::Void)
@@ -418,8 +433,7 @@ impl QueryExecutor {
 
         // Validate SAI options if applicable
         if is_sai {
-            let warnings =
-                cassandra_config::sai_options::validate_index_definition(&plan.options);
+            let warnings = cassandra_config::sai_options::validate_index_definition(&plan.options);
             for w in &warnings {
                 debug!(warning = %w, "SAI index option warning");
             }
@@ -431,9 +445,7 @@ impl QueryExecutor {
             let snapshot = catalog.snapshot();
             if let Some(table_meta) = snapshot.table(&plan.keyspace, &plan.table) {
                 for idx in &table_meta.indexes {
-                    if idx.target_column() == Some(&plan.column)
-                        && idx.name != plan.index_name
-                    {
+                    if idx.target_column() == Some(&plan.column) && idx.name != plan.index_name {
                         return Err(ExecutorError::InvalidQuery(format!(
                             "An index already exists on column '{}' (index '{}')",
                             plan.column, idx.name
@@ -714,9 +726,14 @@ impl QueryExecutor {
         &self,
         plan: &CreateFunctionPlan,
     ) -> Result<QueryResult, ExecutorError> {
-        let mut udf =
-            UserFunction::new(&plan.keyspace, &plan.name, &plan.return_type, &plan.language, &plan.body)
-                .with_called_on_null_input(plan.called_on_null_input);
+        let mut udf = UserFunction::new(
+            &plan.keyspace,
+            &plan.name,
+            &plan.return_type,
+            &plan.language,
+            &plan.body,
+        )
+        .with_called_on_null_input(plan.called_on_null_input);
         for (arg_name, arg_type) in &plan.args {
             udf = udf.with_arg(arg_name, arg_type);
         }
@@ -748,10 +765,7 @@ impl QueryExecutor {
                             body: plan.body.clone(),
                             called_on_null_input: plan.called_on_null_input,
                         };
-                        if let Err(e) = self
-                            .udf_registry
-                            .register(metadata, Arc::new(executor))
-                        {
+                        if let Err(e) = self.udf_registry.register(metadata, Arc::new(executor)) {
                             debug!(error = %e, "Failed to register WASM UDF executor");
                         }
                     }
@@ -788,10 +802,7 @@ impl QueryExecutor {
         })
     }
 
-    fn execute_drop_function(
-        &self,
-        plan: &DropFunctionPlan,
-    ) -> Result<QueryResult, ExecutorError> {
+    fn execute_drop_function(&self, plan: &DropFunctionPlan) -> Result<QueryResult, ExecutorError> {
         let signature = format!("{}({})", plan.name, plan.arg_types.join(", "));
 
         let catalog = self.catalog.read();
@@ -859,7 +870,9 @@ impl QueryExecutor {
         for (i, arg_type) in plan.arg_types.iter().enumerate() {
             sfunc_args.push((format!("arg{}", i), arg_type.clone()));
         }
-        let sfunc_resolved = self.udf_registry.get(&plan.keyspace, &plan.sfunc, &sfunc_args);
+        let sfunc_resolved = self
+            .udf_registry
+            .get(&plan.keyspace, &plan.sfunc, &sfunc_args);
 
         if sfunc_resolved.is_some() {
             debug!(
@@ -877,7 +890,9 @@ impl QueryExecutor {
 
         if let Some(ref ff_name) = plan.finalfunc {
             let finalfunc_args = vec![("state".into(), plan.stype.clone())];
-            let ff_resolved = self.udf_registry.get(&plan.keyspace, ff_name, &finalfunc_args);
+            let ff_resolved = self
+                .udf_registry
+                .get(&plan.keyspace, ff_name, &finalfunc_args);
             if ff_resolved.is_some() {
                 debug!(
                     aggregate = %plan.name,
@@ -944,9 +959,9 @@ impl QueryExecutor {
         let ks_meta = snapshot
             .keyspace(&plan.keyspace)
             .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?;
-        let table = ks_meta
-            .table(&plan.table)
-            .ok_or_else(|| ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone()))?;
+        let table = ks_meta.table(&plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
 
         let updated_table = table.clone().with_trigger(trigger);
         let ks = ks_meta.clone().with_table(updated_table);
@@ -964,18 +979,15 @@ impl QueryExecutor {
         })
     }
 
-    fn execute_drop_trigger(
-        &self,
-        plan: &DropTriggerPlan,
-    ) -> Result<QueryResult, ExecutorError> {
+    fn execute_drop_trigger(&self, plan: &DropTriggerPlan) -> Result<QueryResult, ExecutorError> {
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
         let ks_meta = snapshot
             .keyspace(&plan.keyspace)
             .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?;
-        let table = ks_meta
-            .table(&plan.table)
-            .ok_or_else(|| ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone()))?;
+        let table = ks_meta.table(&plan.table).ok_or_else(|| {
+            ExecutorError::TableNotFound(plan.keyspace.clone(), plan.table.clone())
+        })?;
 
         let updated_table = table.clone().without_trigger(&plan.name);
         let ks = ks_meta.clone().with_table(updated_table);
@@ -996,24 +1008,28 @@ impl QueryExecutor {
     // ─── DML ───────────────────────────────────────────────────────────
 
     fn execute_insert(&self, plan: &InsertPlan) -> Result<QueryResult, ExecutorError> {
-        let now = plan.using_timestamp.unwrap_or_else(current_timestamp_micros);
+        let now = plan
+            .using_timestamp
+            .unwrap_or_else(current_timestamp_micros);
         let ttl = plan.using_ttl.unwrap_or(0);
         let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
-        let local_deletion_time = if ttl > 0 {
-            Some(now_secs + ttl)
-        } else {
-            None
-        };
+        let local_deletion_time = if ttl > 0 { Some(now_secs + ttl) } else { None };
 
         // Check triggers before applying the mutation.
-        if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
+        if self
+            .trigger_registry
+            .has_triggers(&plan.keyspace, &plan.table)
+        {
             let event = MutationEvent {
                 keyspace: plan.keyspace.clone(),
                 table: plan.table.clone(),
                 partition_key: vec![], // Would be filled from actual mutation data
                 mutation_type: MutationType::Insert,
             };
-            debug!(?event, "Trigger check: triggers registered for table on INSERT");
+            debug!(
+                ?event,
+                "Trigger check: triggers registered for table on INSERT"
+            );
             // TODO: Execute triggers via loaded implementations
         }
 
@@ -1123,24 +1139,28 @@ impl QueryExecutor {
     }
 
     fn execute_update(&self, plan: &UpdatePlan) -> Result<QueryResult, ExecutorError> {
-        let now = plan.using_timestamp.unwrap_or_else(current_timestamp_micros);
+        let now = plan
+            .using_timestamp
+            .unwrap_or_else(current_timestamp_micros);
         let ttl = plan.using_ttl.unwrap_or(0);
         let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
-        let local_deletion_time = if ttl > 0 {
-            Some(now_secs + ttl)
-        } else {
-            None
-        };
+        let local_deletion_time = if ttl > 0 { Some(now_secs + ttl) } else { None };
 
         // Check triggers before applying the mutation.
-        if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
+        if self
+            .trigger_registry
+            .has_triggers(&plan.keyspace, &plan.table)
+        {
             let event = MutationEvent {
                 keyspace: plan.keyspace.clone(),
                 table: plan.table.clone(),
                 partition_key: vec![], // Would be filled from actual mutation data
                 mutation_type: MutationType::Update,
             };
-            debug!(?event, "Trigger check: triggers registered for table on UPDATE");
+            debug!(
+                ?event,
+                "Trigger check: triggers registered for table on UPDATE"
+            );
             // TODO: Execute triggers via loaded implementations
         }
 
@@ -1223,18 +1243,26 @@ impl QueryExecutor {
     }
 
     fn execute_delete(&self, plan: &DeletePlan) -> Result<QueryResult, ExecutorError> {
-        let now = plan.using_timestamp.unwrap_or_else(current_timestamp_micros);
+        let now = plan
+            .using_timestamp
+            .unwrap_or_else(current_timestamp_micros);
         let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
 
         // Check triggers before applying the mutation.
-        if self.trigger_registry.has_triggers(&plan.keyspace, &plan.table) {
+        if self
+            .trigger_registry
+            .has_triggers(&plan.keyspace, &plan.table)
+        {
             let event = MutationEvent {
                 keyspace: plan.keyspace.clone(),
                 table: plan.table.clone(),
                 partition_key: vec![], // Would be filled from actual mutation data
                 mutation_type: MutationType::Delete,
             };
-            debug!(?event, "Trigger check: triggers registered for table on DELETE");
+            debug!(
+                ?event,
+                "Trigger check: triggers registered for table on DELETE"
+            );
             // TODO: Execute triggers via loaded implementations
         }
 
@@ -1405,6 +1433,7 @@ impl QueryExecutor {
         &self,
         plan: &SelectPlan,
         user: Option<&str>,
+        params: Option<&cassandra_native_protocol::message::QueryParams>,
     ) -> Result<QueryResult, ExecutorError> {
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
@@ -1413,7 +1442,9 @@ impl QueryExecutor {
         })?;
 
         let pk_cols = table_meta.partition_key_columns();
+        let ck_cols = table_meta.clustering_columns();
         let pk_names: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
+        let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
 
         let mut pk_bytes = Vec::new();
         let mut index_searches = Vec::new();
@@ -1501,6 +1532,27 @@ impl QueryExecutor {
 
         drop(catalog);
 
+        let now_secs = params
+            .and_then(|query| query.now_in_seconds)
+            .unwrap_or_else(|| (current_timestamp_micros() / 1_000_000) as i32);
+        let requested_page_size = params
+            .and_then(|query| query.page_size)
+            .filter(|size| *size > 0)
+            .map(|size| size as usize);
+        let resume_state = params
+            .and_then(|query| query.paging_state.as_deref())
+            .and_then(PagingState::deserialize);
+        let query_limit = plan
+            .limit
+            .as_ref()
+            .and_then(term_to_i64)
+            .map(|v| v as usize);
+        let per_partition_limit = plan
+            .per_partition_limit
+            .as_ref()
+            .and_then(term_to_i64)
+            .map(|v| v as usize);
+
         if pk_bytes.is_empty() {
             if !index_searches.is_empty() {
                 let (rel, idx) = &index_searches[0];
@@ -1532,18 +1584,31 @@ impl QueryExecutor {
                 };
 
                 let mut result_rows = Vec::new();
-                let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
+                let mut warnings = Vec::new();
+                if requested_page_size.is_some() || resume_state.is_some() {
+                    warnings.push(
+                        "Paging for index-backed reads is guarded until stable partition-aware cursors land; returning a single page"
+                            .to_string(),
+                    );
+                }
 
                 for pd in search_results {
                     let live: Vec<&Row> = pd.live_rows(now_secs);
-                    for row in live {
+                    for row in live
+                        .into_iter()
+                        .take(per_partition_limit.unwrap_or(usize::MAX))
+                    {
                         let mut result_row = Vec::new();
                         for rc in &result_columns {
-                            let mut value = row
-                                .cells
-                                .iter()
-                                .find(|c| c.column == rc.name && c.is_live_at(now_secs))
-                                .and_then(|c| c.value.clone());
+                            let mut value =
+                                if ck_cols.len() == 1 && ck_names.contains(&rc.name.as_str()) {
+                                    Some(row.clustering_key.clone())
+                                } else {
+                                    row.cells
+                                        .iter()
+                                        .find(|c| c.column == rc.name && c.is_live_at(now_secs))
+                                        .and_then(|c| c.value.clone())
+                                };
 
                             if apply_masking {
                                 if let Some(v) = &value {
@@ -1569,10 +1634,10 @@ impl QueryExecutor {
                     }
                 }
 
-                return wrap_select_json(plan.json, result_columns, result_rows);
+                return wrap_select_json(plan.json, result_columns, result_rows, None, warnings);
             }
 
-            return wrap_select_json(plan.json, result_columns, Vec::new());
+            return wrap_select_json(plan.json, result_columns, Vec::new(), None, Vec::new());
         }
 
         let partition = self
@@ -1580,19 +1645,80 @@ impl QueryExecutor {
             .read_partition(&plan.keyspace, &plan.table, &pk_bytes);
 
         let mut result_rows = Vec::new();
+        let mut warnings = Vec::new();
+        let mut paging_state = None;
 
         if let Some(pd) = partition {
-            let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
-            let live: Vec<&Row> = pd.live_rows(now_secs);
+            let mut tracker = TombstoneTracker::new(TombstoneThresholds::default());
+            let partition_result =
+                PartitionResult::from_partition_data(pk_bytes.clone(), pd, now_secs, &mut tracker);
+            warnings.extend(tracker.warnings.clone());
+            if tracker.is_failure() {
+                return Err(ReadError::TombstoneOverwhelming {
+                    count: tracker.count,
+                    threshold: tracker.thresholds.fail_threshold,
+                }
+                .into());
+            }
 
-            for row in live {
+            let mut rows: Vec<Row> = partition_result
+                .data
+                .as_ref()
+                .map(|data| data.rows.values().cloned().collect())
+                .unwrap_or_default();
+
+            if is_reversed_query(plan) {
+                rows.reverse();
+            }
+
+            rows.retain(|row| row_matches_query(row, plan));
+
+            let resume_offset = compute_resume_offset(&rows, resume_state.as_ref(), &pk_bytes);
+            let mut rows = if resume_offset < rows.len() {
+                rows.into_iter().skip(resume_offset).collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
+
+            let resumed_partition_budget = resume_state
+                .as_ref()
+                .filter(|state| state.partition_key == pk_bytes)
+                .map(|state| state.remaining_in_partition as usize);
+            let max_partition_rows = resumed_partition_budget
+                .unwrap_or_else(|| per_partition_limit.unwrap_or(usize::MAX))
+                .min(per_partition_limit.unwrap_or(usize::MAX));
+            if rows.len() > max_partition_rows {
+                rows.truncate(max_partition_rows);
+            }
+
+            let resumed_query_budget = resume_state
+                .as_ref()
+                .filter(|state| state.partition_key == pk_bytes)
+                .map(|state| state.remaining as usize);
+            let effective_limit = resumed_query_budget
+                .unwrap_or_else(|| query_limit.unwrap_or(usize::MAX))
+                .min(query_limit.unwrap_or(usize::MAX))
+                .min(rows.len());
+            let available_after_query_limit =
+                rows.into_iter().take(effective_limit).collect::<Vec<_>>();
+            let page_len = requested_page_size
+                .map(|page_size| page_size.min(available_after_query_limit.len()))
+                .unwrap_or(available_after_query_limit.len());
+
+            let has_more = page_len < available_after_query_limit.len();
+            for row in available_after_query_limit.iter().take(page_len) {
                 let mut result_row = Vec::new();
                 for rc in &result_columns {
-                    let mut value = row
-                        .cells
-                        .iter()
-                        .find(|c| c.column == rc.name && c.is_live_at(now_secs))
-                        .and_then(|c| c.value.clone());
+                    let mut value = if pk_cols.len() == 1 && pk_names.contains(&rc.name.as_str()) {
+                        Some(pk_bytes.clone())
+                    } else if ck_cols.len() == 1 && ck_names.contains(&rc.name.as_str()) {
+                        Some(row.clustering_key.clone())
+                    } else {
+                        row.cells
+                            .iter()
+                            .find(|c| c.column == rc.name && c.is_live_at(now_secs))
+                            .and_then(|c| c.value.clone())
+                    };
 
                     if apply_masking {
                         if let Some(v) = &value {
@@ -1611,14 +1737,31 @@ impl QueryExecutor {
                 result_rows.push(result_row);
             }
 
-            if let Some(ref limit_term) = plan.limit {
-                if let Some(limit) = term_to_i64(limit_term) {
-                    result_rows.truncate(limit as usize);
-                }
+            if has_more {
+                let remaining = available_after_query_limit.len().saturating_sub(page_len);
+                let last_ck = available_after_query_limit
+                    .get(page_len.saturating_sub(1))
+                    .map(|row| row.clustering_key.clone())
+                    .unwrap_or_default();
+                paging_state = Some(
+                    PagingState::new(
+                        pk_bytes.clone(),
+                        last_ck,
+                        remaining as u32,
+                        remaining as u32,
+                    )
+                    .serialize(),
+                );
             }
         }
 
-        wrap_select_json(plan.json, result_columns, result_rows)
+        wrap_select_json(
+            plan.json,
+            result_columns,
+            result_rows,
+            paging_state,
+            warnings,
+        )
     }
 
     fn execute_batch(
@@ -1628,10 +1771,7 @@ impl QueryExecutor {
     ) -> Result<QueryResult, ExecutorError> {
         // Validate counter/non-counter mixing:
         // Counter batches must only contain counter mutations and vice versa.
-        let is_counter_batch = matches!(
-            plan.batch_type,
-            cassandra_cql::ast::BatchType::Counter
-        );
+        let is_counter_batch = matches!(plan.batch_type, cassandra_cql::ast::BatchType::Counter);
         for sub in &plan.plans {
             match sub {
                 QueryPlan::Insert(_) | QueryPlan::Update(_) | QueryPlan::Delete(_) => {
@@ -2065,7 +2205,12 @@ impl QueryExecutor {
 
         let rows = vec![vec![Some(ddl_text.into_bytes())]];
 
-        Ok(QueryResult::Rows { columns, rows })
+        Ok(QueryResult::Rows {
+            columns,
+            rows,
+            paging_state: None,
+            warnings: Vec::new(),
+        })
     }
 }
 
@@ -2104,6 +2249,63 @@ fn term_to_i64(term: &Term) -> Option<i64> {
     match term {
         Term::Literal(Literal::Integer(n)) => Some(*n),
         _ => None,
+    }
+}
+
+fn is_reversed_query(plan: &SelectPlan) -> bool {
+    plan.order_by
+        .iter()
+        .any(|(_, order)| matches!(order, cassandra_cql::ast::ClusteringOrder::Desc))
+}
+
+fn compute_resume_offset(rows: &[Row], state: Option<&PagingState>, partition_key: &[u8]) -> usize {
+    let Some(state) = state else {
+        return 0;
+    };
+    if state.partition_key != partition_key {
+        return 0;
+    }
+    if state.row_mark.is_empty() {
+        return 0;
+    }
+    rows.iter()
+        .position(|row| row.clustering_key == state.row_mark)
+        .map(|idx| idx + 1)
+        .unwrap_or(0)
+}
+
+fn row_matches_query(row: &Row, plan: &SelectPlan) -> bool {
+    for relation in &plan.where_clause {
+        let Some(relation_value) = term_to_bytes(&relation.value) else {
+            continue;
+        };
+        if relation.column.starts_with("token(") {
+            continue;
+        }
+        if row
+            .cells
+            .iter()
+            .find(|cell| cell.column == relation.column)
+            .is_some_and(|cell| {
+                !cell_matches_relation(cell.value.as_deref(), &relation.op, &relation_value)
+            })
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn cell_matches_relation(candidate: Option<&[u8]>, op: &RelationOp, expected: &[u8]) -> bool {
+    match op {
+        RelationOp::Eq => candidate == Some(expected),
+        RelationOp::Gt => candidate.is_some_and(|value| value > expected),
+        RelationOp::Gte => candidate.is_some_and(|value| value >= expected),
+        RelationOp::Lt => candidate.is_some_and(|value| value < expected),
+        RelationOp::Lte => candidate.is_some_and(|value| value <= expected),
+        RelationOp::In => candidate == Some(expected),
+        RelationOp::Contains | RelationOp::ContainsKey => true,
+        RelationOp::Neq => candidate.is_some_and(|value| value != expected),
     }
 }
 
@@ -2188,13 +2390,23 @@ fn wrap_select_json(
     json: bool,
     columns: Vec<ResultColumn>,
     rows: Vec<Vec<Option<Vec<u8>>>>,
+    paging_state: Option<Vec<u8>>,
+    warnings: Vec<String>,
 ) -> Result<QueryResult, ExecutorError> {
     if !json {
-        return Ok(QueryResult::Rows { columns, rows });
+        return Ok(QueryResult::Rows {
+            columns,
+            rows,
+            paging_state,
+            warnings,
+        });
     }
 
     let json_column = ResultColumn {
-        keyspace: columns.first().map(|c| c.keyspace.clone()).unwrap_or_default(),
+        keyspace: columns
+            .first()
+            .map(|c| c.keyspace.clone())
+            .unwrap_or_default(),
         table: columns.first().map(|c| c.table.clone()).unwrap_or_default(),
         name: "[json]".to_string(),
         cql_type: CqlType::Varchar,
@@ -2236,13 +2448,13 @@ fn wrap_select_json(
     Ok(QueryResult::Rows {
         columns: vec![json_column],
         rows: json_rows,
+        paging_state,
+        warnings,
     })
 }
 
 /// Parse a JSON string term into column names and values for INSERT JSON.
-fn parse_json_insert(
-    json_term: &Term,
-) -> Result<(Vec<String>, Vec<Term>), ExecutorError> {
+fn parse_json_insert(json_term: &Term) -> Result<(Vec<String>, Vec<Term>), ExecutorError> {
     let json_str = match json_term {
         Term::Literal(Literal::String(s)) => s.clone(),
         _ => {
@@ -2285,7 +2497,7 @@ fn parse_json_insert(
                 None => {
                     return Err(ExecutorError::InvalidQuery(
                         "Unterminated key in JSON".into(),
-                    ))
+                    ));
                 }
             }
         }
@@ -2318,7 +2530,7 @@ fn parse_json_insert(
                         None => {
                             return Err(ExecutorError::InvalidQuery(
                                 "Unterminated string in JSON".into(),
-                            ))
+                            ));
                         }
                     }
                 }
@@ -2327,9 +2539,7 @@ fn parse_json_insert(
             Some('n') => {
                 for expected in ['n', 'u', 'l', 'l'] {
                     if chars.next() != Some(expected) {
-                        return Err(ExecutorError::InvalidQuery(
-                            "Invalid JSON value".into(),
-                        ));
+                        return Err(ExecutorError::InvalidQuery("Invalid JSON value".into()));
                     }
                 }
                 Term::Literal(Literal::Null)
@@ -2337,9 +2547,7 @@ fn parse_json_insert(
             Some('t') => {
                 for expected in ['t', 'r', 'u', 'e'] {
                     if chars.next() != Some(expected) {
-                        return Err(ExecutorError::InvalidQuery(
-                            "Invalid JSON value".into(),
-                        ));
+                        return Err(ExecutorError::InvalidQuery("Invalid JSON value".into()));
                     }
                 }
                 Term::Literal(Literal::Boolean(true))
@@ -2347,9 +2555,7 @@ fn parse_json_insert(
             Some('f') => {
                 for expected in ['f', 'a', 'l', 's', 'e'] {
                     if chars.next() != Some(expected) {
-                        return Err(ExecutorError::InvalidQuery(
-                            "Invalid JSON value".into(),
-                        ));
+                        return Err(ExecutorError::InvalidQuery("Invalid JSON value".into()));
                     }
                 }
                 Term::Literal(Literal::Boolean(false))

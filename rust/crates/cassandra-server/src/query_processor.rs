@@ -59,7 +59,7 @@ impl QueryProcessor {
     pub fn process_query(
         &self,
         cql: &str,
-        _params: &QueryParams,
+        params: &QueryParams,
         user: Option<&str>,
         keyspace: Option<&str>,
     ) -> Result<QueryResult, CassandraError> {
@@ -67,12 +67,11 @@ impl QueryProcessor {
             .map_err(|e| CassandraError::SyntaxError(e.to_string()))?;
 
         let schema = self.catalog.read().snapshot();
-        let plan = planner::plan(&stmt, &schema, keyspace)
-            .map_err(plan_error_to_cassandra)?;
+        let plan = planner::plan(&stmt, &schema, keyspace).map_err(plan_error_to_cassandra)?;
 
         let result = self
             .executor
-            .execute(&plan, user)
+            .execute_with_query_params(&plan, user, Some(params))
             .map_err(executor_error_to_cassandra)?;
 
         Ok(result)
@@ -192,8 +191,9 @@ impl QueryProcessor {
                 // Discard metadata change info for batch; only the final result matters.
                 let _exec = self.process_execute(&query.query_or_id, &params, user, keyspace)?;
             } else {
-                let cql = String::from_utf8(query.query_or_id.clone())
-                    .map_err(|_| CassandraError::InvalidQuery("Invalid UTF-8 in batch query".into()))?;
+                let cql = String::from_utf8(query.query_or_id.clone()).map_err(|_| {
+                    CassandraError::InvalidQuery("Invalid UTF-8 in batch query".into())
+                })?;
                 let params = QueryParams::default();
                 self.process_query(&cql, &params, user, keyspace)?;
             }
@@ -202,10 +202,7 @@ impl QueryProcessor {
     }
 
     /// Execute an internal CQL query (no auth, system context).
-    pub fn execute_internal(
-        &self,
-        cql: &str,
-    ) -> Result<QueryResult, CassandraError> {
+    pub fn execute_internal(&self, cql: &str) -> Result<QueryResult, CassandraError> {
         self.process_query(cql, &QueryParams::default(), Some("system"), None)
     }
 
@@ -332,30 +329,327 @@ fn plan_error_to_cassandra(err: PlanError) -> CassandraError {
     match err {
         PlanError::InvalidQuery(msg) => CassandraError::InvalidQuery(msg),
         PlanError::SyntaxError(msg) => CassandraError::SyntaxError(msg),
-        PlanError::AlreadyExists { ks, name } => CassandraError::AlreadyExists {
-            ks,
-            table: name,
-        },
+        PlanError::AlreadyExists { ks, name } => CassandraError::AlreadyExists { ks, table: name },
     }
 }
 
 fn executor_error_to_cassandra(err: ExecutorError) -> CassandraError {
-    match err {
-        ExecutorError::InvalidQuery(msg) => CassandraError::InvalidQuery(msg),
-        ExecutorError::KeyspaceNotFound(ks) => {
-            CassandraError::InvalidQuery(format!("Keyspace '{}' not found", ks))
-        }
-        ExecutorError::TableNotFound(ks, table) => {
-            CassandraError::InvalidQuery(format!("Table '{}.{}' not found", ks, table))
-        }
-        ExecutorError::StorageError(msg) => CassandraError::ServerError(msg),
-        ExecutorError::SchemaError(msg) => CassandraError::ConfigError(msg),
-    }
+    err.into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use cassandra_native_protocol::message::QueryParams;
+    use cassandra_schema::{KeyspaceMetadata, KeyspaceParams};
+    use cassandra_security::{AllowAllAuthorizer, InMemoryRoleManager};
+    use cassandra_storage::engine::{EngineConfig, StorageEngine};
+    use tempfile::tempdir;
+
+    struct TestProcessor {
+        _tmpdir: tempfile::TempDir,
+        processor: QueryProcessor,
+    }
+
+    fn make_processor() -> TestProcessor {
+        let tmp = tempdir().unwrap();
+        let engine = Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![tmp.path().join("data")],
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        let catalog = Arc::new(RwLock::new(
+            SchemaCatalog::new()
+                .with_keyspace(KeyspaceMetadata::new("ks", KeyspaceParams::default())),
+        ));
+        let executor = Arc::new(QueryExecutor::new(
+            engine,
+            Arc::clone(&catalog),
+            Arc::new(InMemoryRoleManager::new()),
+            Arc::new(AllowAllAuthorizer),
+        ));
+        TestProcessor {
+            _tmpdir: tmp,
+            processor: QueryProcessor::new(executor, Arc::new(PreparedCache::new()), catalog),
+        }
+    }
+
+    #[test]
+    fn select_exposes_paging_state_across_pages() {
+        let fixture = make_processor();
+        let qp = &fixture.processor;
+        qp.process_query(
+            "CREATE TABLE ks.t (pk text, ck text, v text, PRIMARY KEY (pk, ck))",
+            &QueryParams::default(),
+            Some("tester"),
+            Some("ks"),
+        )
+        .unwrap();
+
+        for (ck, value) in [("a", "1"), ("b", "2"), ("c", "3")] {
+            qp.process_query(
+                &format!("INSERT INTO ks.t (pk, ck, v) VALUES ('p', '{ck}', '{value}')"),
+                &QueryParams::default(),
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+        }
+
+        let first_page = qp
+            .process_query(
+                "SELECT ck, v FROM ks.t WHERE pk = 'p' ORDER BY ck ASC",
+                &QueryParams {
+                    page_size: Some(2),
+                    ..QueryParams::default()
+                },
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        let paging_state = match first_page {
+            QueryResult::Rows {
+                rows,
+                paging_state,
+                warnings,
+                ..
+            } => {
+                assert_eq!(rows.len(), 2);
+                assert!(warnings.is_empty());
+                paging_state.expect("first page should expose paging state")
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        };
+
+        let second_page = qp
+            .process_query(
+                "SELECT ck, v FROM ks.t WHERE pk = 'p' ORDER BY ck ASC",
+                &QueryParams {
+                    page_size: Some(2),
+                    paging_state: Some(paging_state),
+                    ..QueryParams::default()
+                },
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        match second_page {
+            QueryResult::Rows {
+                rows,
+                paging_state,
+                warnings,
+                ..
+            } => {
+                assert_eq!(rows.len(), 1);
+                assert!(warnings.is_empty());
+                assert!(paging_state.is_none());
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_surfaces_tombstone_warnings() {
+        let fixture = make_processor();
+        let qp = &fixture.processor;
+        qp.process_query(
+            "CREATE TABLE ks.tombs (pk text, ck text, v text, PRIMARY KEY (pk, ck))",
+            &QueryParams::default(),
+            Some("tester"),
+            Some("ks"),
+        )
+        .unwrap();
+
+        for i in 0..1001 {
+            qp.process_query(
+                &format!("DELETE FROM ks.tombs WHERE pk = 'p' AND ck = 'ck{i}'"),
+                &QueryParams::default(),
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+        }
+
+        let result = qp
+            .process_query(
+                "SELECT ck, v FROM ks.tombs WHERE pk = 'p'",
+                &QueryParams::default(),
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        match result {
+            QueryResult::Rows { warnings, .. } => {
+                assert!(!warnings.is_empty());
+                assert!(warnings[0].contains("warning threshold"));
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_respects_reversed_per_partition_limit_before_paging() {
+        let fixture = make_processor();
+        let qp = &fixture.processor;
+        qp.process_query(
+            "CREATE TABLE ks.rev (pk text, ck text, v text, PRIMARY KEY (pk, ck))",
+            &QueryParams::default(),
+            Some("tester"),
+            Some("ks"),
+        )
+        .unwrap();
+
+        for ck in ["a", "b", "c", "d"] {
+            qp.process_query(
+                &format!("INSERT INTO ks.rev (pk, ck, v) VALUES ('p', '{ck}', '{ck}')"),
+                &QueryParams::default(),
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+        }
+
+        let first_page = qp
+            .process_query(
+                "SELECT ck FROM ks.rev WHERE pk = 'p' ORDER BY ck DESC PER PARTITION LIMIT 3",
+                &QueryParams {
+                    page_size: Some(2),
+                    ..QueryParams::default()
+                },
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        let paging_state = match first_page {
+            QueryResult::Rows {
+                rows,
+                paging_state,
+                warnings,
+                ..
+            } => {
+                assert!(warnings.is_empty());
+                assert_eq!(rows.len(), 2);
+                assert_eq!(rows[0][0].as_deref(), Some(&b"d"[..]));
+                assert_eq!(rows[1][0].as_deref(), Some(&b"c"[..]));
+                paging_state.expect("expected continuation after first reversed page")
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        };
+
+        let second_page = qp
+            .process_query(
+                "SELECT ck FROM ks.rev WHERE pk = 'p' ORDER BY ck DESC PER PARTITION LIMIT 3",
+                &QueryParams {
+                    page_size: Some(2),
+                    paging_state: Some(paging_state),
+                    ..QueryParams::default()
+                },
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        match second_page {
+            QueryResult::Rows {
+                rows,
+                paging_state,
+                warnings,
+                ..
+            } => {
+                assert!(warnings.is_empty());
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0].as_deref(), Some(&b"b"[..]));
+                assert!(paging_state.is_none());
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_respects_global_limit_across_pages() {
+        let fixture = make_processor();
+        let qp = &fixture.processor;
+        qp.process_query(
+            "CREATE TABLE ks.limits (pk text, ck text, v text, PRIMARY KEY (pk, ck))",
+            &QueryParams::default(),
+            Some("tester"),
+            Some("ks"),
+        )
+        .unwrap();
+
+        for ck in ["a", "b", "c"] {
+            qp.process_query(
+                &format!("INSERT INTO ks.limits (pk, ck, v) VALUES ('p', '{ck}', '{ck}')"),
+                &QueryParams::default(),
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+        }
+
+        let first_page = qp
+            .process_query(
+                "SELECT ck FROM ks.limits WHERE pk = 'p' LIMIT 2",
+                &QueryParams {
+                    page_size: Some(1),
+                    ..QueryParams::default()
+                },
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        let paging_state = match first_page {
+            QueryResult::Rows {
+                rows,
+                paging_state,
+                warnings,
+                ..
+            } => {
+                assert!(warnings.is_empty());
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0].as_deref(), Some(&b"a"[..]));
+                paging_state.expect("expected continuation after first limited page")
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        };
+
+        let second_page = qp
+            .process_query(
+                "SELECT ck FROM ks.limits WHERE pk = 'p' LIMIT 2",
+                &QueryParams {
+                    page_size: Some(1),
+                    paging_state: Some(paging_state),
+                    ..QueryParams::default()
+                },
+                Some("tester"),
+                Some("ks"),
+            )
+            .unwrap();
+
+        match second_page {
+            QueryResult::Rows {
+                rows,
+                paging_state,
+                warnings,
+                ..
+            } => {
+                assert!(warnings.is_empty());
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0][0].as_deref(), Some(&b"b"[..]));
+                assert!(paging_state.is_none());
+            }
+            other => panic!("expected rows result, got {other:?}"),
+        }
+    }
 
     #[test]
     fn plan_error_invalid_query() {
@@ -388,6 +682,13 @@ mod tests {
             (ExecutorError::KeyspaceNotFound("x".into()), 0x2200),
             (ExecutorError::TableNotFound("x".into(), "y".into()), 0x2200),
             (ExecutorError::StorageError("x".into()), 0x0000),
+            (
+                ExecutorError::ReadPath(cassandra_coordinator::ReadError::TombstoneOverwhelming {
+                    count: 100_001,
+                    threshold: 100_000,
+                }),
+                0x1300,
+            ),
             (ExecutorError::SchemaError("x".into()), 0x2300),
         ];
         for (err, expected_code) in cases {

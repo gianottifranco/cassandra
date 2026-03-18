@@ -26,7 +26,7 @@ use cassandra_cql::prepared::PreparedCache;
 
 use crate::client_state::ClientState;
 use crate::executor::{QueryExecutor, QueryResult};
-use crate::query_processor::{ExecuteResult, QueryProcessor};
+use crate::query_processor::QueryProcessor;
 use crate::resource_limits::ResourceLimits;
 use crate::shutdown::ShutdownCoordinator;
 use crate::transport_metrics::TransportMetrics;
@@ -192,24 +192,26 @@ impl NativeServer {
                         };
 
                         let response_frame = {
-                            let mut resp_opt =
+                            let lifecycle_resp =
                                 ctx.process_lifecycle(&frame, self.authenticator.as_ref())?;
-                            if resp_opt.is_none() {
+                            if lifecycle_resp.is_none() {
                                 // Protocol lifecycle didn't handle it, must be a query.
                                 if let Some(ref session) = trace_session {
                                     session.trace("server", "Dispatching query to executor");
                                 }
-                                resp_opt = self.handle_query(&mut ctx, &mut client_state, &frame).await?;
+                                let resp_opt = self.handle_query(&mut ctx, &mut client_state, &frame).await?;
                                 if let Some(ref session) = trace_session {
                                     session.trace("server", "Query execution completed");
                                 }
+                                resp_opt
+                            } else {
+                                lifecycle_resp.map(|frame| (frame, Vec::new()))
                             }
-                            resp_opt
                         };
 
-                        if let Some(mut r_frame) = response_frame {
+                        if let Some((mut r_frame, warnings)) = response_frame {
                             let tracing_id = trace_session.as_ref().map(|s| s.session_id);
-                            r_frame = ctx.wrap_response(r_frame, tracing_id, &[], None);
+                            r_frame = ctx.wrap_response(r_frame, tracing_id, &warnings, None);
 
                             let mut out_buf = bytes::BytesMut::new();
                             let mut codec = FrameCodec;
@@ -233,7 +235,7 @@ impl NativeServer {
         ctx: &mut ConnectionContext,
         client_state: &mut ClientState,
         frame: &Frame,
-    ) -> anyhow::Result<Option<Frame>> {
+    ) -> anyhow::Result<Option<(Frame, Vec<String>)>> {
         use cassandra_native_protocol::message::*;
         use cassandra_native_protocol::request;
         use cassandra_native_protocol::response;
@@ -297,7 +299,10 @@ impl NativeServer {
                         version,
                         stream_id,
                     ))),
-                    Err(e) => Ok(Some(self.cassandra_error_to_frame(e, version, stream_id))),
+                    Err(e) => Ok(Some((
+                        self.cassandra_error_to_frame(e, version, stream_id),
+                        Vec::new(),
+                    ))),
                 }
             }
             Message::Prepare(p) => {
@@ -306,12 +311,18 @@ impl NativeServer {
                     .query_processor
                     .process_prepare(&p.query, keyspace.as_deref())
                 {
-                    Ok(prepared_result) => Ok(Some(response::encode_response(
-                        &Message::Result(ResultMessage::Prepared(prepared_result)),
-                        version,
-                        stream_id,
+                    Ok(prepared_result) => Ok(Some((
+                        response::encode_response(
+                            &Message::Result(ResultMessage::Prepared(prepared_result)),
+                            version,
+                            stream_id,
+                        ),
+                        Vec::new(),
                     ))),
-                    Err(e) => Ok(Some(self.cassandra_error_to_frame(e, version, stream_id))),
+                    Err(e) => Ok(Some((
+                        self.cassandra_error_to_frame(e, version, stream_id),
+                        Vec::new(),
+                    ))),
                 }
             }
             Message::Execute(e) => {
@@ -338,7 +349,10 @@ impl NativeServer {
                             stream_id,
                         )))
                     }
-                    Err(err) => Ok(Some(self.cassandra_error_to_frame(err, version, stream_id))),
+                    Err(err) => Ok(Some((
+                        self.cassandra_error_to_frame(err, version, stream_id),
+                        Vec::new(),
+                    ))),
                 }
             }
             Message::Batch(b) => {
@@ -354,14 +368,20 @@ impl NativeServer {
                         version,
                         stream_id,
                     ))),
-                    Err(err) => Ok(Some(self.cassandra_error_to_frame(err, version, stream_id))),
+                    Err(err) => Ok(Some((
+                        self.cassandra_error_to_frame(err, version, stream_id),
+                        Vec::new(),
+                    ))),
                 }
             }
-            _ => Ok(Some(response::error_frame(
-                version,
-                stream_id,
-                0x000A,
-                "Message not supported in this state",
+            _ => Ok(Some((
+                response::error_frame(
+                    version,
+                    stream_id,
+                    0x000A,
+                    "Message not supported in this state",
+                ),
+                Vec::new(),
             ))),
         }
     }
@@ -374,23 +394,29 @@ impl NativeServer {
         client_state: &mut ClientState,
         version: u8,
         stream_id: i16,
-    ) -> Frame {
+    ) -> (Frame, Vec<String>) {
         use cassandra_native_protocol::message::*;
         use cassandra_native_protocol::response;
 
         match result {
-            QueryResult::Void => response::encode_response(
-                &Message::Result(ResultMessage::Void),
-                version,
-                stream_id,
+            QueryResult::Void => (
+                response::encode_response(
+                    &Message::Result(ResultMessage::Void),
+                    version,
+                    stream_id,
+                ),
+                Vec::new(),
             ),
             QueryResult::SetKeyspace(ks) => {
                 ctx.keyspace = Some(ks.clone());
                 client_state.set_keyspace(ks.clone());
-                response::encode_response(
-                    &Message::Result(ResultMessage::SetKeyspace(ks)),
-                    version,
-                    stream_id,
+                (
+                    response::encode_response(
+                        &Message::Result(ResultMessage::SetKeyspace(ks)),
+                        version,
+                        stream_id,
+                    ),
+                    Vec::new(),
                 )
             }
             QueryResult::SchemaChange {
@@ -398,18 +424,26 @@ impl NativeServer {
                 target,
                 keyspace,
                 name,
-            } => response::encode_response(
-                &Message::Result(ResultMessage::SchemaChange(SchemaChange {
-                    change_type,
-                    target,
-                    keyspace,
-                    name,
-                    arg_types: None,
-                })),
-                version,
-                stream_id,
+            } => (
+                response::encode_response(
+                    &Message::Result(ResultMessage::SchemaChange(SchemaChange {
+                        change_type,
+                        target,
+                        keyspace,
+                        name,
+                        arg_types: None,
+                    })),
+                    version,
+                    stream_id,
+                ),
+                Vec::new(),
             ),
-            QueryResult::Rows { columns, rows } => {
+            QueryResult::Rows {
+                columns,
+                rows,
+                paging_state,
+                warnings,
+            } => {
                 // Convert ResultColumn → ColumnSpec
                 let col_specs: Vec<ColumnSpec> = columns
                     .iter()
@@ -428,9 +462,8 @@ impl NativeServer {
                     if col_specs.iter().all(|s| {
                         s.ksname.as_deref() == first_ks && s.tablename.as_deref() == first_tbl
                     }) {
-                        first_ks.and_then(|ks| {
-                            first_tbl.map(|tbl| (ks.to_string(), tbl.to_string()))
-                        })
+                        first_ks
+                            .and_then(|ks| first_tbl.map(|tbl| (ks.to_string(), tbl.to_string())))
                     } else {
                         None
                     }
@@ -442,25 +475,31 @@ impl NativeServer {
                 if global_spec.is_some() {
                     flags |= rows_flags::GLOBAL_TABLES_SPEC;
                 }
+                if paging_state.is_some() {
+                    flags |= rows_flags::HAS_MORE_PAGES;
+                }
 
                 let metadata = RowsMetadata {
                     flags,
                     columns_count: col_specs.len() as i32,
-                    paging_state: None,
+                    paging_state,
                     new_metadata_id: None,
                     global_table_spec: global_spec,
                     col_specs,
                 };
 
                 let rows_count = rows.len() as i32;
-                response::encode_response(
-                    &Message::Result(ResultMessage::Rows(RowsResult {
-                        metadata,
-                        rows_count,
-                        rows,
-                    })),
-                    version,
-                    stream_id,
+                (
+                    response::encode_response(
+                        &Message::Result(ResultMessage::Rows(RowsResult {
+                            metadata,
+                            rows_count,
+                            rows,
+                        })),
+                        version,
+                        stream_id,
+                    ),
+                    warnings,
                 )
             }
         }
@@ -522,5 +561,103 @@ impl NativeAuthenticator for NativeAuthWrapper {
             Ok(_) => Ok(AuthResult::Success(Some(username.to_string()), None)),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use cassandra_native_protocol::message::{ColumnType, rows_flags};
+    use cassandra_native_protocol::types;
+    use cassandra_schema::{KeyspaceMetadata, KeyspaceParams, SchemaCatalog};
+    use cassandra_security::audit::NoOpAuditLogger;
+    use cassandra_security::fql::FqlLogger;
+    use cassandra_security::{AllowAllAuthorizer, InMemoryRoleManager};
+    use cassandra_storage::engine::{EngineConfig, StorageEngine};
+    use parking_lot::RwLock;
+    use tempfile::tempdir;
+
+    fn make_server() -> (NativeServer, tempfile::TempDir) {
+        let tmp = tempdir().unwrap();
+        let engine = Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![tmp.path().join("data")],
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        let catalog = Arc::new(RwLock::new(
+            SchemaCatalog::new()
+                .with_keyspace(KeyspaceMetadata::new("ks", KeyspaceParams::default())),
+        ));
+        let executor = Arc::new(QueryExecutor::new(
+            engine,
+            catalog,
+            Arc::new(InMemoryRoleManager::new()),
+            Arc::new(AllowAllAuthorizer),
+        ));
+        let server = NativeServer::new(
+            ServerConfig {
+                listen_address: "127.0.0.1:9042".to_string(),
+                client_encryption_enabled: false,
+            },
+            executor,
+            Arc::new(cassandra_native_protocol::auth::AllowAllAuthenticator),
+            None,
+            Arc::new(FqlLogger::new(tmp.path().join("fql"), 1, false).unwrap()),
+            Arc::new(NoOpAuditLogger),
+            Arc::new(ResourceLimits::new(-1, -1, 1024 * 1024)),
+            Arc::new(TransportMetrics::new()),
+            Arc::new(ShutdownCoordinator::new(Duration::from_secs(1))),
+        );
+        (server, tmp)
+    }
+
+    #[test]
+    fn encode_query_result_sets_has_more_pages_and_returns_warnings() {
+        let (server, _tmp) = make_server();
+        let mut ctx = ConnectionContext::new();
+        let mut client_state = ClientState::new("127.0.0.1:9042".parse().unwrap());
+
+        let (frame, warnings) = server.encode_query_result(
+            QueryResult::Rows {
+                columns: vec![crate::executor::ResultColumn {
+                    keyspace: "ks".to_string(),
+                    table: "tbl".to_string(),
+                    name: "ck".to_string(),
+                    cql_type: cassandra_types::CqlType::Varchar,
+                }],
+                rows: vec![vec![Some(b"c".to_vec())]],
+                paging_state: Some(vec![1, 2, 3, 4]),
+                warnings: vec!["tombstone warning".to_string()],
+            },
+            &mut ctx,
+            &mut client_state,
+            4,
+            7,
+        );
+
+        assert_eq!(warnings, vec!["tombstone warning".to_string()]);
+
+        let mut body: &[u8] = &frame.body;
+        let kind = types::read_int(&mut body).unwrap();
+        assert_eq!(kind, 0x0002);
+        let flags = types::read_int(&mut body).unwrap();
+        assert_ne!(flags & rows_flags::HAS_MORE_PAGES, 0);
+        let columns_count = types::read_int(&mut body).unwrap();
+        assert_eq!(columns_count, 1);
+        let paging_state = types::read_bytes(&mut body).unwrap();
+        assert_eq!(paging_state, Some(vec![1, 2, 3, 4]));
+        let ks = types::read_string(&mut body).unwrap();
+        let table = types::read_string(&mut body).unwrap();
+        assert_eq!(ks, "ks");
+        assert_eq!(table, "tbl");
+        let name = types::read_string(&mut body).unwrap();
+        assert_eq!(name, "ck");
+        let col_type_id = types::read_short(&mut body).unwrap();
+        assert_eq!(col_type_id, ColumnType::Varchar.id());
     }
 }
