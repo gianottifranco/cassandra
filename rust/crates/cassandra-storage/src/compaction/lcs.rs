@@ -15,7 +15,11 @@
 //! - When compacting from Ln to Ln+1, overlapping SSTables at Ln+1
 //!   are included in the merge
 
-use super::{CompactionStrategy, SSTableMetadata};
+use std::collections::HashMap;
+
+use super::{
+    CompactionStrategy, SSTableMetadata, parse_bool, parse_positive_u32, parse_positive_usize,
+};
 use crate::sstable::format::SSTableId;
 
 /// Leveled Compaction Strategy.
@@ -27,6 +31,10 @@ pub struct LeveledCompactionStrategy {
     pub fanout_size: u32,
     /// Maximum number of SSTables in L0 before triggering compaction.
     pub l0_threshold: usize,
+    /// Maximum number of L0 SSTables to compact together.
+    pub max_threshold: usize,
+    /// Java `single_sstable_uplevel` option.
+    pub single_sstable_uplevel: bool,
 }
 
 impl Default for LeveledCompactionStrategy {
@@ -35,6 +43,8 @@ impl Default for LeveledCompactionStrategy {
             sstable_size_in_mb: 160,
             fanout_size: 10,
             l0_threshold: 4,
+            max_threshold: 32,
+            single_sstable_uplevel: true,
         }
     }
 }
@@ -51,6 +61,30 @@ pub struct LeveledSSTable {
 }
 
 impl LeveledCompactionStrategy {
+    /// Build LCS from the Java compaction option map.
+    pub fn from_options(options: &HashMap<String, String>) -> Result<Self, String> {
+        let mut strategy = Self::default();
+        if let Some(value) = options.get("sstable_size_in_mb") {
+            strategy.sstable_size_in_mb = parse_positive_usize(value, "sstable_size_in_mb")? as u64;
+        }
+        if let Some(value) = options.get("fanout_size") {
+            strategy.fanout_size = parse_positive_u32(value, "fanout_size")?;
+        }
+        if let Some(value) = options.get("min_threshold") {
+            strategy.l0_threshold = parse_positive_usize(value, "min_threshold")?;
+        }
+        if let Some(value) = options.get("max_threshold") {
+            strategy.max_threshold = parse_positive_usize(value, "max_threshold")?;
+        }
+        if strategy.max_threshold < strategy.l0_threshold {
+            return Err("max_threshold must be greater than or equal to min_threshold".to_string());
+        }
+        if let Some(value) = options.get("single_sstable_uplevel") {
+            strategy.single_sstable_uplevel = parse_bool(value, "single_sstable_uplevel")?;
+        }
+        Ok(strategy)
+    }
+
     /// Maximum total size for a given level (in bytes).
     pub fn max_bytes_for_level(&self, level: u32) -> u64 {
         let target = self.sstable_size_in_mb * 1024 * 1024;
@@ -82,7 +116,11 @@ impl LeveledCompactionStrategy {
         // L0 special case: if too many SSTables, compact all L0 + overlapping L1
         if let Some(l0) = levels.get(&0) {
             if l0.len() >= self.l0_threshold {
-                let mut group: Vec<SSTableId> = l0.iter().map(|s| s.metadata.id).collect();
+                let mut group: Vec<SSTableId> = l0
+                    .iter()
+                    .take(self.max_threshold)
+                    .map(|s| s.metadata.id)
+                    .collect();
                 // Include overlapping L1 SSTables
                 if let Some(l1) = levels.get(&1) {
                     let l0_min = l0.iter().map(|s| s.min_key_hash).min().unwrap_or(0);
@@ -145,7 +183,11 @@ impl CompactionStrategy for LeveledCompactionStrategy {
             return vec![];
         }
         // If enough at "L0", compact them all together
-        let ids: Vec<SSTableId> = sstables.iter().map(|s| s.id).collect();
+        let ids: Vec<SSTableId> = sstables
+            .iter()
+            .take(self.max_threshold)
+            .map(|s| s.id)
+            .collect();
         vec![ids]
     }
 }
@@ -215,5 +257,22 @@ mod tests {
         let lcs = LeveledCompactionStrategy::default();
         let picks = lcs.pick_leveled_compaction(&[]);
         assert!(picks.is_empty());
+    }
+
+    #[test]
+    fn parses_java_options() {
+        let options = HashMap::from([
+            ("sstable_size_in_mb".to_string(), "32".to_string()),
+            ("fanout_size".to_string(), "4".to_string()),
+            ("min_threshold".to_string(), "2".to_string()),
+            ("max_threshold".to_string(), "3".to_string()),
+            ("single_sstable_uplevel".to_string(), "false".to_string()),
+        ]);
+        let lcs = LeveledCompactionStrategy::from_options(&options).unwrap();
+        assert_eq!(lcs.sstable_size_in_mb, 32);
+        assert_eq!(lcs.fanout_size, 4);
+        assert_eq!(lcs.l0_threshold, 2);
+        assert_eq!(lcs.max_threshold, 3);
+        assert!(!lcs.single_sstable_uplevel);
     }
 }

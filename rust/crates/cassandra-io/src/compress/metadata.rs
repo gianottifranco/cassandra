@@ -102,9 +102,8 @@ impl CompressionMetadata {
         r.read_exact(&mut name_buf)?;
         let name = String::from_utf8(name_buf)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        let compressor_type: CompressorType = name
-            .parse()
-            .map_err(|e: crate::error::IoError| {
+        let compressor_type: CompressorType =
+            name.parse().map_err(|e: crate::error::IoError| {
                 io::Error::new(io::ErrorKind::InvalidData, e.to_string())
             })?;
 
@@ -115,14 +114,14 @@ impl CompressionMetadata {
             let kl = r.read_u16::<BigEndian>()? as usize;
             let mut kb = vec![0u8; kl];
             r.read_exact(&mut kb)?;
-            let key = String::from_utf8(kb)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let key =
+                String::from_utf8(kb).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             let vl = r.read_u16::<BigEndian>()? as usize;
             let mut vb = vec![0u8; vl];
             r.read_exact(&mut vb)?;
-            let val = String::from_utf8(vb)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            let val =
+                String::from_utf8(vb).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
             options.insert(key, val);
         }

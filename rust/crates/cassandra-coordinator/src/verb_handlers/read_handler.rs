@@ -13,7 +13,10 @@
 
 use cassandra_messaging::frame::Message;
 use cassandra_messaging::verb::Verb;
+use cassandra_storage::engine::StorageEngine;
 use tracing::{debug, warn};
+
+use crate::read::{DataResponse, Digest};
 
 // ─── Request / Response Types ───────────────────────────────────
 
@@ -50,6 +53,8 @@ pub struct WirePartitionResult {
 pub struct ReadDataResponsePayload {
     /// Partition results from the local read.
     pub partitions: Vec<WirePartitionResult>,
+    /// Digest of the same local data response.
+    pub digest: [u8; 8],
     /// Number of tombstones encountered.
     pub tombstones_read: u32,
     /// Whether the read was short (more data available).
@@ -78,13 +83,20 @@ pub struct ReadDigestResponsePayload {
 
 /// Replica-side handler for `Verb::ReadData` messages.
 ///
-/// Reads data from the local storage engine (stubbed) and returns
-/// a full data response.
+/// Reads data from the local storage engine and returns a full data response.
 pub struct ReadDataVerbHandler;
 
 impl ReadDataVerbHandler {
-    /// Handle an incoming read data request.
+    /// Handle an incoming read data request when no local storage engine is configured.
     pub fn handle(msg: Message) -> Option<Message> {
+        Some(Message::failure(
+            msg.header.message_id,
+            b"Local storage engine not configured for ReadData".to_vec(),
+        ))
+    }
+
+    /// Handle an incoming read data request using the local storage engine.
+    pub fn handle_with_storage(msg: Message, storage: &StorageEngine) -> Option<Message> {
         let request: ReadDataRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(e) => {
@@ -102,13 +114,7 @@ impl ReadDataVerbHandler {
             "Reading data locally"
         );
 
-        // In a full implementation, this would read from the local storage engine.
-        // For now, return an empty data response.
-        let response = ReadDataResponsePayload {
-            partitions: Vec::new(),
-            tombstones_read: 0,
-            is_short_read: false,
-        };
+        let response = read_data_response(storage, &request);
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
         Some(Message::response(
@@ -123,13 +129,20 @@ impl ReadDataVerbHandler {
 
 /// Replica-side handler for `Verb::ReadDigest` messages.
 ///
-/// Reads data from the local storage engine (stubbed), computes a
-/// digest hash, and returns it.
+/// Reads data from the local storage engine, computes a digest hash, and returns it.
 pub struct ReadDigestVerbHandler;
 
 impl ReadDigestVerbHandler {
-    /// Handle an incoming read digest request.
+    /// Handle an incoming read digest request when no local storage engine is configured.
     pub fn handle(msg: Message) -> Option<Message> {
+        Some(Message::failure(
+            msg.header.message_id,
+            b"Local storage engine not configured for ReadDigest".to_vec(),
+        ))
+    }
+
+    /// Handle an incoming read digest request using the local storage engine.
+    pub fn handle_with_storage(msg: Message, storage: &StorageEngine) -> Option<Message> {
         let request: ReadDigestRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(e) => {
@@ -147,11 +160,7 @@ impl ReadDigestVerbHandler {
             "Computing digest locally"
         );
 
-        // In a full implementation, this would read data and compute a real digest.
-        // For now, return a zeroed digest (empty partition).
-        let response = ReadDigestResponsePayload {
-            digest: [0u8; 8],
-        };
+        let response = read_digest_response(storage, &request);
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
         Some(Message::response(
@@ -162,9 +171,176 @@ impl ReadDigestVerbHandler {
     }
 }
 
+fn read_data_response(
+    storage: &StorageEngine,
+    request: &ReadDataRequest,
+) -> ReadDataResponsePayload {
+    let now_seconds = current_unix_seconds();
+    let data =
+        match storage.read_partition(&request.keyspace, &request.table, &request.partition_key) {
+            Some(data) => data,
+            None => {
+                return ReadDataResponsePayload {
+                    partitions: Vec::new(),
+                    digest: Digest::empty().0,
+                    tombstones_read: 0,
+                    is_short_read: false,
+                };
+            }
+        };
+
+    let digest = Digest::from_partition(&data).0;
+    let response = DataResponse::from_partition(request.partition_key.clone(), data, now_seconds);
+    ReadDataResponsePayload {
+        partitions: response
+            .partitions
+            .into_iter()
+            .map(|partition| WirePartitionResult {
+                partition_key: partition.partition_key,
+                data: partition
+                    .data
+                    .as_ref()
+                    .map(encode_partition_data)
+                    .unwrap_or_default(),
+                live_row_count: partition.live_row_count,
+                was_truncated: partition.was_truncated,
+            })
+            .collect(),
+        digest,
+        tombstones_read: response.tombstones_read,
+        is_short_read: response.is_short_read,
+    }
+}
+
+fn read_digest_response(
+    storage: &StorageEngine,
+    request: &ReadDigestRequest,
+) -> ReadDigestResponsePayload {
+    match storage.read_partition(&request.keyspace, &request.table, &request.partition_key) {
+        Some(data) => ReadDigestResponsePayload {
+            digest: Digest::from_partition(&data).0,
+        },
+        None => ReadDigestResponsePayload {
+            digest: Digest::empty().0,
+        },
+    }
+}
+
+fn current_unix_seconds() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i32
+}
+
+fn encode_partition_data(data: &cassandra_storage::memtable::partition::PartitionData) -> Vec<u8> {
+    let mut out = Vec::new();
+    write_opt_i64(&mut out, data.tombstone_timestamp);
+    write_opt_i32(&mut out, data.tombstone_local_deletion_time);
+    write_u32(&mut out, data.rows.len());
+
+    for (clustering_key, row) in &data.rows {
+        write_bytes(&mut out, clustering_key);
+        out.push(u8::from(row.is_tombstone));
+        write_opt_i32(&mut out, row.local_deletion_time);
+        write_u32(&mut out, row.cells.len());
+
+        for cell in &row.cells {
+            write_bytes(&mut out, cell.column.as_bytes());
+            match &cell.value {
+                Some(value) => {
+                    out.push(1);
+                    write_bytes(&mut out, value);
+                }
+                None => out.push(0),
+            }
+            out.extend_from_slice(&cell.timestamp.to_be_bytes());
+            out.extend_from_slice(&cell.ttl.to_be_bytes());
+            write_opt_i32(&mut out, cell.local_deletion_time);
+            out.push(u8::from(cell.is_tombstone));
+        }
+    }
+
+    out
+}
+
+fn write_u32(out: &mut Vec<u8>, value: usize) {
+    out.extend_from_slice(&(value as u32).to_be_bytes());
+}
+
+fn write_bytes(out: &mut Vec<u8>, value: &[u8]) {
+    write_u32(out, value.len());
+    out.extend_from_slice(value);
+}
+
+fn write_opt_i64(out: &mut Vec<u8>, value: Option<i64>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
+fn write_opt_i32(out: &mut Vec<u8>, value: Option<i32>) {
+    match value {
+        Some(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cassandra_storage::commitlog::{CellMutation, CommitLogConfig, Mutation, MutationRow};
+    use cassandra_storage::engine::EngineConfig;
+    use tempfile::TempDir;
+
+    fn test_storage() -> (StorageEngine, TempDir) {
+        let temp = TempDir::new().unwrap();
+        let storage = StorageEngine::open(EngineConfig {
+            data_directories: vec![temp.path().join("data")],
+            commitlog: CommitLogConfig {
+                directory: temp.path().join("commitlog"),
+                ..CommitLogConfig::default()
+            },
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        (storage, temp)
+    }
+
+    fn write_cell(storage: &StorageEngine, keyspace: &str, table: &str, pk: &[u8], value: &[u8]) {
+        storage
+            .apply_mutation(&Mutation {
+                keyspace: keyspace.to_string(),
+                table: table.to_string(),
+                partition_key: pk.to_vec(),
+                rows: vec![MutationRow {
+                    clustering_key: Vec::new(),
+                    cells: vec![CellMutation {
+                        column: "v".to_string(),
+                        value: Some(value.to_vec()),
+                        timestamp: 1_000,
+                        ttl: 0,
+                        local_deletion_time: None,
+                        is_tombstone: false,
+                    }],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                }],
+                timestamp: 1_000,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone: None,
+                range_tombstones: Vec::new(),
+            })
+            .unwrap();
+    }
 
     #[test]
     fn read_data_request_roundtrip() {
@@ -206,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_read_data_valid() {
+    fn handle_read_data_without_storage_fails() {
         let request = ReadDataRequest {
             keyspace: "ks".to_string(),
             table: "tbl".to_string(),
@@ -218,12 +394,7 @@ mod tests {
         let response = ReadDataVerbHandler::handle(msg);
         assert!(response.is_some());
         let resp = response.unwrap();
-        assert_eq!(resp.header.verb, Verb::ReadDataResponse);
-        assert!(resp.is_response());
-
-        let body: ReadDataResponsePayload = serde_json::from_slice(&resp.payload).unwrap();
-        assert!(body.partitions.is_empty());
-        assert_eq!(body.tombstones_read, 0);
+        assert!(resp.is_failure());
     }
 
     #[test]
@@ -235,7 +406,33 @@ mod tests {
     }
 
     #[test]
-    fn handle_read_digest_valid() {
+    fn handle_read_data_reads_local_storage() {
+        let (storage, _temp) = test_storage();
+        write_cell(&storage, "ks", "tbl", b"pk1", b"value1");
+        let request = ReadDataRequest {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_key: b"pk1".to_vec(),
+        };
+        let payload = serde_json::to_vec(&request).unwrap();
+        let msg = Message::request(Verb::ReadData, 10, payload);
+
+        let response = ReadDataVerbHandler::handle_with_storage(msg, &storage);
+        assert!(response.is_some());
+        let resp = response.unwrap();
+        assert_eq!(resp.header.verb, Verb::ReadDataResponse);
+        assert!(resp.is_response());
+
+        let body: ReadDataResponsePayload = serde_json::from_slice(&resp.payload).unwrap();
+        assert_eq!(body.partitions.len(), 1);
+        assert_eq!(body.partitions[0].partition_key, b"pk1".to_vec());
+        assert_eq!(body.partitions[0].live_row_count, 1);
+        assert!(!body.partitions[0].data.is_empty());
+        assert_eq!(body.tombstones_read, 0);
+    }
+
+    #[test]
+    fn handle_read_digest_without_storage_fails() {
         let request = ReadDigestRequest {
             keyspace: "ks".to_string(),
             table: "tbl".to_string(),
@@ -247,10 +444,28 @@ mod tests {
         let response = ReadDigestVerbHandler::handle(msg);
         assert!(response.is_some());
         let resp = response.unwrap();
+        assert!(resp.is_failure());
+    }
+
+    #[test]
+    fn handle_read_digest_reads_local_storage() {
+        let (storage, _temp) = test_storage();
+        write_cell(&storage, "ks", "tbl", b"pk1", b"value1");
+        let request = ReadDigestRequest {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_key: b"pk1".to_vec(),
+        };
+        let payload = serde_json::to_vec(&request).unwrap();
+        let msg = Message::request(Verb::ReadDigest, 20, payload);
+
+        let response = ReadDigestVerbHandler::handle_with_storage(msg, &storage);
+        assert!(response.is_some());
+        let resp = response.unwrap();
         assert_eq!(resp.header.verb, Verb::ReadDigestResponse);
 
         let body: ReadDigestResponsePayload = serde_json::from_slice(&resp.payload).unwrap();
-        assert_eq!(body.digest, [0u8; 8]);
+        assert_ne!(body.digest, [0u8; 8]);
     }
 
     #[test]

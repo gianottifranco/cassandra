@@ -227,7 +227,10 @@ pub fn netstats(client: &AdminClient) {
                 for (cmd, stats) in commands {
                     let pending = stats["pending"].as_u64().unwrap_or(0);
                     let completed = stats["completed"].as_u64().unwrap_or(0);
-                    println!("  {:<20} pending: {}, completed: {}", cmd, pending, completed);
+                    println!(
+                        "  {:<20} pending: {}, completed: {}",
+                        cmd, pending, completed
+                    );
                 }
             }
         }

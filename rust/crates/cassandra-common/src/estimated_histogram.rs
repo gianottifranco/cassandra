@@ -39,7 +39,10 @@ impl EstimatedHistogram {
             }
         }
         let buckets = (0..num_buckets).map(|_| AtomicI64::new(0)).collect();
-        Self { bucket_offsets: offsets, buckets }
+        Self {
+            bucket_offsets: offsets,
+            buckets,
+        }
     }
 
     /// Create with the default 164 buckets.
@@ -121,7 +124,11 @@ impl EstimatedHistogram {
 
     /// Merge another histogram's counts into this one. Panics if sizes differ.
     pub fn merge(&self, other: &EstimatedHistogram) {
-        assert_eq!(self.buckets.len(), other.buckets.len(), "histogram size mismatch");
+        assert_eq!(
+            self.buckets.len(),
+            other.buckets.len(),
+            "histogram size mismatch"
+        );
         for (a, b) in self.buckets.iter().zip(other.buckets.iter()) {
             a.fetch_add(b.load(Ordering::Relaxed), Ordering::Relaxed);
         }

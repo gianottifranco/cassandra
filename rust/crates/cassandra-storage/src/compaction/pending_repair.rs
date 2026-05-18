@@ -75,11 +75,7 @@ impl PendingRepairManager {
     }
 
     /// Add an SSTable to a repair session.
-    pub fn add_sstable(
-        &self,
-        session_id: &Uuid,
-        sstable_id: SSTableId,
-    ) -> Result<(), String> {
+    pub fn add_sstable(&self, session_id: &Uuid, sstable_id: SSTableId) -> Result<(), String> {
         let mut sessions = self.sessions.write();
         let session = sessions
             .get_mut(session_id)
@@ -89,11 +85,7 @@ impl PendingRepairManager {
     }
 
     /// Remove an SSTable from a repair session.
-    pub fn remove_sstable(
-        &self,
-        session_id: &Uuid,
-        sstable_id: &SSTableId,
-    ) -> Result<(), String> {
+    pub fn remove_sstable(&self, session_id: &Uuid, sstable_id: &SSTableId) -> Result<(), String> {
         let mut sessions = self.sessions.write();
         let session = sessions
             .get_mut(session_id)

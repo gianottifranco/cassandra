@@ -173,10 +173,7 @@ mod tests {
         assert_eq!(map.get("cluster_name").unwrap(), "TestCluster");
         assert_eq!(map.get("listen_port").unwrap(), "7000");
         assert_eq!(map.get("rpc_port").unwrap(), "9042");
-        assert_eq!(
-            map.get("tokens").unwrap(),
-            "-9223372036854775808,0"
-        );
+        assert_eq!(map.get("tokens").unwrap(), "-9223372036854775808,0");
         assert_eq!(map.get("bootstrapped").unwrap(), "COMPLETED");
         assert_eq!(map.len(), 18);
     }

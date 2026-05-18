@@ -100,13 +100,12 @@ pub fn load_counter_cache(path: &Path, cache: &CounterCache) -> io::Result<usize
         Err(e) => return Err(e),
     };
 
-    let file: CacheFile<(CounterCacheKey, Vec<u8>)> =
-        serde_json::from_str(&data).map_err(|e| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("corrupt counter cache file: {e}"),
-            )
-        })?;
+    let file: CacheFile<(CounterCacheKey, Vec<u8>)> = serde_json::from_str(&data).map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("corrupt counter cache file: {e}"),
+        )
+    })?;
 
     if file.version != CACHE_VERSION {
         return Err(io::Error::new(

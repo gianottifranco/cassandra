@@ -556,7 +556,10 @@ audit_logging_options:
         assert_eq!(cfg.native_transport_max_concurrent_connections, -1);
         assert_eq!(cfg.native_transport_max_concurrent_connections_per_ip, -1);
         assert_eq!(cfg.native_transport_max_frame_size, 256 * 1024 * 1024);
-        assert_eq!(cfg.native_transport_max_request_data_in_flight, 512 * 1024 * 1024);
+        assert_eq!(
+            cfg.native_transport_max_request_data_in_flight,
+            512 * 1024 * 1024
+        );
         assert!(!cfg.native_transport_rate_limiting_enabled);
         assert_eq!(cfg.native_transport_max_requests_per_second, 25_000);
         assert_eq!(cfg.native_transport_idle_timeout_seconds, 0);

@@ -43,6 +43,7 @@ notify = { workspace = true }
 
 # Timestamps
 byteorder = { workspace = true }
+sha2 = { workspace = true }
 
 # Crypto (encryption-at-rest)
 aes = { workspace = true }

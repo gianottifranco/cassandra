@@ -78,7 +78,10 @@ impl TableMigrationState {
     /// Check if migration is complete for all tracked keys.
     pub fn is_complete(&self) -> bool {
         !self.key_states.is_empty()
-            && self.key_states.values().all(|s| *s == KeyMigrationState::Accord)
+            && self
+                .key_states
+                .values()
+                .all(|s| *s == KeyMigrationState::Accord)
     }
 
     /// Number of tracked keys.

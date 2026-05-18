@@ -27,8 +27,8 @@
 //! - `org.apache.cassandra.tcm.Commit`
 
 use std::cmp::min;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::node::NodeId;
 use crate::tcm::{Epoch, TcmMetadata, Transformation};
@@ -45,10 +45,7 @@ pub enum CommitResult {
     /// The transformation was rejected for a logical reason.
     Rejected(String),
     /// The caller's expected epoch does not match the current epoch.
-    StaleEpoch {
-        expected: Epoch,
-        actual: Epoch,
-    },
+    StaleEpoch { expected: Epoch, actual: Epoch },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -248,11 +245,7 @@ mod tests {
     #[test]
     fn commit_success() {
         let processor = LocalProcessor::new(TcmMetadata::new());
-        let request = CommitRequest::new(
-            register_transformation(1, 7001),
-            node_id(1),
-            None,
-        );
+        let request = CommitRequest::new(register_transformation(1, 7001), node_id(1), None);
 
         let result = processor.commit(request);
         assert_eq!(result, CommitResult::Success(Epoch::FIRST));
@@ -347,11 +340,8 @@ mod tests {
                     for i in 0..commits_per_thread {
                         let n = (t * 1000 + i + 1) as u128;
                         let port = (9000 + t * 1000 + i) as u16;
-                        let request = CommitRequest::new(
-                            register_transformation(n, port),
-                            node_id(n),
-                            None,
-                        );
+                        let request =
+                            CommitRequest::new(register_transformation(n, port), node_id(n), None);
                         if let CommitResult::Success(_) = proc.commit(request) {
                             successes += 1;
                         }
@@ -444,14 +434,14 @@ mod tests {
             max_delay_ms: 5000,
         };
 
-        assert_eq!(policy.delay_for_attempt(0), 100);   // 100 * 2^0
-        assert_eq!(policy.delay_for_attempt(1), 200);   // 100 * 2^1
-        assert_eq!(policy.delay_for_attempt(2), 400);   // 100 * 2^2
-        assert_eq!(policy.delay_for_attempt(3), 800);   // 100 * 2^3
-        assert_eq!(policy.delay_for_attempt(4), 1600);  // 100 * 2^4
-        assert_eq!(policy.delay_for_attempt(5), 3200);  // 100 * 2^5
-        assert_eq!(policy.delay_for_attempt(6), 5000);  // capped at max
-        assert_eq!(policy.delay_for_attempt(7), 5000);  // still capped
+        assert_eq!(policy.delay_for_attempt(0), 100); // 100 * 2^0
+        assert_eq!(policy.delay_for_attempt(1), 200); // 100 * 2^1
+        assert_eq!(policy.delay_for_attempt(2), 400); // 100 * 2^2
+        assert_eq!(policy.delay_for_attempt(3), 800); // 100 * 2^3
+        assert_eq!(policy.delay_for_attempt(4), 1600); // 100 * 2^4
+        assert_eq!(policy.delay_for_attempt(5), 3200); // 100 * 2^5
+        assert_eq!(policy.delay_for_attempt(6), 5000); // capped at max
+        assert_eq!(policy.delay_for_attempt(7), 5000); // still capped
     }
 
     #[test]

@@ -65,15 +65,9 @@ pub enum StorageEvent {
         bytes_written: u64,
     },
     /// Repair session status changed.
-    RepairStatusChanged {
-        session_id: Uuid,
-        status: String,
-    },
+    RepairStatusChanged { session_id: Uuid, status: String },
     /// A table truncation completed.
-    TruncateCompleted {
-        keyspace: String,
-        table: String,
-    },
+    TruncateCompleted { keyspace: String, table: String },
 }
 
 // ─── Listener trait ──────────────────────────────────────────────────────────

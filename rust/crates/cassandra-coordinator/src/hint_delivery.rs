@@ -26,7 +26,7 @@ use tracing::{debug, info, warn};
 use cassandra_cluster_metadata::Endpoint;
 use cassandra_messaging::{Message, MessagingService, Verb};
 
-use crate::hints::{Hint, HintMetrics, HintStore, HintedHandoffManager};
+use crate::hints::HintedHandoffManager;
 use crate::verb_handlers::hint_handler::HintRequest;
 
 // ─── Delivery Metrics ───────────────────────────────────────────
@@ -80,10 +80,7 @@ pub struct HintDeliveryService {
 
 impl HintDeliveryService {
     /// Create a new hint delivery service.
-    pub fn new(
-        manager: Arc<HintedHandoffManager>,
-        messaging: Arc<MessagingService>,
-    ) -> Self {
+    pub fn new(manager: Arc<HintedHandoffManager>, messaging: Arc<MessagingService>) -> Self {
         Self {
             manager,
             messaging,
@@ -167,7 +164,11 @@ impl HintDeliveryService {
         let window_ms = self.manager.store().config().max_hint_window.as_millis() as i64;
         let cutoff = now_ms - window_ms;
 
-        let throttle_bps = self.manager.store().config().delivery_throttle_bytes_per_sec;
+        let throttle_bps = self
+            .manager
+            .store()
+            .config()
+            .delivery_throttle_bytes_per_sec;
 
         let mut delivered = 0u64;
         let mut failed = 0u64;
@@ -360,9 +361,7 @@ mod tests {
     fn make_service() -> (HintDeliveryService, Endpoint) {
         let config = HintConfig::default();
         let manager = Arc::new(HintedHandoffManager::new(config));
-        let messaging = Arc::new(MessagingService::new(
-            "127.0.0.1:0".parse().unwrap(),
-        ));
+        let messaging = Arc::new(MessagingService::new("127.0.0.1:0".parse().unwrap()));
         let target = Endpoint::new("127.0.0.2:7000".parse().unwrap());
 
         let svc = HintDeliveryService::new(manager, messaging);
@@ -378,13 +377,8 @@ mod tests {
     #[test]
     fn has_hints_after_store() {
         let (svc, target) = make_service();
-        let mutation = CoordinatedMutation::simple(
-            "ks".into(),
-            "tbl".into(),
-            vec![1],
-            vec![],
-            1000,
-        );
+        let mutation =
+            CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000);
         svc.manager().store().store_hint(target, mutation);
         assert!(svc.has_hints_for(&target));
     }
@@ -401,13 +395,8 @@ mod tests {
     async fn deliver_with_hints_no_listener() {
         // Hints exist but no listener on target — delivery will fail.
         let (svc, target) = make_service();
-        let mutation = CoordinatedMutation::simple(
-            "ks".into(),
-            "tbl".into(),
-            vec![1],
-            vec![],
-            1000,
-        );
+        let mutation =
+            CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000);
         svc.manager().store().store_hint(target, mutation);
 
         let result = svc.deliver_hints(target).await;
@@ -445,9 +434,7 @@ mod tests {
     fn with_max_retries_builder() {
         let config = HintConfig::default();
         let manager = Arc::new(HintedHandoffManager::new(config));
-        let messaging = Arc::new(MessagingService::new(
-            "127.0.0.1:0".parse().unwrap(),
-        ));
+        let messaging = Arc::new(MessagingService::new("127.0.0.1:0".parse().unwrap()));
         let svc = HintDeliveryService::new(manager, messaging).with_max_retries(5);
         assert_eq!(svc.max_retries, 5);
     }
@@ -455,13 +442,8 @@ mod tests {
     #[tokio::test]
     async fn deliver_paused_returns_empty() {
         let (svc, target) = make_service();
-        let mutation = CoordinatedMutation::simple(
-            "ks".into(),
-            "tbl".into(),
-            vec![1],
-            vec![],
-            1000,
-        );
+        let mutation =
+            CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000);
         svc.manager().store().store_hint(target, mutation);
 
         // Pause delivery.
@@ -477,13 +459,8 @@ mod tests {
     #[tokio::test]
     async fn hints_in_progress_returns_to_zero() {
         let (svc, target) = make_service();
-        let mutation = CoordinatedMutation::simple(
-            "ks".into(),
-            "tbl".into(),
-            vec![1],
-            vec![],
-            1000,
-        );
+        let mutation =
+            CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000);
         svc.manager().store().store_hint(target, mutation);
 
         let _result = svc.deliver_hints(target).await;

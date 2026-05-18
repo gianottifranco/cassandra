@@ -316,7 +316,7 @@ pub struct DatacenterWriteResponseHandler {
     /// Per-DC failure counts.
     dc_failures: Mutex<HashMap<String, usize>>,
     /// Total number of contacted replicas.
-    total_replicas: usize,
+    _total_replicas: usize,
     /// Contacted replicas.
     contacted: Vec<Endpoint>,
     /// Mapping from endpoint to datacenter.
@@ -360,7 +360,7 @@ impl DatacenterWriteResponseHandler {
             dc_acks: Mutex::new(dc_acks),
             dc_required,
             dc_failures: Mutex::new(dc_failures),
-            total_replicas,
+            _total_replicas: total_replicas,
             contacted,
             endpoint_dc,
             created_at: Instant::now(),
@@ -445,11 +445,7 @@ impl DatacenterWriteResponseHandler {
             let got = acks.get(dc).copied().unwrap_or(0);
             let failed = failures.get(dc).copied().unwrap_or(0);
             // Count total replicas in this DC
-            let dc_total = self
-                .endpoint_dc
-                .values()
-                .filter(|d| *d == dc)
-                .count();
+            let dc_total = self.endpoint_dc.values().filter(|d| *d == dc).count();
             let remaining = dc_total.saturating_sub(got + failed);
             if got + remaining < required {
                 return true;

@@ -20,11 +20,12 @@
 //! (STCS, LCS, TWCS, UCS), CDC, snapshots, and incremental backups.
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
@@ -34,9 +35,9 @@ use crate::cache::row_cache::RowCache;
 use crate::commitlog::{CommitLog, CommitLogConfig, Mutation};
 use crate::compaction::{
     CompactionMetrics, CompactionStrategy, CompactionStrategyType, SSTableMetadata,
-    create_strategy, merge_partitions,
+    create_strategy, create_strategy_with_options, merge_partitions, split_compaction_output,
 };
-use crate::index::{IndexDefinition, IndexManager, IndexType, SecondaryIndex};
+use crate::index::{IndexDefinition, IndexManager, IndexStatus, IndexType, SecondaryIndex};
 #[cfg(feature = "materialized-views")]
 use crate::materialized_views::{MaterializedViewDefinition, ViewManager};
 use crate::memtable::partition::{Cell, PartitionData, Row};
@@ -60,6 +61,8 @@ pub struct EngineConfig {
     pub gc_grace_seconds: i32,
     /// Compaction strategy type.
     pub compaction_strategy_type: CompactionStrategyType,
+    /// Java table compaction option map for the selected strategy.
+    pub compaction_options: HashMap<String, String>,
     /// SSTable format to use for new SSTables.
     pub sstable_format: SSTableFormat,
     /// Memtable type.
@@ -76,11 +79,63 @@ impl Default for EngineConfig {
             memtable_flush_threshold: 128 * 1024 * 1024,
             gc_grace_seconds: 864_000, // 10 days
             compaction_strategy_type: CompactionStrategyType::default(),
+            compaction_options: HashMap::new(),
             sstable_format: SSTableFormat::default(),
             memtable_type: MemtableType::default(),
             incremental_backup: IncrementalBackupConfig::default(),
         }
     }
+}
+
+impl EngineConfig {
+    /// Return a Java-style compaction writer output cap, if configured.
+    pub fn compaction_output_max_size_bytes(&self) -> Option<u64> {
+        if let Some(size_mb) = self
+            .compaction_options
+            .get("sstable_size_in_mb")
+            .and_then(|value| value.trim().parse::<u64>().ok())
+        {
+            return Some(size_mb.saturating_mul(1024 * 1024));
+        }
+
+        self.compaction_options
+            .get("target_sstable_size")
+            .and_then(|value| parse_human_size_bytes(value).ok())
+    }
+}
+
+fn parse_human_size_bytes(value: &str) -> Result<u64, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("size must not be empty".to_string());
+    }
+
+    let split_at = trimmed
+        .find(|ch: char| !(ch.is_ascii_digit() || ch == '.'))
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split_at);
+    let amount = number
+        .parse::<f64>()
+        .map_err(|_| format!("{value} is not a valid size"))?;
+    if amount < 0.0 || !amount.is_finite() {
+        return Err(format!("{value} is not a valid size"));
+    }
+
+    let multiplier = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1_f64,
+        "k" | "kb" | "kib" => 1024_f64,
+        "m" | "mb" | "mib" => 1024_f64.powi(2),
+        "g" | "gb" | "gib" => 1024_f64.powi(3),
+        "t" | "tb" | "tib" => 1024_f64.powi(4),
+        "p" | "pb" | "pib" => 1024_f64.powi(5),
+        other => return Err(format!("{other} is not a supported size suffix")),
+    };
+
+    let bytes = (amount * multiplier).ceil();
+    if bytes > u64::MAX as f64 {
+        return Err(format!("{value} is out of range"));
+    }
+    Ok(bytes as u64)
 }
 
 // ─── Engine Stats ──────────────────────────────────────────────────────────
@@ -104,6 +159,18 @@ enum SSTableHandle {
 }
 
 impl SSTableHandle {
+    fn descriptor(&self) -> &SSTableDescriptor {
+        match self {
+            SSTableHandle::Big(r) => r.descriptor(),
+            SSTableHandle::Bti(r) => r.descriptor(),
+        }
+    }
+
+    fn belongs_to(&self, keyspace: &str, table: &str) -> bool {
+        let descriptor = self.descriptor();
+        descriptor.keyspace == keyspace && descriptor.table == table
+    }
+
     fn generation(&self) -> SSTableId {
         match self {
             SSTableHandle::Big(r) => r.generation(),
@@ -244,7 +311,15 @@ impl StorageEngine {
             MemtableManager::with_type(config.memtable_flush_threshold, config.memtable_type);
 
         // Create compaction strategy
-        let compaction_strategy = create_strategy(config.compaction_strategy_type);
+        let compaction_strategy = if config.compaction_options.is_empty() {
+            create_strategy(config.compaction_strategy_type)
+        } else {
+            create_strategy_with_options(
+                config.compaction_strategy_type,
+                &config.compaction_options,
+            )
+            .map_err(|err| format!("invalid compaction options: {err}"))?
+        };
 
         // Create key cache
         let key_cache = KeyCache::new(KeyCacheConfig::default());
@@ -487,6 +562,9 @@ impl StorageEngine {
         // Read from SSTables (newest first)
         let sstables = self.sstables.read();
         for sst in sstables.iter().rev() {
+            if !sst.belongs_to(keyspace, table) {
+                continue;
+            }
             if !sst.might_contain_key(partition_key) {
                 continue;
             }
@@ -518,6 +596,110 @@ impl StorageEngine {
         result
     }
 
+    /// Scan all partitions in a table by merging active memtable entries and SSTables.
+    ///
+    /// ## Java Oracle
+    /// `org.apache.cassandra.db.ColumnFamilyStore.getRangeSlice()`
+    pub fn scan_all_partitions(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Vec<(Vec<u8>, PartitionData)> {
+        let cf_name = format!("{keyspace}.{table}");
+        let mut keys = BTreeSet::new();
+
+        for (key, _) in self.memtable_manager.active_partitions(&cf_name) {
+            keys.insert(key);
+        }
+
+        let sstables = self.sstables.read();
+        for sst in sstables
+            .iter()
+            .filter(|sst| sst.belongs_to(keyspace, table))
+        {
+            if let Ok(partitions) = sst.iter_partitions() {
+                for (key, _) in partitions {
+                    keys.insert(key);
+                }
+            }
+        }
+        drop(sstables);
+
+        keys.into_iter()
+            .filter_map(|key| {
+                self.read_partition(keyspace, table, &key)
+                    .map(|partition| (key, partition))
+            })
+            .collect()
+    }
+
+    /// Truncate a table by discarding its active memtable, loaded SSTables,
+    /// secondary-index contents, and table-scoped cache entries.
+    pub fn truncate_table(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let cf_name = format!("{keyspace}.{table}");
+
+        if let Some(old_memtable) = self
+            .memtable_manager
+            .switch_memtable(&cf_name, self.commitlog.current_segment_id())
+        {
+            self.memtable_manager.flush_complete(old_memtable.id);
+        }
+
+        let table_hash = Self::table_hash(keyspace, table);
+        if let Some(ref cache) = self.row_cache {
+            cache.invalidate_table(table_hash);
+        }
+
+        if let Some(idx_mgr) = self.index_managers.read().get(&cf_name).cloned() {
+            idx_mgr.truncate_all()?;
+        }
+
+        let mut removed_generations = Vec::new();
+        let mut component_files = Vec::new();
+        {
+            let mut sstables = self.sstables.write();
+            let existing = std::mem::take(&mut *sstables);
+            let mut retained = Vec::with_capacity(existing.len());
+
+            for sstable in existing {
+                if sstable.keyspace() == keyspace && sstable.table() == table {
+                    removed_generations.push(sstable.generation());
+                    component_files.extend(sstable.descriptor_component_files());
+                } else {
+                    retained.push(sstable);
+                }
+            }
+
+            *sstables = retained;
+        }
+
+        if let Some(ref key_cache) = self.key_cache {
+            for generation in &removed_generations {
+                key_cache.invalidate_sstable(*generation);
+            }
+        }
+
+        for path in component_files {
+            match fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => return Err(Box::new(err)),
+            }
+        }
+
+        info!(
+            keyspace,
+            table,
+            sstables_removed = removed_generations.len(),
+            "Truncated table"
+        );
+        Ok(())
+    }
+
     /// Search an exact-match index (2i or SAI).
     pub fn search_index(
         &self,
@@ -526,6 +708,21 @@ impl StorageEngine {
         index_name: &str,
         term: &[u8],
     ) -> Result<Vec<PartitionData>, Box<dyn std::error::Error>> {
+        Ok(self
+            .search_index_with_keys(keyspace, table, index_name, term)?
+            .into_iter()
+            .map(|(_, pd)| pd)
+            .collect())
+    }
+
+    /// Search an exact-match index and preserve the matching partition key.
+    pub fn search_index_with_keys(
+        &self,
+        keyspace: &str,
+        table: &str,
+        index_name: &str,
+        term: &[u8],
+    ) -> Result<Vec<(Vec<u8>, PartitionData)>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
         let mgr = mgrs.get(&cf_name).ok_or("Index manager not found")?;
@@ -537,7 +734,7 @@ impl StorageEngine {
         // In production this returns Iterators to avoid holding whole partitions in RAM.
         for entry in entries {
             if let Some(pd) = self.read_partition(keyspace, table, &entry.partition_key) {
-                results.push(pd);
+                results.push((entry.partition_key, pd));
             }
         }
         Ok(results)
@@ -552,6 +749,22 @@ impl StorageEngine {
         vector: &[u8],
         top_k: usize,
     ) -> Result<Vec<(PartitionData, f32)>, Box<dyn std::error::Error>> {
+        Ok(self
+            .search_vector_index_with_keys(keyspace, table, index_name, vector, top_k)?
+            .into_iter()
+            .map(|(_, pd, score)| (pd, score))
+            .collect())
+    }
+
+    /// Search a vector index and preserve the matching partition key.
+    pub fn search_vector_index_with_keys(
+        &self,
+        keyspace: &str,
+        table: &str,
+        index_name: &str,
+        vector: &[u8],
+        top_k: usize,
+    ) -> Result<Vec<(Vec<u8>, PartitionData, f32)>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
         let mgr = mgrs.get(&cf_name).ok_or("Index manager not found")?;
@@ -561,7 +774,7 @@ impl StorageEngine {
         let mut results = Vec::new();
         for (entry, score) in entries {
             if let Some(pd) = self.read_partition(keyspace, table, &entry.partition_key) {
-                results.push((pd, score));
+                results.push((entry.partition_key, pd, score));
             }
         }
         Ok(results)
@@ -792,8 +1005,8 @@ impl StorageEngine {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let index_name = definition.name.clone();
 
-        // Ensure index manager exists
-        let _idx_mgr = {
+        // Ensure index manager exists.
+        let idx_mgr = {
             let mut mgrs = self.index_managers.write();
             let entry = mgrs
                 .entry(cf_name.to_string())
@@ -801,8 +1014,11 @@ impl StorageEngine {
             entry.clone()
         };
 
-        // For now, if the index exists, we just let it be, but ideally we drop and recreate.
-        // Create the index instance
+        if idx_mgr.has_index(&index_name) {
+            idx_mgr.unregister(&index_name);
+        }
+        idx_mgr.set_status(&index_name, IndexStatus::Building);
+
         let index: Box<dyn SecondaryIndex> = match definition.index_type {
             IndexType::Legacy => {
                 Box::new(crate::index::legacy::LegacyIndex::new(definition.clone()))
@@ -816,63 +1032,35 @@ impl StorageEngine {
                     "SASI index not enabled in build metrics",
                 )));
             }
-            IndexType::Sai => {
-                // SAI is built differently per SSTable
-                return Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Unsupported,
-                    "SAI complete rebuild not implemented yet via StorageEngine::rebuild_index",
-                )));
-            }
+            IndexType::Sai => Box::new(crate::index::sai::SaiIndex::new(definition.clone())),
         };
-
-        // We can't mutate the Arc directly if it's shared, but here IndexManager uses inner mutability?
-        // Wait, IndexManager `register` takes `&mut self`. We need to register it.
-        // It's probably easier to recreate a new IndexManager for this CF, add all existing indexes, plus the new one.
-        // Or make IndexManager fully thread-safe (currently `indexes: Vec<Box<dyn SecondaryIndex>>` is not RwLock protected).
-        // Let's create an error here if we can't mutate.
-        // For simplicity, let's assume we can replace the IndexManager or it uses RwLock.
-        // But since we just added it, we will just use a hack: to rebuild, we read all data from SSTables and Memtables.
-        // We will defer building the index directly.
 
         info!(cf = cf_name, index = index_name, "Starting index rebuild");
 
-        // Read all partitions from SSTables
-        let mut sources = Vec::new();
-        let sstables = self.sstables.read();
-        for sst in sstables.iter() {
-            // For a single CF, we should filter SSTables by CF name. But here we assume SSTables are mixed
-            // or we filter by checking something. Actually StorageEngine holds ALL sstables combined right now.
-            // But we can just iterate.
-            if let Ok(parts) = sst.iter_partitions() {
-                sources.push(parts);
-            }
-        }
-        drop(sstables);
-
-        // Feed to index sequentially for now. In real Cassandra, this is async and parallel.
         let mut count = 0;
-        for source in sources {
-            for (pk, partition) in source {
-                for (ck, row) in partition.rows {
-                    for cell in row.cells {
-                        if !cell.is_tombstone && cell.column == definition.column {
-                            if let Some(val) = &cell.value {
-                                let entry = crate::index::IndexEntry {
-                                    term: val.clone(),
-                                    partition_key: pk.clone(),
-                                    clustering_key: ck.clone(),
-                                };
-                                let _ = index.insert(&entry);
-                                count += 1;
-                            }
+        let (keyspace, table) = cf_name
+            .split_once('.')
+            .ok_or_else(|| format!("Invalid column family name '{}'", cf_name))?;
+        for (pk, partition) in self.scan_all_partitions(keyspace, table) {
+            for (ck, row) in partition.rows {
+                for cell in row.cells {
+                    if !cell.is_tombstone && cell.column == definition.column {
+                        if let Some(val) = &cell.value {
+                            let entry = crate::index::IndexEntry {
+                                term: val.clone(),
+                                partition_key: pk.clone(),
+                                clustering_key: ck.clone(),
+                            };
+                            index.insert(&entry)?;
+                            count += 1;
                         }
                     }
                 }
             }
         }
 
-        // We can't register unless `IndexManager` allows interior mutability.
-        // We will fix `IndexManager` next.
+        idx_mgr.register(index);
+        idx_mgr.set_status(&index_name, IndexStatus::QueryReady);
 
         info!(
             cf = cf_name,
@@ -898,78 +1086,62 @@ impl StorageEngine {
 
         info!(view = %view_name, base_table = %base_table, "Starting materialized view backfill");
 
-        // 2. Read all partitions from SSTables (simplified: we read all SSTables and filter by CF)
-        // Note: in a real implementation, we would query the `StorageEngine` for specifically the base table's SSTables
-        // and Memtables using a scanner. Here we do an iteration for MVP.
         let mut count = 0;
-        let sstables = self.sstables.read();
-        for sst in sstables.iter() {
-            if sst.keyspace() == ks && sst.table() == base_table {
-                if let Ok(parts) = sst.iter_partitions() {
-                    for (pk, partition) in parts {
-                        for (ck, row) in partition.rows {
-                            let mut cols_map = std::collections::HashMap::new();
-                            let mut ts = 0;
-                            let mut tombstone = row.is_tombstone;
-                            for cell in row.cells {
-                                ts = ts.max(cell.timestamp);
-                                if cell.is_tombstone {
-                                    tombstone = true;
-                                }
-                                cols_map.insert(cell.column, cell.value);
-                            }
-
-                            let view_muts = self.view_manager.generate_view_updates(
-                                &ks,
-                                &base_table,
-                                &pk,
-                                &cols_map,
-                                ts,
-                                tombstone,
-                            );
-
-                            for view_mut in view_muts.mutations {
-                                let mut cells = Vec::new();
-                                for (col_name, col_value) in view_mut.columns {
-                                    cells.push(crate::commitlog::CellMutation {
-                                        column: col_name,
-                                        value: col_value,
-                                        timestamp: ts,
-                                        ttl: 0,
-                                        local_deletion_time: None,
-                                        is_tombstone: view_mut.is_delete,
-                                    });
-                                }
-                                let m = Mutation {
-                                    keyspace: view_mut.keyspace,
-                                    table: view_mut.view_table,
-                                    partition_key: view_mut.partition_key,
-                                    rows: vec![crate::commitlog::MutationRow {
-                                        clustering_key: ck.clone(),
-                                        cells,
-                                        is_tombstone: view_mut.is_delete,
-                                        local_deletion_time: None,
-                                    }],
-                                    timestamp: ts,
-                                    cdc_enabled: false,
-                                    static_cells: Vec::new(),
-                                    partition_tombstone: None,
-                                    range_tombstones: Vec::new(),
-                                };
-                                let _ = self.apply_mutation(&m);
-                                count += 1;
-                            }
-                        }
+        for (pk, partition) in self.scan_all_partitions(&ks, &base_table) {
+            for (ck, row) in partition.rows {
+                let mut cols_map = std::collections::HashMap::new();
+                let mut ts = 0;
+                let mut tombstone = row.is_tombstone;
+                for cell in row.cells {
+                    ts = ts.max(cell.timestamp);
+                    if cell.is_tombstone {
+                        tombstone = true;
                     }
+                    cols_map.insert(cell.column, cell.value);
+                }
+
+                let view_muts = self.view_manager.generate_view_updates(
+                    &ks,
+                    &base_table,
+                    &pk,
+                    &cols_map,
+                    ts,
+                    tombstone,
+                );
+
+                for view_mut in view_muts.mutations {
+                    let mut cells = Vec::new();
+                    for (col_name, col_value) in view_mut.columns {
+                        cells.push(crate::commitlog::CellMutation {
+                            column: col_name,
+                            value: col_value,
+                            timestamp: ts,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: view_mut.is_delete,
+                        });
+                    }
+                    let m = Mutation {
+                        keyspace: view_mut.keyspace,
+                        table: view_mut.view_table,
+                        partition_key: view_mut.partition_key,
+                        rows: vec![crate::commitlog::MutationRow {
+                            clustering_key: ck.clone(),
+                            cells,
+                            is_tombstone: view_mut.is_delete,
+                            local_deletion_time: None,
+                        }],
+                        timestamp: ts,
+                        cdc_enabled: false,
+                        static_cells: Vec::new(),
+                        partition_tombstone: None,
+                        range_tombstones: Vec::new(),
+                    };
+                    let _ = self.apply_mutation(&m);
+                    count += 1;
                 }
             }
         }
-        drop(sstables);
-
-        // Also note: For a complete backfill we would also need to iterate Memtables,
-        // but since `iter_partitions` on `Memtable` isn't fully structured for generic scans,
-        // and this MVP replicates `rebuild_index` which also only scans SSTables, we stop here.
-        // We assume Memtables will be flushed eventually or have been flushed.
 
         info!(view = %view_name, mutations_applied = count, "Finished materialized view backfill");
         Ok(())
@@ -1019,49 +1191,57 @@ impl StorageEngine {
             return Ok(());
         }
 
-        // Write new SSTable
-        let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+        let output_batches =
+            split_compaction_output(&merged, self.config.compaction_output_max_size_bytes());
         let data_dir = &self.config.data_directories[0];
-        let mut descriptor =
-            SSTableDescriptor::new(data_dir, &group_keyspace, &group_table, generation);
-        descriptor.format = self.config.sstable_format;
+        let mut new_handles = Vec::new();
+        let mut written_bytes = 0_u64;
+        let mut output_generations = Vec::new();
 
-        // Give SAI indexes a chance to build segments
-        if let Some(idx_mgr) = self.index_managers.read().get(&group_cf_name).cloned() {
-            if let Err(e) = idx_mgr.build_sai_segments(generation, &merged) {
-                error!(cf = group_cf_name, error = %e, "Failed to build SAI segments during compaction");
-            }
-        }
+        for batch in output_batches {
+            let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+            output_generations.push(generation);
+            let mut descriptor =
+                SSTableDescriptor::new(data_dir, &group_keyspace, &group_table, generation);
+            descriptor.format = self.config.sstable_format;
 
-        let written_bytes = match self.config.sstable_format {
-            SSTableFormat::Big => {
-                let writer = SSTableWriter::new(descriptor.clone());
-                let stats = writer.write(&merged)?;
-                stats.data_size
-            }
-            SSTableFormat::Bti => {
-                let writer = BtiWriter::new(descriptor.clone());
-                let stats = writer.write(&merged)?;
-                stats.data_size
-            }
-        };
-
-        // Open the new SSTable and replace old ones
-        let new_handle = match self.config.sstable_format {
-            SSTableFormat::Big => {
-                let mut reader = SSTableReader::open(descriptor)?;
-                if let Some(ref cache) = self.key_cache {
-                    reader = reader.with_key_cache(Arc::clone(cache));
+            // Give SAI indexes a chance to build segments
+            if let Some(idx_mgr) = self.index_managers.read().get(&group_cf_name).cloned() {
+                if let Err(e) = idx_mgr.build_sai_segments(generation, &batch) {
+                    error!(cf = group_cf_name, error = %e, "Failed to build SAI segments during compaction");
                 }
-                SSTableHandle::Big(reader)
             }
-            SSTableFormat::Bti => SSTableHandle::Bti(BtiReader::open(descriptor)?),
-        };
+
+            written_bytes += match self.config.sstable_format {
+                SSTableFormat::Big => {
+                    let writer = SSTableWriter::new(descriptor.clone());
+                    let stats = writer.write(&batch)?;
+                    stats.data_size
+                }
+                SSTableFormat::Bti => {
+                    let writer = BtiWriter::new(descriptor.clone());
+                    let stats = writer.write(&batch)?;
+                    stats.data_size
+                }
+            };
+
+            let new_handle = match self.config.sstable_format {
+                SSTableFormat::Big => {
+                    let mut reader = SSTableReader::open(descriptor)?;
+                    if let Some(ref cache) = self.key_cache {
+                        reader = reader.with_key_cache(Arc::clone(cache));
+                    }
+                    SSTableHandle::Big(reader)
+                }
+                SSTableFormat::Bti => SSTableHandle::Bti(BtiReader::open(descriptor)?),
+            };
+            new_handles.push(new_handle);
+        }
 
         {
             let mut sstables = self.sstables.write();
             sstables.retain(|sst| !group_ids.contains(&sst.generation()));
-            sstables.push(new_handle);
+            sstables.extend(new_handles);
         }
 
         // Update metrics
@@ -1080,7 +1260,7 @@ impl StorageEngine {
 
         info!(
             group = ?group_ids,
-            generation,
+            generations = ?output_generations,
             merged_partitions = merged.len(),
             "Compaction complete"
         );
@@ -1108,35 +1288,39 @@ impl StorageEngine {
             if !data_dir.exists() {
                 continue;
             }
-            for entry in fs::read_dir(data_dir)? {
-                let entry = entry?;
-                let fname = entry.file_name();
-                let fname = fname.to_string_lossy();
-                if fname.ends_with("-TOC.txt") {
-                    // Parse descriptor from TOC filename
-                    if let Some((desc, generation)) = parse_toc_filename(&fname, data_dir) {
-                        max_gen = max_gen.max(generation);
-                        match desc.format {
-                            SSTableFormat::Big => match SSTableReader::open(desc) {
-                                Ok(reader) => {
-                                    let reader = if let Some(cache) = key_cache {
-                                        reader.with_key_cache(Arc::clone(cache))
-                                    } else {
-                                        reader
-                                    };
-                                    handles.push(SSTableHandle::Big(reader));
-                                }
-                                Err(e) => {
-                                    warn!(file = %fname, error = %e, "Failed to open Big SSTable")
-                                }
-                            },
-                            SSTableFormat::Bti => match BtiReader::open(desc) {
-                                Ok(reader) => handles.push(SSTableHandle::Bti(reader)),
-                                Err(e) => {
-                                    warn!(file = %fname, error = %e, "Failed to open BTI SSTable")
-                                }
-                            },
-                        }
+            let mut toc_files = Vec::new();
+            collect_toc_files(data_dir, &mut toc_files)?;
+            for toc_path in toc_files {
+                let Some(fname) = toc_path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Some(component_dir) = toc_path.parent() else {
+                    continue;
+                };
+
+                // Parse descriptor from TOC filename
+                if let Some((desc, generation)) = parse_toc_filename(fname, component_dir) {
+                    max_gen = max_gen.max(generation);
+                    match desc.format {
+                        SSTableFormat::Big => match SSTableReader::open(desc) {
+                            Ok(reader) => {
+                                let reader = if let Some(cache) = key_cache {
+                                    reader.with_key_cache(Arc::clone(cache))
+                                } else {
+                                    reader
+                                };
+                                handles.push(SSTableHandle::Big(reader));
+                            }
+                            Err(e) => {
+                                warn!(file = %fname, error = %e, "Failed to open Big SSTable")
+                            }
+                        },
+                        SSTableFormat::Bti => match BtiReader::open(desc) {
+                            Ok(reader) => handles.push(SSTableHandle::Bti(reader)),
+                            Err(e) => {
+                                warn!(file = %fname, error = %e, "Failed to open BTI SSTable")
+                            }
+                        },
                     }
                 }
             }
@@ -1145,6 +1329,30 @@ impl StorageEngine {
         handles.sort_by_key(|sst| sst.generation());
         Ok((handles, max_gen))
     }
+}
+
+fn collect_toc_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let path = entry.path();
+
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if matches!(name.to_str(), Some("snapshots" | "backups")) {
+                continue;
+            }
+            collect_toc_files(&path, out)?;
+        } else if file_type.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with("-TOC.txt"))
+        {
+            out.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Parse a TOC filename to extract SSTable descriptor.
@@ -1223,6 +1431,102 @@ mod tests {
     }
 
     #[test]
+    fn open_uses_java_compaction_options() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.compaction_strategy_type = CompactionStrategyType::TimeWindow;
+        config.compaction_options = HashMap::from([
+            ("compaction_window_unit".to_string(), "HOURS".to_string()),
+            ("compaction_window_size".to_string(), "2".to_string()),
+            ("min_threshold".to_string(), "2".to_string()),
+        ]);
+
+        let engine = StorageEngine::open(config).unwrap();
+        assert_eq!(
+            engine.config.compaction_strategy_type,
+            CompactionStrategyType::TimeWindow
+        );
+        assert_eq!(
+            engine
+                .config
+                .compaction_options
+                .get("compaction_window_unit")
+                .map(String::as_str),
+            Some("HOURS")
+        );
+    }
+
+    #[test]
+    fn open_rejects_invalid_compaction_options() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.compaction_options = HashMap::from([
+            ("bucket_low".to_string(), "2.0".to_string()),
+            ("bucket_high".to_string(), "1.0".to_string()),
+        ]);
+
+        let err = match StorageEngine::open(config) {
+            Ok(_) => panic!("invalid compaction options should fail"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("invalid compaction options"));
+    }
+
+    #[test]
+    fn compaction_output_max_size_reads_java_options() {
+        let mut config = EngineConfig {
+            compaction_options: HashMap::from([(
+                "sstable_size_in_mb".to_string(),
+                "2".to_string(),
+            )]),
+            ..EngineConfig::default()
+        };
+        assert_eq!(
+            config.compaction_output_max_size_bytes(),
+            Some(2 * 1024 * 1024)
+        );
+
+        config.compaction_options =
+            HashMap::from([("target_sstable_size".to_string(), "3MiB".to_string())]);
+        assert_eq!(
+            config.compaction_output_max_size_bytes(),
+            Some(3 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn compaction_splits_outputs_by_java_size_option() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.compaction_options = HashMap::from([
+            ("min_threshold".to_string(), "2".to_string()),
+            ("max_threshold".to_string(), "2".to_string()),
+            ("target_sstable_size".to_string(), "1KiB".to_string()),
+        ]);
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", &vec![1; 2048]))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk2", "name", &vec![2; 2048]))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        assert_eq!(engine.stats().sstable_count, 2);
+
+        assert!(engine.maybe_compact().unwrap());
+        let stats = engine.stats();
+        assert_eq!(stats.compactions_completed, 1);
+        assert_eq!(
+            stats.sstable_count, 2,
+            "two oversized partitions should be split into two output SSTables"
+        );
+        assert!(engine.read_partition("ks", "t1", b"pk1").is_some());
+        assert!(engine.read_partition("ks", "t1", b"pk2").is_some());
+    }
+
+    #[test]
     fn write_read_roundtrip() {
         let dir = TempDir::new().unwrap();
         let config = test_engine_config(dir.path());
@@ -1254,6 +1558,170 @@ mod tests {
 
         let result = engine.read_partition("ks", "t1", b"pk1");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn scan_all_partitions_merges_memtable_and_sstables() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"flushed"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk2", "name", b"memtable"))
+            .unwrap();
+
+        let partitions = engine.scan_all_partitions("ks", "t1");
+        let keys: Vec<Vec<u8>> = partitions.into_iter().map(|(key, _)| key).collect();
+        assert_eq!(keys, vec![b"pk1".to_vec(), b"pk2".to_vec()]);
+    }
+
+    #[test]
+    fn read_partition_ignores_sstables_from_other_tables() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"same_pk", "name", b"table1"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        assert!(engine.read_partition("ks", "t2", b"same_pk").is_none());
+        assert!(engine.scan_all_partitions("ks", "t2").is_empty());
+    }
+
+    #[test]
+    fn reopen_loads_sstables_from_nested_table_directories() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        {
+            let engine = StorageEngine::open(config.clone()).unwrap();
+            engine
+                .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"nested"))
+                .unwrap();
+            engine.flush_cf("ks.t1").unwrap();
+        }
+
+        let nested = dir.path().join("ks").join("t1-abc123");
+        fs::create_dir_all(&nested).unwrap();
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_file() {
+                let file_name = entry.file_name();
+                fs::rename(entry.path(), nested.join(file_name)).unwrap();
+            }
+        }
+
+        let reopened = StorageEngine::open(config).unwrap();
+        assert_eq!(reopened.stats().sstable_count, 1);
+        let partition = reopened.read_partition("ks", "t1", b"pk1").unwrap();
+        let row = partition.rows.values().next().unwrap();
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"nested".as_slice()));
+    }
+
+    #[test]
+    fn rebuild_sai_index_from_active_memtable() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"alice"))
+            .unwrap();
+
+        engine
+            .rebuild_index(
+                "ks.t1",
+                IndexDefinition {
+                    name: "idx_name".to_string(),
+                    keyspace: "ks".to_string(),
+                    table: "t1".to_string(),
+                    column: "name".to_string(),
+                    index_type: IndexType::Sai,
+                    options: Default::default(),
+                },
+            )
+            .unwrap();
+
+        let results = engine
+            .search_index("ks", "t1", "idx_name", b"alice")
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        let row = results[0].rows.values().next().unwrap();
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"alice".as_slice()));
+    }
+
+    #[test]
+    fn rebuild_legacy_index_scans_only_target_table() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"same_pk", "name", b"alice"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t2", b"same_pk", "name", b"bob"))
+            .unwrap();
+        engine.flush_cf("ks.t2").unwrap();
+
+        engine
+            .rebuild_index(
+                "ks.t1",
+                IndexDefinition {
+                    name: "idx_name_legacy".to_string(),
+                    keyspace: "ks".to_string(),
+                    table: "t1".to_string(),
+                    column: "name".to_string(),
+                    index_type: IndexType::Legacy,
+                    options: Default::default(),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            engine
+                .search_index("ks", "t1", "idx_name_legacy", b"alice")
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            engine
+                .search_index("ks", "t1", "idx_name_legacy", b"bob")
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn truncate_table_discards_memtable_and_sstables() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"flushed"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk2", "name", b"memtable"))
+            .unwrap();
+
+        assert!(engine.read_partition("ks", "t1", b"pk1").is_some());
+        assert!(engine.read_partition("ks", "t1", b"pk2").is_some());
+
+        engine.truncate_table("ks", "t1").unwrap();
+
+        assert!(engine.read_partition("ks", "t1", b"pk1").is_none());
+        assert!(engine.read_partition("ks", "t1", b"pk2").is_none());
+        assert_eq!(engine.stats().sstable_count, 0);
+        assert!(engine.scan_all_partitions("ks", "t1").is_empty());
     }
 
     #[test]

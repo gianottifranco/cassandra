@@ -20,35 +20,17 @@
 //! - `org.apache.cassandra.tools.HashPassword`
 //! - `org.apache.cassandra.auth.PasswordAuthenticator`
 //!
-//! Cassandra uses bcrypt for password hashing. This module provides a
-//! simplified hash using `DefaultHasher` as a placeholder. For production
-//! deployments, the `bcrypt` crate should be used.
+//! Cassandra uses bcrypt for password hashing.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
-/// Compute a simplified password hash string.
-///
-/// Returns a bcrypt-formatted string using `DefaultHasher` as a placeholder.
-/// In production this should be replaced with real bcrypt hashing.
-pub fn compute_hash(password: &str, rounds: u32) -> String {
-    let mut hasher = DefaultHasher::new();
-    password.hash(&mut hasher);
-    rounds.hash(&mut hasher);
-    let hash = hasher.finish();
-
-    format!(
-        "$2a${}${:016x}{:016x}",
-        rounds,
-        hash,
-        hash.wrapping_mul(0x517cc1b727220a95)
-    )
+/// Compute a bcrypt password hash string.
+pub fn compute_hash(password: &str, rounds: u32) -> Result<String, bcrypt::BcryptError> {
+    bcrypt::hash(password, rounds)
 }
 
 /// Hash a password and print the result.
 ///
 /// If `password` is `None`, reads from stdin. Validates that the password
-/// is not empty and prints the hash in bcrypt-like format.
+/// is not empty and prints the hash in bcrypt format.
 pub fn run(password: Option<String>, rounds: u32) {
     let pwd = match password {
         Some(p) => p,
@@ -71,10 +53,10 @@ pub fn run(password: Option<String>, rounds: u32) {
         return;
     }
 
-    let hash = compute_hash(&pwd, rounds);
-    println!("{}", hash);
-    println!();
-    println!("Note: This is a simplified hash. For production use, install the bcrypt crate.");
+    match compute_hash(&pwd, rounds) {
+        Ok(hash) => println!("{}", hash),
+        Err(e) => println!("Error hashing password: {}", e),
+    }
 }
 
 #[cfg(test)]
@@ -89,48 +71,44 @@ mod tests {
 
     #[test]
     fn test_with_provided_password() {
-        let hash = compute_hash("cassandra", 10);
-        // Must start with bcrypt prefix and include the rounds
-        assert!(hash.starts_with("$2a$10$"));
-        // Must be deterministic
-        let hash2 = compute_hash("cassandra", 10);
-        assert_eq!(hash, hash2);
+        let hash = compute_hash("cassandra", 4).unwrap();
+        assert!(hash.starts_with("$2"));
+        assert!(bcrypt::verify("cassandra", &hash).unwrap());
     }
 
     #[test]
     fn test_different_rounds_produce_different_output() {
-        let hash_10 = compute_hash("secret", 10);
-        let hash_12 = compute_hash("secret", 12);
-        assert_ne!(hash_10, hash_12);
+        let hash_4 = compute_hash("secret", 4).unwrap();
+        let hash_5 = compute_hash("secret", 5).unwrap();
+        assert_ne!(hash_4, hash_5);
+        assert!(bcrypt::verify("secret", &hash_4).unwrap());
+        assert!(bcrypt::verify("secret", &hash_5).unwrap());
     }
 
     #[test]
     fn test_different_passwords_produce_different_output() {
-        let hash_a = compute_hash("password_a", 10);
-        let hash_b = compute_hash("password_b", 10);
+        let hash_a = compute_hash("password_a", 4).unwrap();
+        let hash_b = compute_hash("password_b", 4).unwrap();
         assert_ne!(hash_a, hash_b);
+        assert!(bcrypt::verify("password_a", &hash_a).unwrap());
+        assert!(bcrypt::verify("password_b", &hash_b).unwrap());
     }
 
     #[test]
     fn test_hash_format() {
-        let hash = compute_hash("test", 4);
-        // Format: $2a$<rounds>$<32 hex chars>
-        assert!(hash.starts_with("$2a$4$"));
-        // After the prefix, we expect exactly 32 hex characters
-        let suffix = hash.strip_prefix("$2a$4$").unwrap();
-        assert_eq!(suffix.len(), 32);
-        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+        let hash = compute_hash("test", 4).unwrap();
+        assert!(hash.starts_with("$2"));
+        assert!(hash.contains("$04$"));
+        assert!(bcrypt::verify("test", &hash).unwrap());
     }
 
     #[test]
     fn test_run_with_valid_password_does_not_panic() {
-        run(Some("my_secure_password".to_string()), 10);
+        run(Some("my_secure_password".to_string()), 4);
     }
 
     #[test]
-    fn test_run_with_high_rounds() {
-        // High rounds should not cause overflow or panic
-        let hash = compute_hash("test", 31);
-        assert!(hash.starts_with("$2a$31$"));
+    fn test_invalid_rounds_return_error() {
+        assert!(compute_hash("test", 3).is_err());
     }
 }

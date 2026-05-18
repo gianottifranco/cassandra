@@ -53,30 +53,25 @@ impl SystemAuthRoleManager {
     /// Read member_of for a role by scanning role_members where this role is a member.
     fn read_member_of(&self, grantee: &str) -> Vec<String> {
         // role_members is keyed by parent role with clustering on member.
-        // To find which roles a grantee belongs to, we need to scan.
-        // For now, read from the roles table's member_of set cells.
-        let pk = grantee.as_bytes().to_vec();
-        let partition = match self.engine.read_partition(SYSTEM_AUTH, ROLES_TABLE, &pk) {
-            Some(p) => p,
-            None => return vec![],
-        };
-
+        // To find which roles a grantee belongs to, scan parent-role partitions.
         let now_secs = (Self::now() / 1_000_000) as i32;
-        let live = partition.live_rows(now_secs);
-        if live.is_empty() {
-            return vec![];
-        }
-
         let mut member_of = Vec::new();
-        for cell in &live[0].cells {
-            if !cell.is_live_at(now_secs) {
-                continue;
-            }
-            // Set elements stored as "member_of:role_name"
-            if let Some(role_name) = cell.column.strip_prefix("member_of:") {
-                member_of.push(role_name.to_string());
+        for (parent_role, partition) in self
+            .engine
+            .scan_all_partitions(SYSTEM_AUTH, ROLE_MEMBERS_TABLE)
+        {
+            if partition
+                .live_rows(now_secs)
+                .iter()
+                .any(|row| row.clustering_key == grantee.as_bytes())
+            {
+                if let Ok(parent_role) = String::from_utf8(parent_role) {
+                    member_of.push(parent_role);
+                }
             }
         }
+        member_of.sort();
+        member_of.dedup();
         member_of
     }
 }
@@ -114,7 +109,7 @@ impl RoleManager for SystemAuthRoleManager {
             });
         }
 
-        // We skip member_of for now (implemented in separate table if needed)
+        // New roles start without parent memberships; grant_role persists set elements later.
 
         let mutation = Mutation {
             keyspace: SYSTEM_AUTH.into(),
@@ -271,12 +266,17 @@ impl RoleManager for SystemAuthRoleManager {
     }
 
     fn list_roles(&self) -> Vec<Role> {
-        // Full table scan is not supported by StorageEngine's current API.
-        // Roles must be looked up by name. Return known roles by scanning
-        // the in-memory index if available, or return empty.
-        // GAP(gap_guard_paging): Add scan_partitions to StorageEngine for full table iteration — tracked in gap_guards.rs
-        tracing::warn!("list_roles: full table scan not yet supported by storage engine");
-        vec![]
+        let mut roles = Vec::new();
+        for (role_name, _) in self.engine.scan_all_partitions(SYSTEM_AUTH, ROLES_TABLE) {
+            let Ok(role_name) = String::from_utf8(role_name) else {
+                continue;
+            };
+            if let Some(role) = self.get_role(&role_name) {
+                roles.push(role);
+            }
+        }
+        roles.sort_by(|a, b| a.name.cmp(&b.name));
+        roles
     }
 
     fn grant_role(&self, role: &str, grantee: &str) -> Result<(), SecurityError> {
@@ -443,7 +443,10 @@ impl SystemAuthAuthorizer {
     /// Read permissions for a role on a specific resource from storage.
     fn read_permissions(&self, role: &str, resource: &Resource) -> Vec<Permission> {
         let pk = role.as_bytes().to_vec();
-        let partition = match self.engine.read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk) {
+        let partition = match self
+            .engine
+            .read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk)
+        {
             Some(p) => p,
             None => return vec![],
         };
@@ -619,7 +622,10 @@ impl Authorizer for SystemAuthAuthorizer {
 
         for role_name in &all_roles {
             let pk = role_name.as_bytes().to_vec();
-            let partition = match self.engine.read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk) {
+            let partition = match self
+                .engine
+                .read_partition(SYSTEM_AUTH, PERMISSIONS_TABLE, &pk)
+            {
                 Some(p) => p,
                 None => continue,
             };
@@ -655,5 +661,79 @@ impl Authorizer for SystemAuthAuthorizer {
 
     fn name(&self) -> &str {
         "SystemAuthAuthorizer"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cassandra_storage::commitlog::CommitLogConfig;
+    use cassandra_storage::engine::EngineConfig;
+    use tempfile::TempDir;
+
+    fn test_engine(dir: &std::path::Path) -> Arc<StorageEngine> {
+        Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![dir.to_path_buf()],
+                commitlog: CommitLogConfig {
+                    directory: dir.join("commitlog"),
+                    max_segment_size: 4096,
+                    ..CommitLogConfig::default()
+                },
+                memtable_flush_threshold: 1024 * 1024,
+                gc_grace_seconds: 0,
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn system_auth_roles_list_from_storage_scan() {
+        let dir = TempDir::new().unwrap();
+        let manager = SystemAuthRoleManager::new(test_engine(dir.path()));
+
+        manager.create_role(Role {
+            name: "analyst".to_string(),
+            is_superuser: false,
+            can_login: true,
+            hashed_password: None,
+            member_of: vec![],
+            network_permissions: None,
+        });
+
+        let roles = manager.list_roles();
+        let names: Vec<String> = roles.into_iter().map(|role| role.name).collect();
+        assert!(names.contains(&"analyst".to_string()));
+        assert!(names.contains(&"cassandra".to_string()));
+    }
+
+    #[test]
+    fn system_auth_member_of_uses_role_members_scan() {
+        let dir = TempDir::new().unwrap();
+        let manager = SystemAuthRoleManager::new(test_engine(dir.path()));
+
+        manager.create_role(Role {
+            name: "parent".to_string(),
+            is_superuser: false,
+            can_login: false,
+            hashed_password: None,
+            member_of: vec![],
+            network_permissions: None,
+        });
+        manager.create_role(Role {
+            name: "child".to_string(),
+            is_superuser: false,
+            can_login: true,
+            hashed_password: None,
+            member_of: vec![],
+            network_permissions: None,
+        });
+
+        manager.grant_role("parent", "child").unwrap();
+        assert_eq!(manager.get_role("child").unwrap().member_of, vec!["parent"]);
+
+        manager.revoke_role("parent", "child").unwrap();
+        assert!(manager.get_role("child").unwrap().member_of.is_empty());
     }
 }

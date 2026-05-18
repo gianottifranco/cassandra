@@ -153,10 +153,9 @@ impl DiagnosticEventService {
             let listeners = self.listeners.read();
             for entry in listeners.iter() {
                 let listener = Arc::clone(&entry.listener);
-                let result =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        listener.on_diagnostic_event(&event);
-                    }));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    listener.on_diagnostic_event(&event);
+                }));
                 if let Err(panic_info) = result {
                     let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
                         (*s).to_string()
@@ -259,7 +258,10 @@ mod tests {
 
         let recorded = events.read();
         assert_eq!(recorded.len(), 1);
-        assert_eq!(recorded[0].event_type, DiagnosticEventType::CompactionStarted);
+        assert_eq!(
+            recorded[0].event_type,
+            DiagnosticEventType::CompactionStarted
+        );
     }
 
     #[test]
@@ -330,13 +332,22 @@ mod tests {
         for _ in 0..HISTORY_CAPACITY + 10 {
             svc.publish(make_event(DiagnosticEventType::GCPause));
         }
-        assert_eq!(svc.recent_events(HISTORY_CAPACITY + 100).len(), HISTORY_CAPACITY);
+        assert_eq!(
+            svc.recent_events(HISTORY_CAPACITY + 100).len(),
+            HISTORY_CAPACITY
+        );
     }
 
     #[test]
     fn event_display_impl() {
-        assert_eq!(DiagnosticEventType::CompactionStarted.to_string(), "CompactionStarted");
-        assert_eq!(DiagnosticEventType::LargePartition.to_string(), "LargePartition");
+        assert_eq!(
+            DiagnosticEventType::CompactionStarted.to_string(),
+            "CompactionStarted"
+        );
+        assert_eq!(
+            DiagnosticEventType::LargePartition.to_string(),
+            "LargePartition"
+        );
     }
 
     #[test]

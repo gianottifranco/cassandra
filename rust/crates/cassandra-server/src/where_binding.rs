@@ -3,7 +3,7 @@
 //! WHERE clause bind variable resolution for SELECT/DELETE/UPDATE statements.
 //!
 //! Resolves [`Relation`] terms in WHERE clauses to typed byte arrays using
-//! the column type information from the schema.  This bridges the gap between
+//! the column type information from the schema.  This bridges parsed
 //! the parsed AST and the storage engine's byte-oriented interface.
 //!
 //! ## Java Oracle
@@ -189,9 +189,6 @@ mod tests {
             value: Term::Literal(Literal::String("alice".into())),
         }];
         let resolved = resolve_where_clause(&relations, type_lookup).unwrap();
-        assert_eq!(
-            resolved[0].value,
-            ResolvedValue::Single(b"alice".to_vec())
-        );
+        assert_eq!(resolved[0].value, ResolvedValue::Single(b"alice".to_vec()));
     }
 }

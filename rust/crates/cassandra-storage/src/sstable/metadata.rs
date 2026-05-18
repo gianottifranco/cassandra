@@ -101,12 +101,10 @@ impl MetadataCollector {
     /// Record a partition key, updating min/max bounds.
     pub fn add_partition_key(&mut self, key: &[u8]) {
         self.partition_count += 1;
-        if self.min_partition_key.is_none() || key < self.min_partition_key.as_deref().unwrap()
-        {
+        if self.min_partition_key.is_none() || key < self.min_partition_key.as_deref().unwrap() {
             self.min_partition_key = Some(key.to_vec());
         }
-        if self.max_partition_key.is_none() || key > self.max_partition_key.as_deref().unwrap()
-        {
+        if self.max_partition_key.is_none() || key > self.max_partition_key.as_deref().unwrap() {
             self.max_partition_key = Some(key.to_vec());
         }
     }
@@ -184,7 +182,10 @@ impl MetadataSerializer {
             return Err(MetadataError::UnsupportedVersion(version));
         }
 
-        let _field_count = cur.read_u16::<BigEndian>()?;
+        let field_count = cur.read_u16::<BigEndian>()?;
+        if field_count != FIELD_COUNT {
+            return Err(MetadataError::BadFieldCount(field_count));
+        }
 
         let partition_count = cur.read_u64::<BigEndian>()?;
         let row_count = cur.read_u64::<BigEndian>()?;
@@ -201,6 +202,11 @@ impl MetadataSerializer {
         let max_pk_len = cur.read_u32::<BigEndian>()? as usize;
         let mut max_partition_key = vec![0u8; max_pk_len];
         cur.read_exact(&mut max_partition_key)?;
+        if cur.position() != data.len() as u64 {
+            return Err(MetadataError::TrailingBytes(
+                data.len() - cur.position() as usize,
+            ));
+        }
 
         Ok(SSTableMetadata {
             partition_count,
@@ -250,6 +256,10 @@ pub enum MetadataError {
     BadMagic([u8; 4]),
     #[error("unsupported metadata version: {0}")]
     UnsupportedVersion(u8),
+    #[error("bad metadata field count: {0}")]
+    BadFieldCount(u16),
+    #[error("metadata has {0} trailing bytes")]
+    TrailingBytes(usize),
     #[error("I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("JSON fallback failed: {0}")]
@@ -353,6 +363,22 @@ mod tests {
         bytes[0] = 0x00; // corrupt magic
         let err = MetadataSerializer::deserialize(&bytes).unwrap_err();
         assert!(matches!(err, MetadataError::BadMagic(_)));
+    }
+
+    #[test]
+    fn bad_field_count_errors() {
+        let mut bytes = MetadataSerializer::serialize(&sample_metadata());
+        bytes[5..7].copy_from_slice(&8u16.to_be_bytes());
+        let err = MetadataSerializer::deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, MetadataError::BadFieldCount(8)));
+    }
+
+    #[test]
+    fn trailing_bytes_error() {
+        let mut bytes = MetadataSerializer::serialize(&sample_metadata());
+        bytes.extend_from_slice(b"extra");
+        let err = MetadataSerializer::deserialize(&bytes).unwrap_err();
+        assert!(matches!(err, MetadataError::TrailingBytes(5)));
     }
 
     #[test]

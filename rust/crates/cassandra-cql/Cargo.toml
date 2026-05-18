@@ -18,13 +18,16 @@ dashmap = { workspace = true }
 hex = { workspace = true }
 parking_lot = { workspace = true }
 uuid = { workspace = true }
+serde_json = { workspace = true }
+wasmtime = { version = "44.0.1", optional = true, default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [features]
 default = []
 # Enable WASM-based UDF execution via wasmtime.
 # When disabled (default), WasmUdfExecutor::new() returns an error.
-udf-wasm = []
+udf-wasm = ["dep:wasmtime"]
 
 [dev-dependencies]
 proptest = { workspace = true }
 tempfile = { workspace = true }
+wat = "1.249.0"

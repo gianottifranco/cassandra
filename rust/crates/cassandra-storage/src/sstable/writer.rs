@@ -30,6 +30,7 @@ use crc32fast::Hasher;
 
 use super::bloom::BloomFilter;
 use super::format::*;
+use super::metadata::{MetadataSerializer, SSTableMetadata};
 use crate::memtable::partition::{Cell, PartitionData, Row};
 
 /// Index entry: partition key → offset in Data.db.
@@ -166,8 +167,20 @@ impl SSTableWriter {
 
         // ── Write Statistics.db ───────────────────────────────────
         let stats_path = self.descriptor.component_path(Component::Statistics);
-        let stats_json = serde_json::to_vec_pretty(&stats).map_err(io::Error::other)?;
-        fs::write(&stats_path, stats_json)?;
+        let min_partition_key = partitions
+            .iter()
+            .map(|(pk, _)| pk.as_slice())
+            .min()
+            .unwrap_or_default()
+            .to_vec();
+        let max_partition_key = partitions
+            .iter()
+            .map(|(pk, _)| pk.as_slice())
+            .max()
+            .unwrap_or_default()
+            .to_vec();
+        let metadata = SSTableMetadata::from_stats(&stats, min_partition_key, max_partition_key);
+        fs::write(&stats_path, MetadataSerializer::serialize(&metadata))?;
 
         // ── Write TOC.txt ─────────────────────────────────────────
         let toc_path = self.descriptor.component_path(Component::Toc);
@@ -364,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn statistics_json_valid() {
+    fn statistics_binary_metadata_valid() {
         let dir = TempDir::new().unwrap();
         let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
         let writer = SSTableWriter::new(desc.clone());
@@ -373,8 +386,10 @@ mod tests {
         writer.write(&partitions).unwrap();
 
         let stats_path = desc.component_path(Component::Statistics);
-        let stats_json = fs::read_to_string(stats_path).unwrap();
-        let stats: SSTableStats = serde_json::from_str(&stats_json).unwrap();
-        assert_eq!(stats.partition_count, 5);
+        let stats_bytes = fs::read(stats_path).unwrap();
+        let metadata = MetadataSerializer::deserialize(&stats_bytes).unwrap();
+        assert_eq!(metadata.partition_count, 5);
+        assert_eq!(metadata.min_partition_key, vec![0]);
+        assert_eq!(metadata.max_partition_key, vec![4]);
     }
 }

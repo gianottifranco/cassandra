@@ -48,6 +48,7 @@ pub fn encode_byte_comparable(cql_type: &CqlType, data: &[u8]) -> Vec<u8> {
             // Invert all bytes to reverse the ordering
             encoded.into_iter().map(|b| !b).collect()
         }
+        CqlType::Vector(inner, dimensions) => encode_vector(inner, *dimensions, data),
         // Default: use raw bytes (already byte-ordered for unsigned types)
         _ => data.to_vec(),
     }
@@ -142,6 +143,23 @@ fn encode_varint(data: &[u8]) -> Vec<u8> {
         result.push(0x80u8.wrapping_add(len));
     }
     result.extend_from_slice(data);
+    result
+}
+
+fn encode_vector(inner: &CqlType, dimensions: u32, data: &[u8]) -> Vec<u8> {
+    let Some(element_size) = inner.fixed_size() else {
+        return data.to_vec();
+    };
+    let expected_len = element_size.saturating_mul(dimensions as usize);
+    if data.len() != expected_len {
+        return data.to_vec();
+    }
+    let mut result = Vec::with_capacity(data.len());
+    for idx in 0..dimensions as usize {
+        let start = idx * element_size;
+        let end = start + element_size;
+        result.extend_from_slice(&encode_byte_comparable(inner, &data[start..end]));
+    }
     result
 }
 
@@ -249,5 +267,25 @@ mod tests {
         let pos = encode_byte_comparable(&CqlType::Bigint, &100i64.to_be_bytes());
         assert!(neg < zero);
         assert!(zero < pos);
+    }
+
+    #[test]
+    fn vector_orders_by_encoded_elements() {
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 2);
+        let neg = [-1.0_f32, 2.0]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let zero = [0.0_f32, 2.0]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let later_second = [0.0_f32, 3.0]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+
+        assert!(encode_byte_comparable(&ty, &neg) < encode_byte_comparable(&ty, &zero));
+        assert!(encode_byte_comparable(&ty, &zero) < encode_byte_comparable(&ty, &later_second));
     }
 }

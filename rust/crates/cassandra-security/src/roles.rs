@@ -112,10 +112,9 @@ impl<T: ?Sized + RoleManager> RoleManager for std::sync::Arc<T> {
 
 /// In-memory role manager backed by DashMap.
 ///
-/// Suitable for single-node and testing. For production multi-node,
-/// roles should be persisted to system_auth keyspace tables.
-///
-/// GAP(gap_guard_cql_permission_statements): Persist roles to storage via cassandra-storage crate — tracked in gap_guards.rs
+/// Suitable for single-node and testing. Durable roles are handled by
+/// `PersistentRoleManager` in this crate and by the server's system_auth
+/// storage-backed role manager.
 pub struct InMemoryRoleManager {
     roles: DashMap<String, Role>,
 }

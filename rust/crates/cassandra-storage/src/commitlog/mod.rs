@@ -98,7 +98,7 @@ pub struct ArchivingConfig {
     pub archive_directory: Option<PathBuf>,
     /// If true, restore archived segments on replay.
     pub restore_on_replay: bool,
-    /// Restore command (with `%from` and `%to` placeholders).
+    /// Restore command; `%from` and `%to` are expanded before execution.
     pub restore_command: Option<String>,
 }
 
@@ -345,6 +345,7 @@ impl CommitLog {
         let next_id = max_id + 1;
         let seg_flags = SegmentFlags {
             compression_enabled: config.compression_enabled,
+            ..SegmentFlags::default()
         };
         let segment = Segment::create_with_flags(&config.directory, next_id, seg_flags)?;
 
@@ -561,6 +562,7 @@ impl CommitLog {
     fn create_or_recycle_segment(&self, new_id: u64) -> Result<Segment> {
         let seg_flags = SegmentFlags {
             compression_enabled: self.config.compression_enabled,
+            ..SegmentFlags::default()
         };
 
         // Try recycling
@@ -640,10 +642,13 @@ impl CommitLog {
             // Rotate CDC segment if needed
             if seg.size() + payload.len() as u64 + 12 > self.config.max_segment_size {
                 seg.sync()?;
+                crate::cdc::write_cdc_index(seg.path(), seg.size(), true)?;
                 let new_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
                 *seg = Segment::create(&self.config.cdc.raw_directory, new_id)?;
             }
             seg.append_entry(payload)?;
+            seg.sync()?;
+            crate::cdc::write_cdc_index(seg.path(), seg.size(), false)?;
             self.metrics
                 .cdc_entries_written
                 .fetch_add(1, Ordering::Relaxed);
@@ -943,5 +948,19 @@ mod tests {
         let snap = cl.metrics_snapshot();
         assert_eq!(snap.entries_written, 2);
         assert_eq!(snap.cdc_entries_written, 1);
+
+        let infos = crate::cdc::list_cdc_segment_infos(&cdc_dir).unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].durable_offset, Some(infos[0].size_bytes));
+        assert!(!infos[0].completed);
+
+        let mutations = crate::cdc::read_cdc_segment_mutations(
+            &infos[0].path,
+            segment::CorruptionPolicy::StopOnCorrupt,
+        )
+        .unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].table, "t2");
+        assert!(mutations[0].cdc_enabled);
     }
 }

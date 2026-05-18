@@ -16,14 +16,17 @@
 
 //! # P0 Gap Benchmarks
 //!
-//! Criterion benchmark stubs for P0 features. These benchmarks establish
-//! performance baselines as gaps are closed. Stubs return early with a
-//! comment explaining what will be measured.
+//! Criterion benchmarks for P0 feature paths. These benchmarks establish
+//! performance baselines as parity work lands.
 //!
 //! Run with: `cargo bench -p cassandra-diff-tests`
 //! Or: `make bench-run` from the rust/ directory
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use cassandra_cql::parser::parse;
+use cassandra_storage::memtable::partition::{Cell, PartitionData, Row};
+use cassandra_storage::sstable::{SSTableDescriptor, SSTableWriter};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use tempfile::TempDir;
 
 // ═══════════════════════════════════════════════════════════════════════
 // CQL PARSING
@@ -34,9 +37,8 @@ fn bench_cql_parse_select(c: &mut Criterion) {
     // Target: < 5 microseconds for simple SELECT.
     c.bench_function("cql_parse_select", |b| {
         b.iter(|| {
-            // TODO: Replace with actual CQL parser call when parser supports
-            // full SELECT with WHERE, ORDER BY, LIMIT.
-            let _query = black_box("SELECT * FROM ks.tbl WHERE pk = ? LIMIT 100");
+            let stmt = parse(black_box("SELECT * FROM ks.tbl WHERE pk = ? LIMIT 100")).unwrap();
+            black_box(stmt);
         });
     });
 }
@@ -46,7 +48,8 @@ fn bench_cql_parse_insert(c: &mut Criterion) {
     // Target: < 5 microseconds for parameterized INSERT.
     c.bench_function("cql_parse_insert", |b| {
         b.iter(|| {
-            let _query = black_box("INSERT INTO ks.tbl (pk, ck, v) VALUES (?, ?, ?)");
+            let stmt = parse(black_box("INSERT INTO ks.tbl (pk, ck, v) VALUES (?, ?, ?)")).unwrap();
+            black_box(stmt);
         });
     });
 }
@@ -56,7 +59,11 @@ fn bench_cql_parse_batch(c: &mut Criterion) {
     // Target: < 50 microseconds.
     c.bench_function("cql_parse_batch_10", |b| {
         b.iter(|| {
-            let _query = black_box("BEGIN BATCH INSERT INTO ks.t (k,v) VALUES (1,1); APPLY BATCH");
+            let stmt = parse(black_box(
+                "BEGIN BATCH INSERT INTO ks.t (k,v) VALUES (1,1); APPLY BATCH",
+            ))
+            .unwrap();
+            black_box(stmt);
         });
     });
 }
@@ -69,11 +76,42 @@ fn bench_sstable_write_1k_rows(c: &mut Criterion) {
     // Benchmark: write 1000 rows to an SSTable.
     // Target: < 10 milliseconds for 1000 simple rows.
     c.bench_function("sstable_write_1k_rows", |b| {
-        b.iter(|| {
-            // TODO: Replace with actual SSTable writer when available.
-            let _rows = black_box(1000u32);
-        });
+        b.iter_batched(
+            || {
+                let dir = TempDir::new().unwrap();
+                let desc = SSTableDescriptor::new(dir.path(), "bench_ks", "bench_t", 1);
+                let partitions = make_partitions(1000);
+                (dir, desc, partitions)
+            },
+            |(_dir, desc, partitions)| {
+                let stats = SSTableWriter::new(desc).write(&partitions).unwrap();
+                black_box(stats);
+            },
+            BatchSize::SmallInput,
+        );
     });
+}
+
+fn make_partitions(count: u16) -> Vec<(Vec<u8>, PartitionData)> {
+    let mut partitions = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let mut partition = PartitionData::new();
+        partition.apply_row(Row {
+            clustering_key: b"ck0".to_vec(),
+            cells: vec![Cell {
+                column: "v".to_string(),
+                value: Some(format!("value-{i}").into_bytes()),
+                timestamp: i as i64,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
+            is_tombstone: false,
+            local_deletion_time: None,
+        });
+        partitions.push((format!("pk-{i:04}").into_bytes(), partition));
+    }
+    partitions
 }
 
 fn bench_sstable_read_1k_rows(c: &mut Criterion) {

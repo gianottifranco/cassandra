@@ -24,9 +24,9 @@ use cassandra_diff_tests::golden;
 use serde::Deserialize;
 use std::collections::HashMap;
 
+use cassandra_cluster_metadata::Endpoint;
 use cassandra_coordinator::consistency::ConsistencyLevel;
 use cassandra_coordinator::write::{WriteError, WriteType};
-use cassandra_cluster_metadata::Endpoint;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 /// Golden fixture schema for write errors.

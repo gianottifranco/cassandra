@@ -41,7 +41,7 @@ use crate::node::Endpoint;
 pub struct SchemaSnapshot {
     /// Schema version UUID string.
     pub version: String,
-    /// Serialized schema data (JSON for now).
+    /// Serialized schema data encoded as JSON.
     pub data: Vec<u8>,
 }
 

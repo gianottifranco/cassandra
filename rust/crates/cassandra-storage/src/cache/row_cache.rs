@@ -8,8 +8,8 @@
 //! - `org.apache.cassandra.cache.IRowCacheEntry`
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -49,8 +49,8 @@ impl RowCache {
     /// are no-ops (gets always return `None`).
     pub fn new(config: RowCacheConfig) -> Arc<Self> {
         let enabled = config.max_entries > 0;
-        let capacity = NonZeroUsize::new(config.max_entries)
-            .unwrap_or(NonZeroUsize::new(1).unwrap());
+        let capacity =
+            NonZeroUsize::new(config.max_entries).unwrap_or(NonZeroUsize::new(1).unwrap());
 
         Arc::new(Self {
             cache: Mutex::new(LruCache::new(capacity)),
@@ -183,7 +183,10 @@ mod tests {
         // This should evict "a"
         cache.put(1, b"c".to_vec(), PartitionData::new());
 
-        assert!(cache.get(1, b"a").is_none(), "oldest entry should be evicted");
+        assert!(
+            cache.get(1, b"a").is_none(),
+            "oldest entry should be evicted"
+        );
         assert!(cache.get(1, b"b").is_some());
         assert!(cache.get(1, b"c").is_some());
 
@@ -210,7 +213,10 @@ mod tests {
 
         assert!(cache.get(1, b"a").is_none());
         assert!(cache.get(1, b"b").is_none());
-        assert!(cache.get(2, b"c").is_some(), "table 2 entries should remain");
+        assert!(
+            cache.get(2, b"c").is_some(),
+            "table 2 entries should remain"
+        );
     }
 
     #[test]
@@ -238,6 +244,10 @@ mod tests {
         cache.put(1, b"pk1".to_vec(), PartitionData::new());
         cache.put(1, b"pk1".to_vec(), PartitionData::new());
 
-        assert_eq!(cache.size(), 1, "updating same key should not increase size");
+        assert_eq!(
+            cache.size(),
+            1,
+            "updating same key should not increase size"
+        );
     }
 }

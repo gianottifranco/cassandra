@@ -37,23 +37,17 @@
 //! - [`SaiSegment`] — per-SSTable index segment
 //! - [`SaiBuilder`] — builds SAI segments from SSTable data
 //!
-//! ## Current Limitations
+//! ## Current Coverage
 //!
-//! - Posting lists are in-memory only (not persisted to disk segments yet)
-//! - No trie-based term dictionary (using BTreeMap instead)
-//! - No bloom filter for term existence check
-//! - No integration with compaction lifecycle yet
-//! - Vector index support is partial (brute-force kNN, no HNSW/IVF)
+//! - Flush and compaction build per-SSTable `SaiSegment` instances.
+//! - Posting lists, bloom filters, and the segment binary codec have round-trip coverage.
+//! - Query serving keeps a merged in-memory view of segment postings.
+//! - Vector columns use an in-memory graph index for nearest-neighbor search.
 //!
-//! ## TODO
-//!
-//! - [ ] Persist posting lists to disk alongside SSTables
-//! - [ ] Implement trie-based term dictionary for memory efficiency
-//! - [ ] Add bloom filter for fast non-match elimination
-//! - [ ] Integrate with compaction: rebuild segments on SSTable merge
-//! - [ ] Integrate with streaming: include SAI segments in stream plan
-//! - [ ] Implement approximate nearest neighbor (HNSW or IVF) for vectors
+//! Remaining parity work is broader Java disk-format compatibility, segment streaming,
+//! and production-grade vector graph tuning.
 
+pub mod analyzer;
 pub mod bloom;
 pub mod builder;
 pub mod hnsw;
@@ -63,9 +57,10 @@ pub mod segment_format;
 pub mod vector_index;
 
 use parking_lot::RwLock;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{IndexDefinition, IndexEntry, IndexError, IndexType, SecondaryIndex};
+use analyzer::{AnalyzerInstance, SaiAnalyzer, analyzer_from_options};
 use posting::PostingList;
 
 /// A Storage Attached Index.
@@ -78,6 +73,7 @@ pub struct SaiIndex {
     definition: IndexDefinition,
     /// term → posting list (sorted row locations)
     terms: RwLock<BTreeMap<Vec<u8>, PostingList>>,
+    analyzer: Option<AnalyzerInstance>,
     /// Vector search index, instantiated if this is a vector column
     vector_index: Option<std::sync::Arc<crate::index::sai::vector_index::VectorIndex>>,
 }
@@ -89,6 +85,7 @@ impl SaiIndex {
             IndexType::Sai,
             "SaiIndex requires IndexType::Sai"
         );
+        let analyzer = analyzer_from_options(&definition.options).unwrap_or(None);
         let vector_index = if let Some(dims_str) = definition.options.get("vector_dimensions") {
             let dims = dims_str.parse().unwrap_or(0);
             let metric_str = definition
@@ -111,6 +108,7 @@ impl SaiIndex {
         Self {
             definition,
             terms: RwLock::new(BTreeMap::new()),
+            analyzer,
             vector_index,
         }
     }
@@ -161,6 +159,20 @@ impl SaiIndex {
 
         results
     }
+
+    fn analyzed_terms(&self, term: &[u8]) -> Vec<Vec<u8>> {
+        let Some(analyzer) = &self.analyzer else {
+            return vec![term.to_vec()];
+        };
+        let Ok(text) = std::str::from_utf8(term) else {
+            return vec![term.to_vec()];
+        };
+        analyzer
+            .analyze(text)
+            .into_iter()
+            .map(String::into_bytes)
+            .collect()
+    }
 }
 
 impl SecondaryIndex for SaiIndex {
@@ -178,17 +190,25 @@ impl SecondaryIndex for SaiIndex {
         }
 
         let mut terms = self.terms.write();
-        let posting_list = terms.entry(entry.term.clone()).or_default();
-        posting_list.add(entry.partition_key.clone(), entry.clustering_key.clone());
+        for term in self.analyzed_terms(&entry.term) {
+            let posting_list = terms.entry(term).or_default();
+            posting_list.add(entry.partition_key.clone(), entry.clustering_key.clone());
+        }
         Ok(())
     }
 
     fn delete(&self, entry: &IndexEntry) -> Result<(), IndexError> {
+        if let Some(ref vi) = self.vector_index {
+            vi.delete(&entry.partition_key, &entry.clustering_key);
+        }
+
         let mut terms = self.terms.write();
-        if let Some(posting_list) = terms.get_mut(&entry.term) {
-            posting_list.remove(&entry.partition_key, &entry.clustering_key);
-            if posting_list.is_empty() {
-                terms.remove(&entry.term);
+        for term in self.analyzed_terms(&entry.term) {
+            if let Some(posting_list) = terms.get_mut(&term) {
+                posting_list.remove(&entry.partition_key, &entry.clustering_key);
+                if posting_list.is_empty() {
+                    terms.remove(&term);
+                }
             }
         }
         Ok(())
@@ -196,19 +216,21 @@ impl SecondaryIndex for SaiIndex {
 
     fn search(&self, term: &[u8]) -> Result<Vec<IndexEntry>, IndexError> {
         let terms = self.terms.read();
-        let results = terms
-            .get(term)
-            .map(|pl| {
-                pl.locations()
-                    .iter()
-                    .map(|loc| IndexEntry {
-                        term: term.to_vec(),
-                        partition_key: loc.partition_key.clone(),
-                        clustering_key: loc.clustering_key.clone(),
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let mut seen = BTreeSet::new();
+        let mut results = Vec::new();
+        for analyzed_term in self.analyzed_terms(term) {
+            if let Some(posting_list) = terms.get(&analyzed_term) {
+                for loc in posting_list.locations() {
+                    if seen.insert((loc.partition_key.clone(), loc.clustering_key.clone())) {
+                        results.push(IndexEntry {
+                            term: analyzed_term.clone(),
+                            partition_key: loc.partition_key.clone(),
+                            clustering_key: loc.clustering_key.clone(),
+                        });
+                    }
+                }
+            }
+        }
         Ok(results)
     }
 
@@ -251,6 +273,9 @@ impl SecondaryIndex for SaiIndex {
 
     fn truncate(&self) -> Result<(), IndexError> {
         self.terms.write().clear();
+        if let Some(ref vi) = self.vector_index {
+            vi.truncate();
+        }
         Ok(())
     }
 
@@ -277,8 +302,10 @@ impl SecondaryIndex for SaiIndex {
                     }
                 }
             }
-            let existing_list = terms.entry(term).or_default();
-            existing_list.merge(&posting_list);
+            for analyzed_term in self.analyzed_terms(&term) {
+                let existing_list = terms.entry(analyzed_term).or_default();
+                existing_list.merge(&posting_list);
+            }
         }
         Ok(())
     }
@@ -298,6 +325,38 @@ mod tests {
             partition_key: pk.to_vec(),
             clustering_key: ck.to_vec(),
         }
+    }
+
+    fn sai_with_options(options: std::collections::HashMap<String, String>) -> SaiIndex {
+        SaiIndex::new(IndexDefinition {
+            name: "sai_text".to_string(),
+            keyspace: "ks".to_string(),
+            table: "docs".to_string(),
+            column: "body".to_string(),
+            index_type: IndexType::Sai,
+            options,
+        })
+    }
+
+    fn vector_sai() -> SaiIndex {
+        SaiIndex::new(IndexDefinition {
+            name: "sai_vec".to_string(),
+            keyspace: "ks".to_string(),
+            table: "items".to_string(),
+            column: "embedding".to_string(),
+            index_type: IndexType::Sai,
+            options: std::collections::HashMap::from([
+                ("vector_dimensions".to_string(), "3".to_string()),
+                (
+                    "vector_similarity_metric".to_string(),
+                    "euclidean".to_string(),
+                ),
+            ]),
+        })
+    }
+
+    fn vector_bytes(values: Vec<f32>) -> Vec<u8> {
+        cassandra_types::vector::VectorValue::new(values).serialize()
     }
 
     #[test]
@@ -341,6 +400,61 @@ mod tests {
     }
 
     #[test]
+    fn non_tokenizing_analyzer_transforms_index_and_query_terms() {
+        let idx = sai_with_options(std::collections::HashMap::from([
+            (analyzer::CASE_SENSITIVE.to_string(), "false".to_string()),
+            (analyzer::NORMALIZE.to_string(), "true".to_string()),
+            (analyzer::ASCII.to_string(), "true".to_string()),
+        ]));
+
+        idx.insert(&entry("Cafe\u{301} ÉLAN".as_bytes(), b"doc1", b""))
+            .unwrap();
+
+        assert!(idx.search(b"Cafe").unwrap().is_empty());
+        let results = idx.search(b"CAFE ELAN").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].partition_key, b"doc1");
+
+        idx.delete(&entry("CAFÉ elan".as_bytes(), b"doc1", b""))
+            .unwrap();
+        assert!(idx.search(b"cafe elan").unwrap().is_empty());
+    }
+
+    #[test]
+    fn standard_analyzer_indexes_and_searches_tokens() {
+        let idx = sai_with_options(std::collections::HashMap::from([
+            (analyzer::ANALYZER_CLASS.to_string(), "standard".to_string()),
+            (analyzer::CASE_SENSITIVE.to_string(), "false".to_string()),
+            (analyzer::NORMALIZE.to_string(), "true".to_string()),
+            (analyzer::ASCII.to_string(), "true".to_string()),
+        ]));
+
+        idx.insert(&entry("Cafe\u{301}, ÉLAN-42".as_bytes(), b"doc1", b""))
+            .unwrap();
+
+        let results = idx.search(b"elan").unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].partition_key, b"doc1");
+        assert_eq!(idx.search(b"42").unwrap().len(), 1);
+        assert!(idx.search(b"missing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn add_sai_segment_applies_analyzer_terms() {
+        let idx = sai_with_options(std::collections::HashMap::from([(
+            analyzer::CASE_SENSITIVE.to_string(),
+            "false".to_string(),
+        )]));
+        let mut builder = crate::index::sai::builder::SaiSegmentBuilder::new(1, "sai_text", "body");
+        builder.add(b"Hello World".to_vec(), b"doc1".to_vec(), Vec::new());
+
+        idx.add_sai_segment(builder.build()).unwrap();
+
+        assert_eq!(idx.search(b"hello world").unwrap().len(), 1);
+        assert!(idx.search(b"Hello World").unwrap().len() == 1);
+    }
+
+    #[test]
     fn truncate_clears_all() {
         let idx = test_sai();
         idx.insert(&entry(b"a", b"pk1", b"")).unwrap();
@@ -348,6 +462,32 @@ mod tests {
         idx.truncate().unwrap();
         assert_eq!(idx.term_count(), 0);
         assert_eq!(idx.posting_count(), 0);
+    }
+
+    #[test]
+    fn vector_delete_removes_ann_result() {
+        let idx = vector_sai();
+        let first = vector_bytes(vec![0.0, 0.0, 0.0]);
+        let second = vector_bytes(vec![1.0, 0.0, 0.0]);
+        idx.insert(&entry(&first, b"pk1", b"")).unwrap();
+        idx.insert(&entry(&second, b"pk2", b"")).unwrap();
+
+        idx.delete(&entry(&first, b"pk1", b"")).unwrap();
+
+        let results = idx.search_vector(&first, 2).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.partition_key, b"pk2");
+    }
+
+    #[test]
+    fn vector_truncate_clears_ann_results() {
+        let idx = vector_sai();
+        let vector = vector_bytes(vec![0.0, 0.0, 0.0]);
+        idx.insert(&entry(&vector, b"pk1", b"")).unwrap();
+
+        idx.truncate().unwrap();
+
+        assert!(idx.search_vector(&vector, 1).unwrap().is_empty());
     }
 
     #[test]

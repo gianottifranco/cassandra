@@ -140,6 +140,37 @@ pub struct ColumnDef {
     pub cql_type: CqlTypeName,
     pub is_static: bool,
     pub masked_with: Option<(String, Vec<Term>)>,
+    pub constraints: Vec<ColumnConstraint>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ColumnConstraint {
+    Scalar {
+        column: String,
+        op: ConstraintRelationOp,
+        term: String,
+    },
+    Function {
+        name: String,
+        args: Vec<String>,
+        op: ConstraintRelationOp,
+        term: String,
+    },
+    UnaryFunction {
+        name: String,
+        args: Vec<String>,
+    },
+    NotNull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstraintRelationOp {
+    Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
 }
 
 /// CQL type name as parsed (not yet resolved against the type system).
@@ -151,6 +182,7 @@ pub enum CqlTypeName {
     Map(Box<CqlTypeName>, Box<CqlTypeName>),
     Tuple(Vec<CqlTypeName>),
     Frozen(Box<CqlTypeName>),
+    Vector(Box<CqlTypeName>, u32),
 }
 
 impl CqlTypeName {
@@ -169,6 +201,9 @@ impl CqlTypeName {
             CqlTypeName::Tuple(types) => {
                 let resolved: Option<Vec<_>> = types.iter().map(|t| t.resolve()).collect();
                 Some(CqlType::Tuple(resolved?))
+            }
+            CqlTypeName::Vector(inner, dimensions) => {
+                Some(CqlType::Vector(Box::new(inner.resolve()?), *dimensions))
             }
             CqlTypeName::Frozen(inner) => {
                 let resolved = inner.resolve()?;
@@ -201,6 +236,8 @@ pub enum AlterTableOp {
     AddColumn(ColumnDef),
     DropColumn(String),
     AlterColumn(String, CqlTypeName),
+    AlterConstraints(String, Vec<ColumnConstraint>),
+    DropConstraints(String),
     MaskColumn(String, String, Vec<Term>), // col, func, args
     DropMask(String),                      // col
     WithOptions(HashMap<String, String>),
@@ -223,10 +260,18 @@ pub struct Select {
     pub keyspace: Option<String>,
     pub table: String,
     pub where_clause: Vec<Relation>,
+    pub group_by: Vec<String>,
     pub order_by: Vec<(String, ClusteringOrder)>,
+    pub ann_order_by: Option<SelectAnnOrder>,
     pub limit: Option<Term>,
     pub per_partition_limit: Option<Term>,
     pub allow_filtering: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SelectAnnOrder {
+    pub column: String,
+    pub vector_literal: Vec<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -265,6 +310,7 @@ pub enum RelationOp {
     In,
     Contains,
     ContainsKey,
+    Like,
 }
 
 /// A CQL term (value or bind marker).
@@ -322,6 +368,16 @@ pub struct Update {
 pub struct Assignment {
     pub column: String,
     pub value: Term,
+    pub op: AssignmentOp,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignmentOp {
+    Set,
+    CollectionAppend,
+    CollectionPrepend,
+    CollectionRemove,
+    MapPut { key: Term },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -685,6 +741,18 @@ mod tests {
     }
 
     #[test]
+    fn resolve_vector_type() {
+        let t = CqlTypeName::Vector(Box::new(CqlTypeName::Simple("float".into())), 3);
+        assert_eq!(
+            t.resolve(),
+            Some(cassandra_types::CqlType::Vector(
+                Box::new(cassandra_types::CqlType::Float),
+                3
+            ))
+        );
+    }
+
+    #[test]
     fn is_schema_altering() {
         let stmt = Statement::CreateKeyspace(CreateKeyspace {
             name: "ks".into(),
@@ -701,7 +769,9 @@ mod tests {
             keyspace: None,
             table: "t".into(),
             where_clause: vec![],
+            group_by: vec![],
             order_by: vec![],
+            ann_order_by: None,
             limit: None,
             per_partition_limit: None,
             allow_filtering: false,

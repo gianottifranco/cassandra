@@ -56,9 +56,33 @@ pub struct TableParams {
     #[serde(default)]
     pub comment: String,
     #[serde(default)]
+    pub allow_auto_snapshot: bool,
+    #[serde(default)]
+    pub incremental_backups: bool,
+    #[serde(default)]
+    pub memtable_flush_period_in_ms: i32,
+    #[serde(default)]
     pub compaction: BTreeMap<String, String>,
     #[serde(default)]
     pub compression: BTreeMap<String, String>,
+    #[serde(default)]
+    pub caching: BTreeMap<String, String>,
+    #[serde(default)]
+    pub read_repair: String,
+    #[serde(default)]
+    pub speculative_retry: String,
+    #[serde(default)]
+    pub additional_write_policy: String,
+    #[serde(default)]
+    pub memtable: String,
+    #[serde(default)]
+    pub fast_path: String,
+    #[serde(default)]
+    pub transactional_migration_from: String,
+    #[serde(default)]
+    pub auto_repair: BTreeMap<String, String>,
+    #[serde(default)]
+    pub cdc: bool,
     #[serde(default)]
     pub transactional_mode: TransactionalMode,
 }
@@ -89,8 +113,20 @@ impl Default for TableParams {
             max_index_interval: default_max_index_interval(),
             crc_check_chance: default_crc_check_chance(),
             comment: String::new(),
+            allow_auto_snapshot: true,
+            incremental_backups: false,
+            memtable_flush_period_in_ms: 0,
             compaction: BTreeMap::new(),
             compression: BTreeMap::new(),
+            caching: BTreeMap::new(),
+            read_repair: String::new(),
+            speculative_retry: String::new(),
+            additional_write_policy: String::new(),
+            memtable: String::new(),
+            fast_path: String::new(),
+            transactional_migration_from: String::new(),
+            auto_repair: BTreeMap::new(),
+            cdc: false,
             transactional_mode: TransactionalMode::default(),
         }
     }

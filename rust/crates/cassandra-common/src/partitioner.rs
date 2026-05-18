@@ -104,8 +104,7 @@ pub trait Partitioner: Send + Sync {
             result.insert(sorted_tokens[0], 1.0);
             return result;
         }
-        let total_range =
-            self.max_token().value() as f64 - self.min_token().value() as f64 + 1.0;
+        let total_range = self.max_token().value() as f64 - self.min_token().value() as f64 + 1.0;
         for i in 0..sorted_tokens.len() {
             let prev = if i == 0 {
                 sorted_tokens[sorted_tokens.len() - 1]

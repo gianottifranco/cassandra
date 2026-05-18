@@ -19,7 +19,7 @@ use byteorder::{BigEndian, ReadBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
 
 use crate::compress::metadata::CompressionMetadata;
-use crate::compress::{create_compressor, ICompressor};
+use crate::compress::{ICompressor, create_compressor};
 use crate::error::IoError;
 use crate::util::rebufferer::{BufferHolder, Rebufferer};
 
@@ -32,10 +32,7 @@ pub struct CompressedChunkReader {
 
 impl CompressedChunkReader {
     /// Opens the compressed data file and pairs it with pre-loaded metadata.
-    pub fn new(
-        data_path: impl AsRef<Path>,
-        metadata: CompressionMetadata,
-    ) -> io::Result<Self> {
+    pub fn new(data_path: impl AsRef<Path>, metadata: CompressionMetadata) -> io::Result<Self> {
         let file = File::open(data_path)?;
         let compressor = create_compressor(metadata.compressor_type);
         Ok(Self {
@@ -49,9 +46,10 @@ impl CompressedChunkReader {
     fn read_chunk(&self, chunk_index: usize) -> io::Result<Vec<u8>> {
         let offset = self.metadata.chunk_offsets[chunk_index];
 
-        let mut file = self.file.lock().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("lock poisoned: {e}"))
-        })?;
+        let mut file = self
+            .file
+            .lock()
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("lock poisoned: {e}")))?;
         file.seek(SeekFrom::Start(offset))?;
 
         // Read compressed_len(u32 BE) + compressed_data + crc32(u32 BE)

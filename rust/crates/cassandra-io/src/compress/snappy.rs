@@ -23,18 +23,18 @@ impl SnappyCompressor {
 impl ICompressor for SnappyCompressor {
     fn compress(&self, input: &[u8], output: &mut Vec<u8>) -> Result<(), IoError> {
         let mut encoder = Encoder::new();
-        let compressed = encoder.compress_vec(input).map_err(|e| {
-            IoError::Compression(format!("Snappy compression failed: {e}"))
-        })?;
+        let compressed = encoder
+            .compress_vec(input)
+            .map_err(|e| IoError::Compression(format!("Snappy compression failed: {e}")))?;
         output.extend_from_slice(&compressed);
         Ok(())
     }
 
     fn decompress(&self, input: &[u8], _uncompressed_length: usize) -> Result<Vec<u8>, IoError> {
         let mut decoder = Decoder::new();
-        decoder.decompress_vec(input).map_err(|e| {
-            IoError::Compression(format!("Snappy decompression failed: {e}"))
-        })
+        decoder
+            .decompress_vec(input)
+            .map_err(|e| IoError::Compression(format!("Snappy decompression failed: {e}")))
     }
 
     fn compressor_type(&self) -> CompressorType {
@@ -55,9 +55,7 @@ mod tests {
         let input: Vec<u8> = (0..4096).map(|i| (i * 7 + 13) as u8).collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -66,9 +64,7 @@ mod tests {
         let input: Vec<u8> = vec![];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, 0)
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, 0).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -77,9 +73,7 @@ mod tests {
         let input: Vec<u8> = vec![0xAB; 1_000_000];
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -90,9 +84,7 @@ mod tests {
             .collect();
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 

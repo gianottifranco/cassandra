@@ -8,7 +8,7 @@
 //! - `org.apache.cassandra.transport.messages.ErrorMessage`
 
 use cassandra_common::CassandraError;
-use cassandra_coordinator::WriteError;
+use cassandra_coordinator::{ReadError, WriteError};
 use cassandra_native_protocol::error_codes;
 use cassandra_native_protocol::frame::Frame;
 use cassandra_native_protocol::message::Message;
@@ -32,19 +32,18 @@ impl From<ExecutorError> for CassandraError {
     }
 }
 
+/// Convert any `CassandraError` to a protocol error frame.
+///
+/// Shared helper used by `executor_error_to_error_frame`, `write_error_to_error_frame`,
+/// and `read_error_to_error_frame`.
+pub fn cassandra_error_to_error_frame(err: CassandraError, version: u8, stream_id: i16) -> Frame {
+    let error_msg = error_codes::error_to_message(&err);
+    response::encode_response(&Message::Error(error_msg), version, stream_id)
+}
+
 /// Convert an `ExecutorError` to a protocol error frame using proper error codes.
-pub fn executor_error_to_error_frame(
-    err: ExecutorError,
-    version: u8,
-    stream_id: i16,
-) -> Frame {
-    let cassandra_err: CassandraError = err.into();
-    let error_msg = error_codes::error_to_message(&cassandra_err);
-    response::encode_response(
-        &Message::Error(error_msg),
-        version,
-        stream_id,
-    )
+pub fn executor_error_to_error_frame(err: ExecutorError, version: u8, stream_id: i16) -> Frame {
+    cassandra_error_to_error_frame(err.into(), version, stream_id)
 }
 
 // ─── WriteError → CassandraError (WU-03) ────────────────────────
@@ -105,34 +104,93 @@ pub fn write_error_to_cassandra_error(err: WriteError) -> CassandraError {
             CassandraError::TruncateError("Cannot write during truncation".to_string())
         }
         WriteError::SchemaDisagreement(msg) => CassandraError::InvalidQuery(msg),
-        WriteError::MutationTooLarge { size, limit } => CassandraError::InvalidQuery(
-            format!("Mutation of {} bytes exceeds limit of {} bytes", size, limit),
-        ),
+        WriteError::MutationTooLarge { size, limit } => CassandraError::InvalidQuery(format!(
+            "Mutation of {} bytes exceeds limit of {} bytes",
+            size, limit
+        )),
         WriteError::Internal(msg) => CassandraError::ServerError(msg),
     }
 }
 
 /// Convert a `WriteError` to a protocol error frame (WU-03).
+pub fn write_error_to_error_frame(err: WriteError, version: u8, stream_id: i16) -> Frame {
+    cassandra_error_to_error_frame(write_error_to_cassandra_error(err), version, stream_id)
+}
+
+// ─── ReadError → CassandraError ──────────────────────────────────
+
+/// Convert a `ReadError` to a `CassandraError`.
 ///
-/// Similar to `executor_error_to_error_frame()` but for write-path errors.
-pub fn write_error_to_error_frame(
-    err: WriteError,
-    version: u8,
-    stream_id: i16,
-) -> Frame {
-    let cassandra_err = write_error_to_cassandra_error(err);
-    let error_msg = error_codes::error_to_message(&cassandra_err);
-    response::encode_response(
-        &Message::Error(error_msg),
-        version,
-        stream_id,
-    )
+/// Maps all `ReadError` variants to protocol-level error types:
+/// - Timeout → ReadTimeout (0x1200)
+/// - ReadFailure → ReadFailure (0x1300)
+/// - Unavailable → Unavailable (0x1000)
+/// - TombstoneOverwhelming → ReadFailure (0x1300)
+/// - DigestMismatch → ServerError (0x0000)
+/// - QueryCancelled → ServerError (0x0000)
+/// - CoordinatorBehind → ServerError (0x0000)
+/// - Internal → ServerError (0x0000)
+pub fn read_error_to_cassandra_error(err: ReadError) -> CassandraError {
+    match err {
+        ReadError::Timeout {
+            cl,
+            required,
+            received,
+            data_present,
+        } => CassandraError::ReadTimeout {
+            consistency: cl.to_string(),
+            received: received as i32,
+            block_for: required as i32,
+            data_present,
+        },
+        ReadError::Unavailable {
+            cl,
+            required,
+            alive,
+        } => CassandraError::Unavailable {
+            consistency: cl.to_string(),
+            required: required as i32,
+            alive: alive as i32,
+        },
+        ReadError::ReadFailure {
+            cl,
+            required,
+            received,
+            num_failures,
+            data_present,
+            failure_map: _,
+        } => CassandraError::ReadFailure {
+            consistency: cl.to_string(),
+            received: received as i32,
+            block_for: required as i32,
+            num_failures: num_failures as i32,
+            data_present,
+        },
+        ReadError::TombstoneOverwhelming { count, threshold } => {
+            CassandraError::ServerError(format!(
+                "Scanned over {count} tombstones during query (limit: {threshold}); query aborted"
+            ))
+        }
+        ReadError::DigestMismatch { .. } => {
+            CassandraError::ServerError("Digest mismatch during read".to_string())
+        }
+        ReadError::QueryCancelled => CassandraError::ServerError("Query cancelled".to_string()),
+        ReadError::CoordinatorBehind(msg) => {
+            CassandraError::ServerError(format!("Coordinator behind: {msg}"))
+        }
+        ReadError::Internal(msg) => CassandraError::ServerError(msg),
+    }
+}
+
+/// Convert a `ReadError` to a protocol error frame.
+pub fn read_error_to_error_frame(err: ReadError, version: u8, stream_id: i16) -> Frame {
+    cassandra_error_to_error_frame(read_error_to_cassandra_error(err), version, stream_id)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cassandra_coordinator::{ConsistencyLevel, WriteType};
+    use cassandra_coordinator::{ConsistencyLevel, ReadError, WriteType};
     use cassandra_native_protocol::frame::Opcode;
     use cassandra_native_protocol::types;
     use std::collections::HashMap;
@@ -274,9 +332,9 @@ mod tests {
 
     #[test]
     fn write_schema_disagreement_maps_to_invalid_query() {
-        let ce = write_error_to_cassandra_error(
-            WriteError::SchemaDisagreement("table being altered".into()),
-        );
+        let ce = write_error_to_cassandra_error(WriteError::SchemaDisagreement(
+            "table being altered".into(),
+        ));
         assert_eq!(ce.error_code(), Some(0x2200));
     }
 
@@ -311,5 +369,119 @@ mod tests {
         let mut body: &[u8] = &frame.body;
         let code = types::read_int(&mut body).unwrap();
         assert_eq!(code, 0x1100); // WRITE_TIMEOUT
+    }
+
+    // ── ReadError → CassandraError Tests ────────────────────────────
+
+    #[test]
+    fn read_timeout_maps_to_read_timeout() {
+        let err = ReadError::Timeout {
+            cl: ConsistencyLevel::Quorum,
+            required: 2,
+            received: 1,
+            data_present: false,
+        };
+        let ce = read_error_to_cassandra_error(err);
+        assert_eq!(ce.error_code(), Some(0x1200));
+        match ce {
+            CassandraError::ReadTimeout {
+                consistency,
+                received,
+                block_for,
+                data_present,
+            } => {
+                assert_eq!(consistency, "QUORUM");
+                assert_eq!(received, 1);
+                assert_eq!(block_for, 2);
+                assert!(!data_present);
+            }
+            other => panic!("Expected ReadTimeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_unavailable_maps_to_unavailable() {
+        let err = ReadError::Unavailable {
+            cl: ConsistencyLevel::All,
+            required: 3,
+            alive: 1,
+        };
+        let ce = read_error_to_cassandra_error(err);
+        assert_eq!(ce.error_code(), Some(0x1000));
+    }
+
+    #[test]
+    fn read_failure_maps_to_read_failure() {
+        let err = ReadError::ReadFailure {
+            cl: ConsistencyLevel::Quorum,
+            required: 2,
+            received: 1,
+            num_failures: 1,
+            data_present: true,
+            failure_map: HashMap::new(),
+        };
+        let ce = read_error_to_cassandra_error(err);
+        assert_eq!(ce.error_code(), Some(0x1300));
+    }
+
+    #[test]
+    fn tombstone_overwhelming_maps_to_server_error() {
+        let err = ReadError::TombstoneOverwhelming {
+            count: 200_000,
+            threshold: 100_000,
+        };
+        let ce = read_error_to_cassandra_error(err);
+        assert_eq!(ce.error_code(), Some(0x0000));
+        match ce {
+            CassandraError::ServerError(msg) => {
+                assert!(msg.contains("200000"));
+                assert!(msg.contains("100000"));
+            }
+            other => panic!("Expected ServerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn digest_mismatch_maps_to_server_error() {
+        let err = ReadError::DigestMismatch {
+            replicas_mismatched: 2,
+        };
+        let ce = read_error_to_cassandra_error(err);
+        assert_eq!(ce.error_code(), Some(0x0000));
+    }
+
+    #[test]
+    fn query_cancelled_maps_to_server_error() {
+        let ce = read_error_to_cassandra_error(ReadError::QueryCancelled);
+        assert_eq!(ce.error_code(), Some(0x0000));
+    }
+
+    #[test]
+    fn coordinator_behind_maps_to_server_error() {
+        let ce = read_error_to_cassandra_error(ReadError::CoordinatorBehind("stale".into()));
+        assert_eq!(ce.error_code(), Some(0x0000));
+    }
+
+    #[test]
+    fn read_internal_maps_to_server_error() {
+        let ce = read_error_to_cassandra_error(ReadError::Internal("unexpected".into()));
+        assert_eq!(ce.error_code(), Some(0x0000));
+    }
+
+    #[test]
+    fn read_error_to_frame_test() {
+        let err = ReadError::Timeout {
+            cl: ConsistencyLevel::Quorum,
+            required: 2,
+            received: 1,
+            data_present: false,
+        };
+        let frame = read_error_to_error_frame(err, 4, 7);
+        assert_eq!(frame.header.opcode, Opcode::Error);
+        assert_eq!(frame.header.stream_id, 7);
+
+        let mut body: &[u8] = &frame.body;
+        let code = types::read_int(&mut body).unwrap();
+        assert_eq!(code, 0x1200); // READ_TIMEOUT
     }
 }

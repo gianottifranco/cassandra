@@ -184,8 +184,11 @@ mod tests {
             "index_size": 512,
             "compaction_level": 5
         });
-        fs::write(&stats_path, serde_json::to_string_pretty(&stats_json).unwrap())
-            .expect("write stats");
+        fs::write(
+            &stats_path,
+            serde_json::to_string_pretty(&stats_json).unwrap(),
+        )
+        .expect("write stats");
 
         // Run the reset
         run(data_path.to_str().unwrap());

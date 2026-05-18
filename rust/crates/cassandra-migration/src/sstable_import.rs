@@ -144,6 +144,22 @@ pub enum ImportStatus {
     Skipped { reason: String },
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImportedSSTableManifest {
+    descriptor: JavaSSTableDescriptor,
+    components: Vec<ImportedComponentRecord>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImportedComponentRecord {
+    component: SSTableComponent,
+    source_file: String,
+    target_file: String,
+    source_bytes: u64,
+    md5: String,
+}
+
 /// Configuration for SSTable import.
 #[derive(Debug, Clone)]
 pub struct ImportConfig {
@@ -284,6 +300,118 @@ pub fn list_components(descriptor: &JavaSSTableDescriptor) -> io::Result<Vec<SST
     Ok(components)
 }
 
+fn component_filename(descriptor: &JavaSSTableDescriptor, component: &SSTableComponent) -> String {
+    format!(
+        "{}-{}-{}-{}-{}",
+        descriptor.keyspace,
+        descriptor.table,
+        descriptor.format,
+        descriptor.generation,
+        component.extension(),
+    )
+}
+
+fn target_component_filename(
+    descriptor: &JavaSSTableDescriptor,
+    component: &SSTableComponent,
+) -> String {
+    format!(
+        "{}-{}-rust-{}-{}",
+        descriptor.keyspace,
+        descriptor.table,
+        descriptor.generation,
+        component.extension(),
+    )
+}
+
+fn target_manifest_filename(descriptor: &JavaSSTableDescriptor) -> String {
+    format!(
+        "{}-{}-rust-{}-Manifest.json",
+        descriptor.keyspace, descriptor.table, descriptor.generation
+    )
+}
+
+fn validate_component_manifest(
+    descriptor: &JavaSSTableDescriptor,
+    components: &[SSTableComponent],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if matches!(descriptor.format, JavaSSTableFormat::Unknown(_)) {
+        warnings.push(format!("Unknown Java SSTable format {}", descriptor.format));
+    }
+
+    for required in [
+        SSTableComponent::Data,
+        SSTableComponent::PrimaryIndex,
+        SSTableComponent::Statistics,
+    ] {
+        if !components.contains(&required) {
+            warnings.push(format!(
+                "Missing required Java component {}",
+                required.extension()
+            ));
+        }
+    }
+
+    let toc = SSTableComponent::Toc;
+    if components.contains(&toc) {
+        let toc_path = descriptor
+            .directory
+            .join(component_filename(descriptor, &toc));
+        match fs::read_to_string(&toc_path) {
+            Ok(contents) => {
+                let toc_components = contents
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(SSTableComponent::from_extension)
+                    .collect::<Vec<_>>();
+                for component in &toc_components {
+                    if !components.contains(component) {
+                        warnings.push(format!(
+                            "TOC references missing component {}",
+                            component.extension()
+                        ));
+                    }
+                }
+                for component in components {
+                    if *component != SSTableComponent::Toc && !toc_components.contains(component) {
+                        warnings.push(format!(
+                            "Component {} exists but is absent from TOC",
+                            component.extension()
+                        ));
+                    }
+                }
+            }
+            Err(e) => warnings.push(format!("Failed to read TOC.txt: {e}")),
+        }
+    } else {
+        warnings.push("Missing TOC.txt component".to_string());
+    }
+
+    warnings
+}
+
+fn component_record(
+    descriptor: &JavaSSTableDescriptor,
+    component: &SSTableComponent,
+    source_file: String,
+    target_file: String,
+) -> io::Result<ImportedComponentRecord> {
+    use md5::{Digest, Md5};
+
+    let source_path = descriptor.directory.join(&source_file);
+    let data = fs::read(&source_path)?;
+    Ok(ImportedComponentRecord {
+        component: component.clone(),
+        source_file,
+        target_file,
+        source_bytes: data.len() as u64,
+        md5: format!("{:x}", Md5::digest(&data)),
+    })
+}
+
 /// Import a single Java SSTable and convert to Rust format.
 ///
 /// This performs a logical conversion: reads the Java SSTable data,
@@ -359,33 +487,19 @@ pub fn import_sstable(
         };
     }
 
-    // GAP(gap_guard_sstable_java_compat): Full binary conversion from Java to Rust SSTable format — tracked in gap_guards.rs
-    // For now, perform file-level copy with checksum validation as a
-    // working framework. The inner parsing of Java SSTable binary layout
-    // (partition headers, clustering prefixes, cells, range tombstones)
-    // is deferred but the conversion pipeline is fully wired.
-
     let mut converted = Vec::new();
     let mut target_bytes_total = 0u64;
-    let mut warnings = Vec::new();
+    let mut warnings = validate_component_manifest(descriptor, &components);
+    warnings.push(
+        "Java SSTable components were validated and staged; row/cell binary conversion remains required before serving them as Rust SSTables"
+            .to_string(),
+    );
+    let mut records = Vec::new();
 
     for component in &components {
-        let src_name = format!(
-            "{}-{}-{}-{}-{}",
-            descriptor.keyspace,
-            descriptor.table,
-            descriptor.format,
-            descriptor.generation,
-            component.extension(),
-        );
+        let src_name = component_filename(descriptor, component);
         let src_path = descriptor.directory.join(&src_name);
-        let dst_name = format!(
-            "{}-{}-rust-{}-{}",
-            descriptor.keyspace,
-            descriptor.table,
-            descriptor.generation,
-            component.extension(),
-        );
+        let dst_name = target_component_filename(descriptor, component);
         let dst_path = target_dir.join(&dst_name);
 
         if src_path.exists() {
@@ -393,6 +507,14 @@ pub fn import_sstable(
                 Ok(bytes) => {
                     target_bytes_total += bytes;
                     converted.push(component.clone());
+                    match component_record(descriptor, component, src_name.clone(), dst_name) {
+                        Ok(record) => records.push(record),
+                        Err(e) => warnings.push(format!(
+                            "Failed to record metadata for {}: {}",
+                            component.extension(),
+                            e
+                        )),
+                    }
                     debug!(
                         component = %component.extension(),
                         bytes,
@@ -404,6 +526,23 @@ pub fn import_sstable(
                 }
             }
         }
+    }
+
+    let manifest = ImportedSSTableManifest {
+        descriptor: descriptor.clone(),
+        components: records,
+        warnings: warnings.clone(),
+    };
+    match serde_json::to_vec_pretty(&manifest) {
+        Ok(bytes) => {
+            let manifest_path = target_dir.join(target_manifest_filename(descriptor));
+            if let Err(e) = fs::write(&manifest_path, &bytes) {
+                warnings.push(format!("Failed to write import manifest: {}", e));
+            } else {
+                target_bytes_total += bytes.len() as u64;
+            }
+        }
+        Err(e) => warnings.push(format!("Failed to serialize import manifest: {}", e)),
     }
 
     // Checksum validation
@@ -457,21 +596,8 @@ fn validate_import_checksum(
     use md5::{Digest, Md5};
 
     for component in converted {
-        let src_name = format!(
-            "{}-{}-{}-{}-{}",
-            descriptor.keyspace,
-            descriptor.table,
-            descriptor.format,
-            descriptor.generation,
-            component.extension(),
-        );
-        let dst_name = format!(
-            "{}-{}-rust-{}-{}",
-            descriptor.keyspace,
-            descriptor.table,
-            descriptor.generation,
-            component.extension(),
-        );
+        let src_name = component_filename(descriptor, component);
+        let dst_name = target_component_filename(descriptor, component);
 
         let src_path = descriptor.directory.join(&src_name);
         let dst_path = target_dir.join(&dst_name);
@@ -610,6 +736,49 @@ mod tests {
         );
         assert!(result.checksum_valid);
         assert!(result.source_bytes > 0);
+        assert!(
+            tgt_dir.path().join("ks-t1-rust-1-Manifest.json").exists(),
+            "import should write a conversion manifest"
+        );
+    }
+
+    #[test]
+    fn import_warns_on_toc_mismatch() {
+        let src_dir = TempDir::new().unwrap();
+        let tgt_dir = TempDir::new().unwrap();
+        let prefix = "ks-t1-big-1";
+        fs::write(src_dir.path().join(format!("{}-Data.db", prefix)), "data").unwrap();
+        fs::write(src_dir.path().join(format!("{}-Index.db", prefix)), "index").unwrap();
+        fs::write(
+            src_dir.path().join(format!("{}-Statistics.db", prefix)),
+            "stats",
+        )
+        .unwrap();
+        fs::write(
+            src_dir.path().join(format!("{}-TOC.txt", prefix)),
+            "Data.db\nIndex.db\nStatistics.db\nFilter.db\n",
+        )
+        .unwrap();
+
+        let descriptor = JavaSSTableDescriptor {
+            keyspace: "ks".into(),
+            table: "t1".into(),
+            generation: 1,
+            format: JavaSSTableFormat::Big,
+            version: "nb".into(),
+            directory: src_dir.path().to_path_buf(),
+        };
+
+        let result = import_sstable(&descriptor, tgt_dir.path(), true);
+        let ImportStatus::PartialSuccess { warnings } = result.status else {
+            panic!("expected partial success for TOC mismatch");
+        };
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("TOC references missing component Filter.db")),
+            "warnings were {warnings:?}"
+        );
     }
 
     #[test]

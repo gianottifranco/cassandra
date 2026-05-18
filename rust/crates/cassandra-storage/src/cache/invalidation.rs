@@ -67,9 +67,7 @@ impl StorageEventListener for CacheInvalidationListener {
                     self.invalidate_sstable(*id);
                 }
             }
-            StorageEvent::CompactionCompleted {
-                input_sstables, ..
-            } => {
+            StorageEvent::CompactionCompleted { input_sstables, .. } => {
                 for id in input_sstables {
                     self.invalidate_sstable(*id);
                 }

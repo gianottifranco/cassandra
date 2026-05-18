@@ -23,9 +23,9 @@
 //! - `org.apache.cassandra.db.Mutation`
 //! - `org.apache.cassandra.db.WriteType`
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dashmap::DashSet;
@@ -354,8 +354,149 @@ pub struct ViewFanoutResult {
     pub mutations_generated: usize,
     /// Number of view mutations successfully applied.
     pub mutations_applied: usize,
+    /// Number of failed attempts requeued for retry.
+    pub mutations_retried: usize,
     /// Number of view mutations that failed (logged, not cascaded).
     pub mutations_failed: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct AsyncViewFanoutTask {
+    pub mutation: cassandra_storage::materialized_views::ViewMutation,
+    pub attempts: u32,
+}
+
+/// Queue-backed asynchronous MV fanout dispatcher.
+///
+/// Java schedules view writes separately from the base mutation. This
+/// dispatcher models that split: view mutations are enqueued, backlog metrics
+/// are updated immediately, and a worker/drain applies them later.
+#[derive(Clone)]
+pub struct AsyncViewFanoutDispatcher {
+    pending: Arc<Mutex<VecDeque<AsyncViewFanoutTask>>>,
+    metrics: Arc<ViewFanoutMetrics>,
+    backlog: Arc<AtomicU64>,
+}
+
+impl AsyncViewFanoutDispatcher {
+    pub fn new(metrics: Arc<ViewFanoutMetrics>, backlog: Arc<AtomicU64>) -> Self {
+        Self {
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+            metrics,
+            backlog,
+        }
+    }
+
+    pub fn enqueue(
+        &self,
+        mutations: impl IntoIterator<Item = cassandra_storage::materialized_views::ViewMutation>,
+    ) -> usize {
+        let mut pending = self.pending.lock().expect("view fanout queue lock");
+        let mut count = 0;
+        for mutation in mutations {
+            pending.push_back(AsyncViewFanoutTask {
+                mutation,
+                attempts: 0,
+            });
+            count += 1;
+        }
+        self.metrics
+            .view_mutations_generated
+            .fetch_add(count as u64, Ordering::Relaxed);
+        self.backlog.fetch_add(count as u64, Ordering::Relaxed);
+        count
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().expect("view fanout queue lock").len()
+    }
+
+    pub fn drain_with<F>(&self, mut apply: F) -> ViewFanoutResult
+    where
+        F: FnMut(&cassandra_storage::materialized_views::ViewMutation) -> Result<(), WriteError>,
+    {
+        let mut result = ViewFanoutResult::default();
+        loop {
+            let task = self
+                .pending
+                .lock()
+                .expect("view fanout queue lock")
+                .pop_front();
+            let Some(task) = task else {
+                break;
+            };
+
+            result.mutations_generated += 1;
+            match apply(&task.mutation) {
+                Ok(()) => {
+                    result.mutations_applied += 1;
+                    self.metrics
+                        .view_mutations_applied
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    result.mutations_failed += 1;
+                    self.metrics
+                        .view_mutations_failed
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            self.backlog.fetch_sub(1, Ordering::Relaxed);
+        }
+        result
+    }
+
+    pub fn drain_with_retries<F>(&self, max_attempts: u32, mut apply: F) -> ViewFanoutResult
+    where
+        F: FnMut(&cassandra_storage::materialized_views::ViewMutation) -> Result<(), WriteError>,
+    {
+        let max_attempts = max_attempts.max(1);
+        let tasks_to_process = self.pending_count();
+        let mut result = ViewFanoutResult::default();
+
+        for _ in 0..tasks_to_process {
+            let task = self
+                .pending
+                .lock()
+                .expect("view fanout queue lock")
+                .pop_front();
+            let Some(mut task) = task else {
+                break;
+            };
+
+            result.mutations_generated += 1;
+            match apply(&task.mutation) {
+                Ok(()) => {
+                    result.mutations_applied += 1;
+                    self.metrics
+                        .view_mutations_applied
+                        .fetch_add(1, Ordering::Relaxed);
+                    self.backlog.fetch_sub(1, Ordering::Relaxed);
+                }
+                Err(_) => {
+                    task.attempts = task.attempts.saturating_add(1);
+                    if task.attempts < max_attempts {
+                        result.mutations_retried += 1;
+                        self.metrics
+                            .view_mutations_retried
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.pending
+                            .lock()
+                            .expect("view fanout queue lock")
+                            .push_back(task);
+                    } else {
+                        result.mutations_failed += 1;
+                        self.metrics
+                            .view_mutations_failed
+                            .fetch_add(1, Ordering::Relaxed);
+                        self.backlog.fetch_sub(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+
+        result
+    }
 }
 
 /// Write guardrails configuration.
@@ -448,6 +589,14 @@ impl Default for WriteMetrics {
 /// logs a warning. Java uses `max_pending_view_updates` in cassandra.yaml.
 pub const DEFAULT_VIEW_UPDATE_BACKLOG_THRESHOLD: u64 = 10_000;
 
+/// Reader used by MV maintenance to fetch the existing base row before a write.
+///
+/// The storage layer implementation should return the currently visible row
+/// state for the mutation's partition/clustering key before the base mutation is
+/// applied. `None` means the row does not exist or cannot be read.
+pub type ViewExistingRowReader =
+    Arc<dyn Fn(&CoordinatedMutation) -> Option<HashMap<String, Option<Vec<u8>>>> + Send + Sync>;
+
 pub struct WriteCoordinator {
     /// Cluster metadata for replica lookups.
     cluster: Arc<ClusterMetadata>,
@@ -480,12 +629,15 @@ pub struct WriteCoordinator {
     pub view_update_backlog: Arc<AtomicU64>,
     /// Threshold for view update backlog warning (WU-18).
     view_update_backlog_threshold: u64,
+    /// Existing row reader used for materialized-view delta generation.
+    view_existing_row_reader: Option<ViewExistingRowReader>,
 }
 
 /// Metrics for MV fanout tracking.
 pub struct ViewFanoutMetrics {
     pub view_mutations_generated: AtomicU64,
     pub view_mutations_applied: AtomicU64,
+    pub view_mutations_retried: AtomicU64,
     pub view_mutations_failed: AtomicU64,
 }
 
@@ -494,6 +646,7 @@ impl ViewFanoutMetrics {
         Self {
             view_mutations_generated: AtomicU64::new(0),
             view_mutations_applied: AtomicU64::new(0),
+            view_mutations_retried: AtomicU64::new(0),
             view_mutations_failed: AtomicU64::new(0),
         }
     }
@@ -525,6 +678,7 @@ impl WriteCoordinator {
             truncating_tables: Arc::new(DashSet::new()),
             view_update_backlog: Arc::new(AtomicU64::new(0)),
             view_update_backlog_threshold: DEFAULT_VIEW_UPDATE_BACKLOG_THRESHOLD,
+            view_existing_row_reader: None,
         }
     }
 
@@ -540,6 +694,11 @@ impl WriteCoordinator {
 
     pub fn with_guardrails(mut self, guardrails: WriteGuardrails) -> Self {
         self.guardrails = guardrails;
+        self
+    }
+
+    pub fn with_view_existing_row_reader(mut self, reader: ViewExistingRowReader) -> Self {
+        self.view_existing_row_reader = Some(reader);
         self
     }
 
@@ -756,7 +915,10 @@ impl WriteCoordinator {
     /// 1. Reject if bootstrapping
     /// 2. Reject if write semaphore is full (Overloaded)
     /// 3. Reject if table is currently being truncated
-    fn check_preconditions(&self, mutation: &CoordinatedMutation) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, WriteError> {
+    fn check_preconditions(
+        &self,
+        mutation: &CoordinatedMutation,
+    ) -> Result<Option<tokio::sync::OwnedSemaphorePermit>, WriteError> {
         if self.is_bootstrapping {
             return Err(WriteError::IsBootstrapping);
         }
@@ -790,6 +952,47 @@ impl WriteCoordinator {
     /// Access the write guardrails (for server-layer checks).
     pub fn guardrails(&self) -> &WriteGuardrails {
         &self.guardrails
+    }
+
+    pub fn write_type_for_mutation(mutation: &CoordinatedMutation) -> WriteType {
+        match mutation.kind {
+            MutationKind::Standard => WriteType::Simple,
+            MutationKind::Counter => WriteType::Counter,
+            MutationKind::View => WriteType::View,
+        }
+    }
+
+    /// Evaluate a write plan using actual acknowledgements and hints.
+    pub fn complete_write_plan(
+        &self,
+        mutation: &CoordinatedMutation,
+        plan: &WritePlan,
+        acks_received: usize,
+        hints_stored: usize,
+        contacted_replicas: Vec<Endpoint>,
+    ) -> Result<WriteResult, WriteError> {
+        let satisfied = if plan.cl == ConsistencyLevel::Any {
+            acks_received + hints_stored > 0
+        } else {
+            acks_received >= plan.block_for
+        };
+
+        if satisfied {
+            Ok(WriteResult {
+                acks_received,
+                acks_required: plan.block_for,
+                contacted_replicas,
+                hints_stored,
+            })
+        } else {
+            Err(WriteError::Timeout {
+                cl: plan.cl,
+                write_type: Self::write_type_for_mutation(mutation),
+                required: plan.block_for,
+                received: acks_received,
+                block_for: plan.block_for,
+            })
+        }
     }
 
     /// Coordinate a write at the given consistency level.
@@ -839,60 +1042,55 @@ impl WriteCoordinator {
 
         let hints_stored_for_dead = plan.dead_replicas.len();
 
-        // In a real implementation with async messaging:
-        // 1. Apply locally if local_is_replica (StorageEngine::apply_mutation)
-        // 2. Send Verb::Mutation messages to remote live replicas
-        // 3. Create WriteResponseHandler and await acks
-        //
-        // For now we simulate: all live replicas ack immediately.
+        // Synchronous compatibility path: callers that need real replica
+        // messaging should use StorageProxy, which feeds actual ack counts
+        // through complete_write_plan().
         let acks_received = plan.live_replicas.len();
-
-        let write_type = match mutation.kind {
-            MutationKind::Standard => WriteType::Simple,
-            MutationKind::Counter => WriteType::Counter,
-            MutationKind::View => WriteType::View,
-        };
-
-        let satisfied = if cl == ConsistencyLevel::Any {
-            acks_received + hints_stored_for_dead > 0
-        } else {
-            acks_received >= plan.block_for
-        };
 
         let elapsed_us = start.elapsed().as_micros() as u64;
         self.metrics
             .write_latency_us_sum
             .fetch_add(elapsed_us, Ordering::Relaxed);
 
-        if satisfied {
-            self.metrics
-                .writes_succeeded
-                .fetch_add(1, Ordering::Relaxed);
-            debug!(
-                cl = %cl,
-                acks = acks_received,
-                hints = hints_stored_for_dead,
-                replicas = plan.replicas.len(),
-                "Write succeeded"
-            );
-
-            Ok(WriteResult {
-                acks_received,
-                acks_required: plan.block_for,
-                contacted_replicas: plan.replicas,
-                hints_stored: hints_stored_for_dead,
-            })
-        } else {
-            self.metrics
-                .writes_timed_out
-                .fetch_add(1, Ordering::Relaxed);
+        match self.complete_write_plan(
+            mutation,
+            &plan,
+            acks_received,
+            hints_stored_for_dead,
+            plan.replicas.clone(),
+        ) {
+            Ok(result) => {
+                self.metrics
+                    .writes_succeeded
+                    .fetch_add(1, Ordering::Relaxed);
+                debug!(
+                    cl = %cl,
+                    acks = result.acks_received,
+                    hints = result.hints_stored,
+                    replicas = plan.replicas.len(),
+                    "Write succeeded"
+                );
+                Ok(result)
+            }
             Err(WriteError::Timeout {
                 cl,
                 write_type,
-                required: plan.block_for,
-                received: acks_received,
-                block_for: plan.block_for,
-            })
+                required,
+                received,
+                block_for,
+            }) => {
+                self.metrics
+                    .writes_timed_out
+                    .fetch_add(1, Ordering::Relaxed);
+                Err(WriteError::Timeout {
+                    cl,
+                    write_type,
+                    required,
+                    received,
+                    block_for,
+                })
+            }
+            Err(err) => Err(err),
         }
     }
 
@@ -1175,14 +1373,22 @@ impl WriteCoordinator {
         let token = Token::from_partition_key(partition_key);
         let snapshot = self.cluster.snapshot();
         let replicas = snapshot.replicas_for_token(token, strategy, snitch);
-        let rf = replicas.len();
 
-        let live_count = replicas
-            .iter()
-            .filter(|ep| snapshot.nodes.get(ep).is_some_and(|n| n.state.is_live()))
-            .count();
+        let mut rf_by_dc: HashMap<String, usize> = HashMap::new();
+        let mut live_by_dc: HashMap<String, usize> = HashMap::new();
+        for ep in replicas {
+            let dc = snapshot
+                .nodes
+                .get(&ep)
+                .map(|n| n.datacenter.clone())
+                .unwrap_or_else(|| self.local_datacenter.clone());
+            *rf_by_dc.entry(dc.clone()).or_insert(0) += 1;
+            if snapshot.nodes.get(&ep).is_some_and(|n| n.state.is_live()) {
+                *live_by_dc.entry(dc).or_insert(0) += 1;
+            }
+        }
 
-        cl.is_satisfied(live_count, rf)
+        cl.is_satisfied_by_datacenter(&live_by_dc, &rf_by_dc, Some(&self.local_datacenter))
     }
 
     /// Select timestamp for mutation: client-provided or server-generated.
@@ -1236,49 +1442,53 @@ impl WriteCoordinator {
         strategy: &dyn ReplicationStrategy,
         snitch: &dyn Snitch,
         view_manager: Option<&cassandra_storage::materialized_views::ViewManager>,
-        _trigger_manager: Option<&cassandra_storage::triggers::TriggerManager>,
+        trigger_manager: Option<&cassandra_storage::triggers::TriggerManager>,
     ) -> Result<(WriteResult, ViewFanoutResult), WriteError> {
         // Step 1: Trigger augmentation (WU-19)
-        // Behind cfg(feature = "triggers"), call trigger_manager.augment_mutation()
-        // if triggers exist for this table. Merge augmented mutations into the base
-        // mutation set before coordinating.
-        #[cfg(feature = "triggers")]
-        if let Some(tm) = _trigger_manager {
+        let mut augmented_mutations = Vec::new();
+        if let Some(tm) = trigger_manager {
             if tm.has_triggers_for(&mutation.keyspace, &mutation.table) {
                 let mutation_bytes = serde_json::to_vec(mutation).unwrap_or_default();
-                let augmented = tm.augment_mutation(
-                    &mutation.keyspace,
-                    &mutation.table,
-                    &mutation_bytes,
-                );
-                if !augmented.is_empty() {
-                    debug!(
-                        keyspace = %mutation.keyspace,
-                        table = %mutation.table,
-                        augmented_count = augmented.len(),
-                        "Trigger augmented mutations merged"
-                    );
-                    // TODO(WU-19): Deserialize augmented mutations and merge into
-                    // the base mutation set. For now, augmented bytes are logged
-                    // but not applied until the trigger executor is fully wired.
+                let augmented =
+                    tm.augment_mutation(&mutation.keyspace, &mutation.table, &mutation_bytes);
+                for bytes in augmented {
+                    let augmented_mutation: CoordinatedMutation = serde_json::from_slice(&bytes)
+                        .map_err(|e| {
+                            WriteError::Internal(format!(
+                                "Trigger returned invalid augmented mutation: {e}"
+                            ))
+                        })?;
+                    augmented_mutations.push(augmented_mutation);
                 }
+                debug!(
+                    keyspace = %mutation.keyspace,
+                    table = %mutation.table,
+                    augmented_count = augmented_mutations.len(),
+                    "Trigger augmented mutations decoded"
+                );
             }
         }
 
+        let existing_row = if view_manager
+            .is_some_and(|vm| vm.has_views_for(&mutation.keyspace, &mutation.table))
+        {
+            self.view_existing_row_reader
+                .as_ref()
+                .and_then(|reader| reader(mutation))
+        } else {
+            None
+        };
+
         // Step 2: Coordinate the base mutation
         let result = self.coordinate_write(mutation, cl, strategy, snitch)?;
+        for augmented in &augmented_mutations {
+            self.coordinate_write(augmented, cl, strategy, snitch)?;
+        }
 
         // Step 3: MV fanout
         let mut fanout = ViewFanoutResult::default();
         if let Some(vm) = view_manager {
             if vm.has_views_for(&mutation.keyspace, &mutation.table) {
-                // TODO(WU-18): Read-before-write — read the existing row state from
-                // the local storage engine before generating view deltas. This is
-                // needed for proper delta computation (old vs new column values).
-                // Java does this in ViewUpdateGenerator.generateViewUpdates() by
-                // reading the current partition via SinglePartitionReadCommand.
-                let existing_row: Option<HashMap<String, Option<Vec<u8>>>> = None;
-
                 let columns: HashMap<String, Option<Vec<u8>>> = mutation
                     .rows
                     .iter()
@@ -1318,12 +1528,10 @@ impl WriteCoordinator {
                     .fetch_add(view_result.mutations.len() as u64, Ordering::Relaxed);
 
                 // Backpressure check (WU-18): increment backlog before scheduling
-                let pending = self.view_update_backlog.fetch_add(
-                    view_result.mutations.len() as u64,
-                    Ordering::Relaxed,
-                );
-                if pending + view_result.mutations.len() as u64
-                    > self.view_update_backlog_threshold
+                let pending = self
+                    .view_update_backlog
+                    .fetch_add(view_result.mutations.len() as u64, Ordering::Relaxed);
+                if pending + view_result.mutations.len() as u64 > self.view_update_backlog_threshold
                 {
                     warn!(
                         backlog = pending + view_result.mutations.len() as u64,
@@ -1381,10 +1589,8 @@ impl WriteCoordinator {
                 }
 
                 // Decrement backlog after view mutations are processed (WU-18)
-                self.view_update_backlog.fetch_sub(
-                    view_result.mutations.len() as u64,
-                    Ordering::Relaxed,
-                );
+                self.view_update_backlog
+                    .fetch_sub(view_result.mutations.len() as u64, Ordering::Relaxed);
             }
         }
 
@@ -1914,15 +2120,114 @@ mod tests {
     }
 
     #[test]
-    fn coordinate_write_with_hooks_trigger_stub() {
-        use cassandra_storage::triggers::TriggerManager;
+    fn coordinate_write_with_hooks_mv_reads_existing_row_for_delta() {
+        use cassandra_storage::materialized_views::{MaterializedViewDefinition, ViewManager};
 
         let (_cm, coordinator) = setup_cluster();
         let strategy = SimpleStrategy::new(3);
         let snitch = SimpleSnitch;
-        let tm = TriggerManager::new();
+        let vm = ViewManager::new();
 
-        // TriggerManager is a stub — no triggers fire, write proceeds normally
+        vm.register(MaterializedViewDefinition {
+            name: "users_by_email".to_string(),
+            keyspace: "ks".to_string(),
+            base_table: "users".to_string(),
+            view_table: "users_by_email".to_string(),
+            included_columns: vec!["email".to_string(), "name".to_string()],
+            where_clause: "email IS NOT NULL".to_string(),
+            include_all_columns: false,
+            view_pk_columns: vec!["email".to_string()],
+        })
+        .unwrap();
+
+        let coordinator = coordinator.with_view_existing_row_reader(Arc::new(|mutation| {
+            assert_eq!(mutation.keyspace, "ks");
+            assert_eq!(mutation.table, "users");
+
+            let mut existing = HashMap::new();
+            existing.insert("email".to_string(), Some(b"old@example.com".to_vec()));
+            existing.insert("name".to_string(), Some(b"Alice".to_vec()));
+            Some(existing)
+        }));
+
+        let mutation = CoordinatedMutation::simple(
+            "ks".to_string(),
+            "users".to_string(),
+            b"user1".to_vec(),
+            vec![MutationRow {
+                clustering_key: vec![],
+                cells: vec![
+                    CellMutation {
+                        column: "email".to_string(),
+                        value: Some(b"new@example.com".to_vec()),
+                        timestamp: 1000,
+                        ttl: 0,
+                        is_tombstone: false,
+                        collection_op: None,
+                    },
+                    CellMutation {
+                        column: "name".to_string(),
+                        value: Some(b"Alice".to_vec()),
+                        timestamp: 1000,
+                        ttl: 0,
+                        is_tombstone: false,
+                        collection_op: None,
+                    },
+                ],
+                is_tombstone: false,
+                range_tombstone: None,
+            }],
+            1000,
+        );
+
+        let (_result, fanout) = coordinator
+            .coordinate_write_with_hooks(
+                &mutation,
+                ConsistencyLevel::One,
+                &strategy,
+                &snitch,
+                Some(&vm),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(fanout.mutations_generated, 2);
+        assert_eq!(fanout.mutations_applied, 2);
+        assert_eq!(fanout.mutations_failed, 0);
+    }
+
+    #[test]
+    fn coordinate_write_with_hooks_applies_trigger_augmented_mutations() {
+        use cassandra_storage::triggers::{
+            StaticTriggerPlugin, TriggerDefinition, TriggerManager, TriggerPluginRegistry,
+        };
+
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+        let mut registry = TriggerPluginRegistry::new();
+        let augmented = CoordinatedMutation::simple(
+            "ks".to_string(),
+            "audit".to_string(),
+            b"pk".to_vec(),
+            Vec::new(),
+            1000,
+        );
+        registry.register_plugin(
+            "static://audit",
+            std::sync::Arc::new(StaticTriggerPlugin::new(vec![
+                serde_json::to_vec(&augmented).unwrap(),
+            ])),
+        );
+        let mut tm = TriggerManager::with_registry(registry);
+        tm.register(TriggerDefinition {
+            name: "audit".to_string(),
+            keyspace: "ks".to_string(),
+            table: "users".to_string(),
+            trigger_class: "static://audit".to_string(),
+        })
+        .unwrap();
+
         let (result, fanout) = coordinator
             .coordinate_write_with_hooks(
                 &test_mutation(),
@@ -1936,6 +2241,7 @@ mod tests {
 
         assert!(result.acks_received >= 1);
         assert_eq!(fanout.mutations_generated, 0);
+        assert_eq!(coordinator.metrics.writes_total.load(Ordering::Relaxed), 2);
     }
 
     // ── Phase 2: ViewFanoutMetrics ───────────────────────────────
@@ -1945,7 +2251,45 @@ mod tests {
         let m = ViewFanoutMetrics::new();
         assert_eq!(m.view_mutations_generated.load(Ordering::Relaxed), 0);
         assert_eq!(m.view_mutations_applied.load(Ordering::Relaxed), 0);
+        assert_eq!(m.view_mutations_retried.load(Ordering::Relaxed), 0);
         assert_eq!(m.view_mutations_failed.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn async_view_fanout_requeues_retryable_failures() {
+        use cassandra_storage::materialized_views::ViewMutation;
+
+        let metrics = Arc::new(ViewFanoutMetrics::new());
+        let backlog = Arc::new(AtomicU64::new(0));
+        let dispatcher = AsyncViewFanoutDispatcher::new(Arc::clone(&metrics), Arc::clone(&backlog));
+        dispatcher.enqueue([ViewMutation {
+            keyspace: "ks".to_string(),
+            view_table: "users_by_email".to_string(),
+            partition_key: b"a@example.com".to_vec(),
+            columns: HashMap::new(),
+            timestamp: 1000,
+            is_delete: false,
+        }]);
+
+        let mut attempts = 0;
+        let first = dispatcher.drain_with_retries(2, |_| {
+            attempts += 1;
+            Err(WriteError::Overloaded)
+        });
+        assert_eq!(first.mutations_generated, 1);
+        assert_eq!(first.mutations_retried, 1);
+        assert_eq!(first.mutations_failed, 0);
+        assert_eq!(dispatcher.pending_count(), 1);
+        assert_eq!(backlog.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.view_mutations_retried.load(Ordering::Relaxed), 1);
+
+        let second = dispatcher.drain_with_retries(2, |_| Ok(()));
+        assert_eq!(second.mutations_generated, 1);
+        assert_eq!(second.mutations_applied, 1);
+        assert_eq!(second.mutations_retried, 0);
+        assert_eq!(dispatcher.pending_count(), 0);
+        assert_eq!(backlog.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.view_mutations_applied.load(Ordering::Relaxed), 1);
     }
 
     // ── WU-18: View update backlog backpressure ────────────────────
@@ -1972,10 +2316,7 @@ mod tests {
         .unwrap();
 
         // Before the write, backlog should be 0
-        assert_eq!(
-            coordinator.view_update_backlog.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(coordinator.view_update_backlog.load(Ordering::Relaxed), 0);
 
         let (_result, _fanout) = coordinator
             .coordinate_write_with_hooks(
@@ -1990,10 +2331,7 @@ mod tests {
 
         // After the write completes, backlog should return to 0
         // (incremented then decremented during processing)
-        assert_eq!(
-            coordinator.view_update_backlog.load(Ordering::Relaxed),
-            0
-        );
+        assert_eq!(coordinator.view_update_backlog.load(Ordering::Relaxed), 0);
     }
 
     // ── WU-01: coordinate_write_async ─────────────────────────────
@@ -2038,12 +2376,7 @@ mod tests {
         let snitch = SimpleSnitch;
 
         let (plan, handler) = coordinator
-            .coordinate_write_async(
-                &test_mutation(),
-                ConsistencyLevel::One,
-                &strategy,
-                &snitch,
-            )
+            .coordinate_write_async(&test_mutation(), ConsistencyLevel::One, &strategy, &snitch)
             .unwrap();
 
         // Simulate one ack
@@ -2102,8 +2435,11 @@ mod tests {
         let mut m = test_mutation();
         assert_eq!(WriteCoordinator::max_collection_size(&m), 0);
 
-        m.rows[0].cells[0].collection_op =
-            Some(CollectionOp::Append(vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]));
+        m.rows[0].cells[0].collection_op = Some(CollectionOp::Append(vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+            b"c".to_vec(),
+        ]));
         assert_eq!(WriteCoordinator::max_collection_size(&m), 3);
     }
 

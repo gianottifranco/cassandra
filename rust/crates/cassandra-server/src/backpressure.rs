@@ -6,8 +6,8 @@
 //! - `org.apache.cassandra.transport.CQLMessageHandler` (bytes_in_flight, throwOnOverload)
 //! - `org.apache.cassandra.net.RateLimiter`
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;

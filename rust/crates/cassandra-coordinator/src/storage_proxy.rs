@@ -19,10 +19,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
-use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
-use cassandra_messaging::{Message, MessageHandler, MessagingService, Verb};
+use cassandra_cluster_metadata::{Endpoint, ReplicationStrategy, Snitch};
+use cassandra_messaging::{Message, MessagingService, Verb};
 
 use cassandra_schema::table::TransactionalMode;
 
@@ -31,13 +31,12 @@ use crate::consensus::ConsensusRouter;
 use crate::consistency::ConsistencyLevel;
 use crate::hints::HintStore;
 use crate::paxos::coordinator::CasResult;
-use crate::read::{
-    CoordinatedRead, ReadCoordinator, ReadError, ReadResult, SinglePartitionReadCommand,
+use crate::read::{CoordinatedRead, ReadCoordinator, ReadError, ReadResult};
+use crate::verb_handlers::mutation_handler::{MutationRequest, MutationResponse};
+use crate::verb_handlers::read_handler::{
+    ReadDataRequest, ReadDataResponsePayload, ReadDigestRequest, ReadDigestResponsePayload,
 };
-use crate::write::{
-    CoordinatedMutation, WriteCoordinator, WriteError, WriteResult, WriteType,
-};
-use crate::write_response_handler::WriteResponseHandler;
+use crate::write::{CoordinatedMutation, WriteCoordinator, WriteError, WriteResult};
 
 // ─── Configuration ──────────────────────────────────────────────
 
@@ -187,31 +186,18 @@ impl StorageProxy {
             .write_coordinator
             .compute_write_plan(&mutation, cl, strategy, snitch)?;
 
-        // Send mutations to remote live replicas via messaging.
-        let local_endpoint = Endpoint::new(self.config.listen_address);
-        let mut remote_send_failures: Vec<Endpoint> = Vec::new();
+        // Send mutations to live replicas via messaging, using local dispatch
+        // for the local endpoint and request/response transport for remotes.
+        let mut send_failures: Vec<Endpoint> = Vec::new();
+        let mut send_successes = 0usize;
 
         for replica in &plan.live_replicas {
-            if *replica == local_endpoint {
-                continue; // Local replica handled by coordinator directly.
-            }
-            let payload = serde_json::to_vec(&mutation).unwrap_or_default();
-            let msg = Message::request(
-                Verb::Mutation,
-                self.messaging.next_id(),
-                payload,
-            );
-            if let Err(e) = self
-                .messaging
-                .send_and_wait(
-                    replica.0,
-                    msg,
-                    self.config.write_timeout,
-                )
-                .await
-            {
-                warn!(replica = %replica, error = %e, "Remote mutation failed");
-                remote_send_failures.push(*replica);
+            match self.send_mutation_to_replica(*replica, &mutation).await {
+                Ok(()) => send_successes += 1,
+                Err(e) => {
+                    warn!(replica = %replica, error = %e, "Mutation failed");
+                    send_failures.push(*replica);
+                }
             }
         }
 
@@ -222,46 +208,19 @@ impl StorageProxy {
                 hints_stored += 1;
             }
         }
-        for failed in &remote_send_failures {
+        for failed in &send_failures {
             if self.hint_store.store_hint(*failed, mutation.clone()) {
                 hints_stored += 1;
             }
         }
 
-        // Calculate acks: local (if local is replica) + remote successes.
-        let remote_successes = plan
-            .live_replicas
-            .iter()
-            .filter(|r| **r != local_endpoint && !remote_send_failures.contains(r))
-            .count();
-        let local_ack = if plan.local_is_replica { 1 } else { 0 };
-        let acks_received = local_ack + remote_successes;
-
-        // Check if CL is satisfied.
-        if acks_received < plan.block_for {
-            // For CL=ANY, hints count toward satisfaction.
-            let effective = if cl == ConsistencyLevel::Any {
-                acks_received + hints_stored
-            } else {
-                acks_received
-            };
-            if effective < plan.block_for {
-                return Err(WriteError::Timeout {
-                    cl,
-                    write_type: WriteType::Simple,
-                    required: plan.block_for,
-                    received: acks_received,
-                    block_for: plan.block_for,
-                });
-            }
-        }
-
-        Ok(WriteResult {
-            acks_received,
-            acks_required: plan.block_for,
-            contacted_replicas: plan.live_replicas.clone(),
+        self.write_coordinator.complete_write_plan(
+            &mutation,
+            &plan,
+            send_successes,
             hints_stored,
-        })
+            plan.live_replicas.clone(),
+        )
     }
 
     /// Coordinate a write using async WriteResponseHandler (WU-01).
@@ -296,16 +255,43 @@ impl StorageProxy {
 
         for replica in &plan.live_replicas {
             if *replica == local_endpoint {
-                // Local replica: record ack immediately (simulates local apply)
-                handler.on_response(replica);
+                let payload = serde_json::to_vec(&MutationRequest {
+                    mutation: mutation.clone(),
+                })
+                .unwrap_or_default();
+                let msg = Message::request(Verb::Mutation, self.messaging.next_id(), payload);
+                match self.messaging.dispatch(msg) {
+                    Some(response) if mutation_response_succeeded(&response) => {
+                        handler.on_response(replica);
+                    }
+                    Some(response) => {
+                        warn!(
+                            replica = %replica,
+                            verb = %response.header.verb,
+                            "Local mutation handler failed"
+                        );
+                        handler.on_failure(
+                            *replica,
+                            crate::write_response_handler::RequestFailureReason::Unknown,
+                        );
+                        if self.hint_store.store_hint(*replica, mutation.clone()) {
+                            handler.on_hint_stored();
+                        }
+                    }
+                    None => {
+                        handler.on_failure(
+                            *replica,
+                            crate::write_response_handler::RequestFailureReason::Unknown,
+                        );
+                    }
+                }
                 continue;
             }
-            let payload = serde_json::to_vec(&mutation).unwrap_or_default();
-            let msg = Message::request(
-                Verb::Mutation,
-                self.messaging.next_id(),
-                payload,
-            );
+            let payload = serde_json::to_vec(&MutationRequest {
+                mutation: mutation.clone(),
+            })
+            .unwrap_or_default();
+            let msg = Message::request(Verb::Mutation, self.messaging.next_id(), payload);
             let handler_clone = Arc::clone(&handler);
             let replica_ep = *replica;
             let messaging = Arc::clone(&self.messaging);
@@ -315,12 +301,23 @@ impl StorageProxy {
 
             // Send asynchronously and record ack/failure
             tokio::spawn(async move {
-                match messaging
-                    .send_and_wait(replica_ep.0, msg, timeout)
-                    .await
-                {
-                    Ok(_) => {
+                match messaging.send_and_wait(replica_ep.0, msg, timeout).await {
+                    Ok(response) if mutation_response_succeeded(&response) => {
                         handler_clone.on_response(&replica_ep);
+                    }
+                    Ok(response) => {
+                        warn!(
+                            replica = %replica_ep,
+                            verb = %response.header.verb,
+                            "Remote mutation handler failed"
+                        );
+                        handler_clone.on_failure(
+                            replica_ep,
+                            crate::write_response_handler::RequestFailureReason::Unknown,
+                        );
+                        if hint_store.store_hint(replica_ep, mutation_clone) {
+                            handler_clone.on_hint_stored();
+                        }
                     }
                     Err(e) => {
                         warn!(replica = %replica_ep, error = %e, "Remote mutation failed");
@@ -339,6 +336,38 @@ impl StorageProxy {
 
         // Await CL satisfaction
         handler.await_completion().await
+    }
+
+    async fn send_mutation_to_replica(
+        &self,
+        replica: Endpoint,
+        mutation: &CoordinatedMutation,
+    ) -> Result<(), String> {
+        let payload = serde_json::to_vec(&MutationRequest {
+            mutation: mutation.clone(),
+        })
+        .map_err(|e| format!("Serialize mutation request: {e}"))?;
+        let msg = Message::request(Verb::Mutation, self.messaging.next_id(), payload);
+
+        let response = if replica.addr() == self.config.listen_address {
+            self.messaging
+                .dispatch(msg)
+                .ok_or_else(|| format!("No local mutation handler for {replica}"))?
+        } else {
+            self.messaging
+                .send_and_wait(replica.addr(), msg, self.config.write_timeout)
+                .await
+                .map_err(|e| e.to_string())?
+        };
+
+        if mutation_response_succeeded(&response) {
+            Ok(())
+        } else {
+            Err(format!(
+                "Mutation response from {replica} was {}",
+                response.header.verb
+            ))
+        }
     }
 
     /// Coordinate a read from replicas.
@@ -364,26 +393,153 @@ impl StorageProxy {
             "StorageProxy.fetch_rows"
         );
 
-        // Delegate to the read coordinator for the core coordination logic.
-        // The read coordinator already handles:
-        //   - Replica selection and availability checks
-        //   - Digest comparison and mismatch handling
-        //   - Read repair triggering
-        //   - Tombstone threshold checks
-        let result = self
+        // Delegate to the read coordinator for replica selection, availability,
+        // CL calculation, speculative policy bookkeeping, and tombstone limits.
+        let planned = self
             .read_coordinator
-            .coordinate_read(read, cl, strategy, snitch)?;
+            .plan_read(read, cl, strategy, snitch)?;
 
-        // Send read data/digest requests to remote replicas via messaging.
-        // For now, the read coordinator simulates responses internally.
-        // When full messaging integration is needed, we would:
-        //   1. Send Verb::ReadData to the data replica
-        //   2. Send Verb::ReadDigest to digest replicas
-        //   3. Collect responses and feed them to the resolver
-        //   4. On digest mismatch, send Verb::ReadData to all replicas
-        //   5. Send Verb::ReadRepair mutations for stale replicas
+        self.fetch_rows_via_messaging(read, planned).await
+    }
 
-        Ok(result)
+    /// Fetch rows asynchronously with replica messaging.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.fetchRows()` -> `AbstractReadExecutor.execute()`
+    pub async fn fetch_rows_async(
+        &self,
+        read: &CoordinatedRead,
+        cl: ConsistencyLevel,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Result<ReadResult, ReadError> {
+        debug!(
+            keyspace = %read.keyspace,
+            table = %read.table,
+            cl = ?cl,
+            "StorageProxy.fetch_rows_async"
+        );
+
+        self.fetch_rows(read, cl, strategy, snitch).await
+    }
+
+    async fn fetch_rows_via_messaging(
+        &self,
+        read: &CoordinatedRead,
+        planned: ReadResult,
+    ) -> Result<ReadResult, ReadError> {
+        let Some(data_replica) = planned.contacted_replicas.first().copied() else {
+            return Ok(planned);
+        };
+
+        let data_request = ReadDataRequest {
+            keyspace: read.keyspace.clone(),
+            table: read.table.clone(),
+            partition_key: read.partition_key.clone(),
+        };
+        let data_msg = Message::request(
+            Verb::ReadData,
+            self.messaging.next_id(),
+            serde_json::to_vec(&data_request)
+                .map_err(|e| ReadError::Internal(format!("Serialize ReadData request: {e}")))?,
+        );
+        let data_response = self.send_read_message(data_replica, data_msg).await?;
+        if data_response.header.verb != Verb::ReadDataResponse {
+            return Err(ReadError::Internal(format!(
+                "ReadData from {data_replica} returned {}",
+                data_response.header.verb
+            )));
+        }
+        let data_payload: ReadDataResponsePayload = serde_json::from_slice(&data_response.payload)
+            .map_err(|e| {
+                ReadError::Internal(format!(
+                    "ReadData response from {data_replica} invalid: {e}"
+                ))
+            })?;
+
+        let mut responses_received = 1usize;
+        let mut contacted = vec![data_replica];
+        let mut digest_mismatches = 0usize;
+
+        for digest_replica in planned
+            .contacted_replicas
+            .iter()
+            .copied()
+            .skip(1)
+            .take(planned.responses_required.saturating_sub(1))
+        {
+            let digest_request = ReadDigestRequest {
+                keyspace: read.keyspace.clone(),
+                table: read.table.clone(),
+                partition_key: read.partition_key.clone(),
+            };
+            let digest_msg = Message::request(
+                Verb::ReadDigest,
+                self.messaging.next_id(),
+                serde_json::to_vec(&digest_request).map_err(|e| {
+                    ReadError::Internal(format!("Serialize ReadDigest request: {e}"))
+                })?,
+            );
+            let digest_response = self.send_read_message(digest_replica, digest_msg).await?;
+            if digest_response.header.verb != Verb::ReadDigestResponse {
+                return Err(ReadError::Internal(format!(
+                    "ReadDigest from {digest_replica} returned {}",
+                    digest_response.header.verb
+                )));
+            }
+            let digest_payload: ReadDigestResponsePayload =
+                serde_json::from_slice(&digest_response.payload).map_err(|e| {
+                    ReadError::Internal(format!(
+                        "ReadDigest response from {digest_replica} invalid: {e}"
+                    ))
+                })?;
+            responses_received += 1;
+            contacted.push(digest_replica);
+            if digest_payload.digest != data_payload.digest {
+                digest_mismatches += 1;
+            }
+        }
+
+        if digest_mismatches > 0 {
+            return Err(ReadError::DigestMismatch {
+                replicas_mismatched: digest_mismatches,
+            });
+        }
+
+        let data = data_payload
+            .partitions
+            .first()
+            .map(|partition| partition.data.clone());
+        Ok(ReadResult {
+            data,
+            partitions: Vec::new(),
+            responses_received,
+            responses_required: planned.responses_required,
+            read_repair_triggered: false,
+            digest_mismatch_resolved: false,
+            contacted_replicas: contacted,
+            warnings: planned.warnings,
+            paging_state: planned.paging_state,
+            speculative_retry_used: planned.speculative_retry_used,
+            tombstones_read: data_payload.tombstones_read,
+        })
+    }
+
+    async fn send_read_message(
+        &self,
+        endpoint: Endpoint,
+        msg: Message,
+    ) -> Result<Message, ReadError> {
+        if endpoint.addr() == self.config.listen_address {
+            return self.messaging.dispatch(msg).ok_or_else(|| {
+                ReadError::Internal(format!("No local read handler for {endpoint}"))
+            });
+        }
+        self.messaging
+            .send_and_wait(endpoint.addr(), msg, self.config.read_timeout)
+            .await
+            .map_err(|e| ReadError::Internal(format!("Read request to {endpoint} failed: {e}")))
     }
 
     // ─── CAS / LWT ──────────────────────────────────────────────────
@@ -412,9 +568,10 @@ impl StorageProxy {
         F1: Fn() -> R + Send + Sync,
         F2: Fn(Option<&[u8]>) -> bool + Send + Sync,
     {
-        let router = self.consensus_router.as_ref().ok_or(
-            "Consensus router not configured — CAS operations unavailable",
-        )?;
+        let router = self
+            .consensus_router
+            .as_ref()
+            .ok_or("Consensus router not configured — CAS operations unavailable")?;
 
         debug!(
             keyspace,
@@ -478,9 +635,10 @@ impl StorageProxy {
         keyspace: &str,
         mutations: Vec<Vec<u8>>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let router = self.consensus_router.as_ref().ok_or(
-            "Consensus router not configured — CAS operations unavailable",
-        )?;
+        let router = self
+            .consensus_router
+            .as_ref()
+            .ok_or("Consensus router not configured — CAS operations unavailable")?;
 
         debug!(keyspace, "StorageProxy.cas_accord");
 
@@ -498,13 +656,31 @@ impl StorageProxy {
     }
 }
 
+fn mutation_response_succeeded(response: &Message) -> bool {
+    if response.header.verb != Verb::MutationResponse {
+        return false;
+    }
+    serde_json::from_slice::<MutationResponse>(&response.payload)
+        .map(|body| body.success)
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::batch::BatchLogManager;
     use crate::hints::HintStore;
+    use crate::verb_handlers::registration::register_all_verb_handlers_with_storage;
+    use crate::write::{CellMutation, MutationRow};
     use cassandra_cluster_metadata::node::{NodeId, NodeInfo};
+    use cassandra_cluster_metadata::{ClusterMetadata, SimpleSnitch, SimpleStrategy};
     use cassandra_common::Token;
+    use cassandra_storage::commitlog::{
+        CellMutation as StorageCellMutation, CommitLogConfig, Mutation as StorageMutation,
+        MutationRow as StorageMutationRow,
+    };
+    use cassandra_storage::engine::{EngineConfig, StorageEngine};
+    use tempfile::TempDir;
 
     fn make_proxy() -> StorageProxy {
         let ep = Endpoint::new("127.0.0.1:7000".parse().unwrap());
@@ -522,13 +698,8 @@ mod tests {
             ep,
             Arc::clone(&hint_store),
         ));
-        let read_coord = Arc::new(ReadCoordinator::new(
-            Arc::clone(&cluster),
-            ep,
-        ));
-        let messaging = Arc::new(MessagingService::new(
-            "127.0.0.1:7000".parse().unwrap(),
-        ));
+        let read_coord = Arc::new(ReadCoordinator::new(Arc::clone(&cluster), ep));
+        let messaging = Arc::new(MessagingService::new("127.0.0.1:7000".parse().unwrap()));
         let batch_log = Arc::new(BatchLogManager::new());
 
         StorageProxy::new(
@@ -578,5 +749,137 @@ mod tests {
         let _ms: &Arc<MessagingService> = proxy.messaging();
         let _hs: &Arc<HintStore> = proxy.hint_store();
         let _bl: &Arc<BatchLogManager> = proxy.batch_log();
+    }
+
+    #[tokio::test]
+    async fn fetch_rows_uses_storage_backed_read_verb_handler() {
+        let proxy = make_proxy();
+        let temp = TempDir::new().unwrap();
+        let storage = Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![temp.path().join("data")],
+                commitlog: CommitLogConfig {
+                    directory: temp.path().join("commitlog"),
+                    ..CommitLogConfig::default()
+                },
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        storage
+            .apply_mutation(&StorageMutation {
+                keyspace: "ks".to_string(),
+                table: "users".to_string(),
+                partition_key: b"pk1".to_vec(),
+                rows: vec![StorageMutationRow {
+                    clustering_key: Vec::new(),
+                    cells: vec![StorageCellMutation {
+                        column: "name".to_string(),
+                        value: Some(b"alice".to_vec()),
+                        timestamp: 1,
+                        ttl: 0,
+                        local_deletion_time: None,
+                        is_tombstone: false,
+                    }],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                }],
+                timestamp: 1,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone: None,
+                range_tombstones: Vec::new(),
+            })
+            .unwrap();
+        register_all_verb_handlers_with_storage(proxy.messaging(), Arc::clone(&storage));
+
+        let result = proxy
+            .fetch_rows(
+                &CoordinatedRead {
+                    keyspace: "ks".to_string(),
+                    table: "users".to_string(),
+                    partition_key: b"pk1".to_vec(),
+                },
+                ConsistencyLevel::One,
+                &SimpleStrategy::new(1),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.responses_received, 1);
+        assert!(result.data.as_ref().is_some_and(|data| !data.is_empty()));
+        assert_eq!(result.contacted_replicas.len(), 1);
+
+        let async_result = proxy
+            .fetch_rows_async(
+                &CoordinatedRead {
+                    keyspace: "ks".to_string(),
+                    table: "users".to_string(),
+                    partition_key: b"pk1".to_vec(),
+                },
+                ConsistencyLevel::One,
+                &SimpleStrategy::new(1),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+        assert!(
+            async_result
+                .data
+                .as_ref()
+                .is_some_and(|data| !data.is_empty())
+        );
+    }
+
+    #[tokio::test]
+    async fn mutate_uses_storage_backed_local_mutation_handler() {
+        let proxy = make_proxy();
+        let temp = TempDir::new().unwrap();
+        let storage = Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![temp.path().join("data")],
+                commitlog: CommitLogConfig {
+                    directory: temp.path().join("commitlog"),
+                    ..CommitLogConfig::default()
+                },
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        register_all_verb_handlers_with_storage(proxy.messaging(), Arc::clone(&storage));
+
+        let result = proxy
+            .mutate(
+                CoordinatedMutation::simple(
+                    "ks".to_string(),
+                    "users".to_string(),
+                    b"pk2".to_vec(),
+                    vec![MutationRow {
+                        clustering_key: Vec::new(),
+                        cells: vec![CellMutation {
+                            column: "name".to_string(),
+                            value: Some(b"bob".to_vec()),
+                            timestamp: 1,
+                            ttl: 0,
+                            is_tombstone: false,
+                            collection_op: None,
+                        }],
+                        is_tombstone: false,
+                        range_tombstone: None,
+                    }],
+                    1,
+                ),
+                ConsistencyLevel::One,
+                &SimpleStrategy::new(1),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.acks_received, 1);
+        let partition = storage.read_partition("ks", "users", b"pk2").unwrap();
+        let row = partition.rows.values().next().unwrap();
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"bob".as_slice()));
     }
 }

@@ -218,7 +218,9 @@ mod tests {
         let f = MaskInner;
         let val = b"hello";
         let pad = b"*";
-        let result = f.execute(&[Some(val.as_slice()), Some(pad.as_slice())]).unwrap();
+        let result = f
+            .execute(&[Some(val.as_slice()), Some(pad.as_slice())])
+            .unwrap();
         assert_eq!(result, Some(b"h***o".to_vec()));
     }
 
@@ -227,7 +229,9 @@ mod tests {
         let f = MaskInner;
         let val = b"ab";
         let pad = b"*";
-        let result = f.execute(&[Some(val.as_slice()), Some(pad.as_slice())]).unwrap();
+        let result = f
+            .execute(&[Some(val.as_slice()), Some(pad.as_slice())])
+            .unwrap();
         assert_eq!(result, Some(b"ab".to_vec()));
     }
 
@@ -236,7 +240,9 @@ mod tests {
         let f = MaskOuter;
         let val = b"hello";
         let pad = b"*";
-        let result = f.execute(&[Some(val.as_slice()), Some(pad.as_slice())]).unwrap();
+        let result = f
+            .execute(&[Some(val.as_slice()), Some(pad.as_slice())])
+            .unwrap();
         assert_eq!(result, Some(b"*ell*".to_vec()));
     }
 

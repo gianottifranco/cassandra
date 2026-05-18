@@ -230,13 +230,12 @@ pub fn recover_incomplete_transactions(log_dir: &Path) -> Result<Vec<LifecycleTr
             if line.trim().is_empty() {
                 continue;
             }
-            let log_entry: TransactionLogEntry =
-                serde_json::from_str(&line).map_err(|e| {
-                    CompactionError::InvalidState(format!(
-                        "failed to deserialize log entry in {}: {e}",
-                        name
-                    ))
-                })?;
+            let log_entry: TransactionLogEntry = serde_json::from_str(&line).map_err(|e| {
+                CompactionError::InvalidState(format!(
+                    "failed to deserialize log entry in {}: {e}",
+                    name
+                ))
+            })?;
             match &log_entry.action {
                 TransactionAction::Stage { sstable_id } => staged.push(*sstable_id),
                 TransactionAction::Obsolete { sstable_id } => obsoleted.push(*sstable_id),
@@ -355,7 +354,7 @@ mod tests {
             // Prevent Drop from auto-aborting so recovery can find it.
             txn.state = TransactionState::Committed; // hack to skip abort in drop
         }
-        // Rewrite the log without a commit/abort line to simulate a crash.
+        // Leave the log without a commit/abort line, matching crash recovery input.
         // The file already has Stage(42) + Obsolete(7) — no Commit/Abort,
         // but we set state to Committed above to prevent Drop from writing Abort.
         // Actually, the state hack means Drop won't write Abort, so the file

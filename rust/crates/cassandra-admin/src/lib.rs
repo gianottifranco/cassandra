@@ -24,6 +24,7 @@ pub mod http_admin;
 pub mod http_diagnostics;
 pub mod http_tracing_audit;
 pub mod metrics;
+pub mod nodetool;
 pub mod operations;
 pub mod prometheus_metrics;
 pub mod route_table;
@@ -44,6 +45,10 @@ pub mod handlers_topology;
 pub use diagnostics::{DiagnosticEvent, DiagnosticEventService, DiagnosticEventType};
 pub use http_admin::{AdminState, start_admin_server};
 pub use metrics::AdminMetrics;
+pub use nodetool::{
+    NodetoolCommand, OutputFormat, StatsTable, TableFormatter, TableStatsHolder, TableStatsSummary,
+    command_by_name, command_catalog, render_json, render_yaml,
+};
 pub use operations::{OperationStatus, OperationTracker, OperationType};
 pub use prometheus_metrics::MetricsRegistry;
 pub use virtual_tables::{VirtualTable, VirtualTableRegistry};

@@ -13,7 +13,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tracing::{debug, error, info, warn};
 
-use cassandra_native_protocol::auth::{AuthResult, Authenticator as NativeAuthenticator};
+use cassandra_native_protocol::auth::{
+    AuthResult, Authenticator as NativeAuthenticator, parse_plain_credentials,
+};
 use cassandra_native_protocol::connection::ConnectionContext;
 use cassandra_native_protocol::frame::{Frame, FrameCodec};
 use cassandra_security::audit::{AuditEvent, AuditEventType, AuditLogger, AuditStatus};
@@ -26,7 +28,7 @@ use cassandra_cql::prepared::PreparedCache;
 
 use crate::client_state::ClientState;
 use crate::executor::{QueryExecutor, QueryResult};
-use crate::query_processor::{ExecuteResult, QueryProcessor};
+use crate::query_processor::QueryProcessor;
 use crate::resource_limits::ResourceLimits;
 use crate::shutdown::ShutdownCoordinator;
 use crate::transport_metrics::TransportMetrics;
@@ -328,14 +330,14 @@ impl NativeServer {
                                 exec_result.new_metadata_id.is_some()
                             );
                         }
-                        // TODO: propagate metadata_changed and new_metadata_id into the
-                        // response frame flags once the protocol encoder supports it.
-                        Ok(Some(self.encode_query_result(
+                        Ok(Some(self.encode_query_result_with_metadata_change(
                             exec_result.result,
                             ctx,
                             client_state,
                             version,
                             stream_id,
+                            exec_result.metadata_changed,
+                            exec_result.new_metadata_id,
                         )))
                     }
                     Err(err) => Ok(Some(self.cassandra_error_to_frame(err, version, stream_id))),
@@ -375,15 +377,36 @@ impl NativeServer {
         version: u8,
         stream_id: i16,
     ) -> Frame {
+        self.encode_query_result_with_metadata_change(
+            result,
+            ctx,
+            client_state,
+            version,
+            stream_id,
+            false,
+            None,
+        )
+    }
+
+    /// Encode a `QueryResult` into a protocol response frame with execute-time
+    /// result metadata change information.
+    fn encode_query_result_with_metadata_change(
+        &self,
+        result: QueryResult,
+        ctx: &mut ConnectionContext,
+        client_state: &mut ClientState,
+        version: u8,
+        stream_id: i16,
+        metadata_changed: bool,
+        new_metadata_id: Option<Vec<u8>>,
+    ) -> Frame {
         use cassandra_native_protocol::message::*;
         use cassandra_native_protocol::response;
 
         match result {
-            QueryResult::Void => response::encode_response(
-                &Message::Result(ResultMessage::Void),
-                version,
-                stream_id,
-            ),
+            QueryResult::Void => {
+                response::encode_response(&Message::Result(ResultMessage::Void), version, stream_id)
+            }
             QueryResult::SetKeyspace(ks) => {
                 ctx.keyspace = Some(ks.clone());
                 client_state.set_keyspace(ks.clone());
@@ -409,7 +432,12 @@ impl NativeServer {
                 version,
                 stream_id,
             ),
-            QueryResult::Rows { columns, rows } => {
+            QueryResult::Rows {
+                columns,
+                rows,
+                paging_state,
+                warnings: _warnings,
+            } => {
                 // Convert ResultColumn → ColumnSpec
                 let col_specs: Vec<ColumnSpec> = columns
                     .iter()
@@ -428,9 +456,8 @@ impl NativeServer {
                     if col_specs.iter().all(|s| {
                         s.ksname.as_deref() == first_ks && s.tablename.as_deref() == first_tbl
                     }) {
-                        first_ks.and_then(|ks| {
-                            first_tbl.map(|tbl| (ks.to_string(), tbl.to_string()))
-                        })
+                        first_ks
+                            .and_then(|ks| first_tbl.map(|tbl| (ks.to_string(), tbl.to_string())))
                     } else {
                         None
                     }
@@ -442,12 +469,19 @@ impl NativeServer {
                 if global_spec.is_some() {
                     flags |= rows_flags::GLOBAL_TABLES_SPEC;
                 }
+                // WU-06: Set HAS_MORE_PAGES flag when paging state is present
+                if paging_state.is_some() {
+                    flags |= rows_flags::HAS_MORE_PAGES;
+                }
+                if metadata_changed {
+                    flags |= rows_flags::METADATA_CHANGED;
+                }
 
                 let metadata = RowsMetadata {
                     flags,
                     columns_count: col_specs.len() as i32,
-                    paging_state: None,
-                    new_metadata_id: None,
+                    paging_state,
+                    new_metadata_id,
                     global_table_spec: global_spec,
                     col_specs,
                 };
@@ -494,7 +528,11 @@ impl NativeAuthWrapper {
 
 impl NativeAuthenticator for NativeAuthWrapper {
     fn class_name(&self) -> &str {
-        self.inner.name()
+        match self.inner.name() {
+            "AllowAllAuthenticator" => "org.apache.cassandra.auth.AllowAllAuthenticator",
+            "PasswordAuthenticator" => "org.apache.cassandra.auth.PasswordAuthenticator",
+            other => other,
+        }
     }
 
     fn requires_auth(&self) -> bool {
@@ -503,24 +541,50 @@ impl NativeAuthenticator for NativeAuthWrapper {
 
     fn authenticate(&self, token: Option<&[u8]>) -> Result<AuthResult, String> {
         let token = token.ok_or("No authentication token provided")?;
-
-        let parts: Vec<&[u8]> = token.splitn(3, |&b| b == 0).collect();
-        if parts.len() < 3 {
-            return Err("Invalid PLAIN credentials format".to_string());
-        }
-
-        let username = std::str::from_utf8(parts[1]).map_err(|_| "Invalid UTF-8 in username")?;
-        let password = std::str::from_utf8(parts[2]).map_err(|_| "Invalid UTF-8 in password")?;
+        let parsed = parse_plain_credentials(token)?;
 
         let creds = Credentials {
-            username: username.to_string(),
-            password: password.to_string(),
+            username: parsed.username,
+            password: parsed.password,
             source_address: None,
         };
 
         match self.inner.authenticate(&creds) {
-            Ok(_) => Ok(AuthResult::Success(Some(username.to_string()), None)),
+            Ok(user) => Ok(AuthResult::Success(Some(user.role_name), None)),
             Err(e) => Err(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod native_auth_wrapper_tests {
+    use super::*;
+    use cassandra_security::auth::PasswordAuthenticator as SecurityPasswordAuthenticator;
+    use cassandra_security::roles::InMemoryRoleManager;
+
+    #[test]
+    fn native_auth_wrapper_reports_java_password_class_name() {
+        let auth = NativeAuthWrapper::new(Arc::new(SecurityPasswordAuthenticator::new(
+            InMemoryRoleManager::new(),
+        )));
+
+        assert_eq!(
+            auth.class_name(),
+            "org.apache.cassandra.auth.PasswordAuthenticator"
+        );
+    }
+
+    #[test]
+    fn native_auth_wrapper_verifies_plain_credentials() {
+        let auth = NativeAuthWrapper::new(Arc::new(SecurityPasswordAuthenticator::new(
+            InMemoryRoleManager::new(),
+        )));
+
+        let result = auth.authenticate(Some(b"\0cassandra\0cassandra")).unwrap();
+        assert!(matches!(
+            result,
+            AuthResult::Success(Some(ref user), None) if user == "cassandra"
+        ));
+        assert!(auth.authenticate(Some(b"\0cassandra\0wrong")).is_err());
     }
 }

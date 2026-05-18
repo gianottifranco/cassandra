@@ -25,21 +25,15 @@ use cassandra_messaging::frame_codec::{Frame, FrameCodec, FrameMode};
 
 fn bench_crc24(c: &mut Criterion) {
     let data = vec![0xAB; 1024];
-    c.bench_function("crc24_1kb", |b| {
-        b.iter(|| crc24(black_box(&data)))
-    });
+    c.bench_function("crc24_1kb", |b| b.iter(|| crc24(black_box(&data))));
 }
 
 fn bench_crc32c(c: &mut Criterion) {
     let data = vec![0xAB; 1024];
-    c.bench_function("crc32c_1kb", |b| {
-        b.iter(|| crc32c(black_box(&data)))
-    });
+    c.bench_function("crc32c_1kb", |b| b.iter(|| crc32c(black_box(&data))));
 
     let large_data = vec![0xCD; 64 * 1024];
-    c.bench_function("crc32c_64kb", |b| {
-        b.iter(|| crc32c(black_box(&large_data)))
-    });
+    c.bench_function("crc32c_64kb", |b| b.iter(|| crc32c(black_box(&large_data))));
 }
 
 fn bench_frame_encode_decode_crc(c: &mut Criterion) {

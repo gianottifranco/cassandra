@@ -8,7 +8,7 @@
 use super::clustering::validate_clustering;
 use super::partition_key::validate_partition_key;
 use super::type_compat::{validate_non_key_restrictions, validate_operator_type_compat};
-use super::{ColumnRestriction, RestrictionError, RestrictionKind, RestrictionSet};
+use super::{ColumnRestriction, RestrictionError, RestrictionKind, RestrictionSet, tuple_columns};
 use crate::ast::Relation;
 use cassandra_schema::column::ColumnKind;
 use cassandra_schema::table::TableMetadata;
@@ -27,7 +27,7 @@ pub fn build(
 
     // Validate operator-type compatibility for all relations
     for rel in relations {
-        if rel.column.eq_ignore_ascii_case("token") {
+        if rel.column.eq_ignore_ascii_case("token") || tuple_columns(&rel.column).is_some() {
             continue; // token() is handled specially
         }
         if let Some(col_meta) = table.column(&rel.column) {
@@ -45,6 +45,22 @@ pub fn build(
         if rel.column.eq_ignore_ascii_case("token") {
             pk_relations.push(rel.clone());
             continue;
+        }
+
+        if let Some(columns) = tuple_columns(&rel.column) {
+            if columns.iter().all(|column| {
+                table
+                    .column(column)
+                    .map(|col| col.kind == ColumnKind::Clustering)
+                    .unwrap_or(false)
+            }) {
+                ck_relations.push(rel.clone());
+                continue;
+            }
+            return Err(RestrictionError::Invalid(format!(
+                "Multi-column restrictions are only supported on clustering columns: {}",
+                rel.column
+            )));
         }
 
         match table.column(&rel.column) {
@@ -85,6 +101,7 @@ pub fn build(
                 crate::ast::RelationOp::In => RestrictionKind::In,
                 crate::ast::RelationOp::Contains => RestrictionKind::Contains,
                 crate::ast::RelationOp::ContainsKey => RestrictionKind::ContainsKey,
+                crate::ast::RelationOp::Like => RestrictionKind::Like,
                 op => RestrictionKind::Range { op },
             },
         });
@@ -152,10 +169,7 @@ mod tests {
     #[test]
     fn pk_and_ck() {
         let table = test_table();
-        let relations = vec![
-            rel("pk", RelationOp::Eq),
-            rel("ck", RelationOp::Gt),
-        ];
+        let relations = vec![rel("pk", RelationOp::Eq), rel("ck", RelationOp::Gt)];
         let result = build(&relations, &table, false).unwrap();
         assert_eq!(result.partition_key_restrictions.len(), 1);
         assert_eq!(result.clustering_restrictions.len(), 1);
@@ -164,10 +178,7 @@ mod tests {
     #[test]
     fn non_key_without_filtering_rejected() {
         let table = test_table();
-        let relations = vec![
-            rel("pk", RelationOp::Eq),
-            rel("v", RelationOp::Eq),
-        ];
+        let relations = vec![rel("pk", RelationOp::Eq), rel("v", RelationOp::Eq)];
         let result = build(&relations, &table, false);
         assert!(result.is_err());
     }
@@ -175,13 +186,22 @@ mod tests {
     #[test]
     fn non_key_with_filtering() {
         let table = test_table();
-        let relations = vec![
-            rel("pk", RelationOp::Eq),
-            rel("v", RelationOp::Eq),
-        ];
+        let relations = vec![rel("pk", RelationOp::Eq), rel("v", RelationOp::Eq)];
         let result = build(&relations, &table, true).unwrap();
         assert!(result.needs_filtering);
         assert_eq!(result.non_key_restrictions.len(), 1);
+    }
+
+    #[test]
+    fn non_key_like_with_filtering() {
+        let table = test_table();
+        let relations = vec![rel("pk", RelationOp::Eq), rel("v", RelationOp::Like)];
+        let result = build(&relations, &table, true).unwrap();
+        assert!(result.needs_filtering);
+        assert!(matches!(
+            result.non_key_restrictions[0].kind,
+            RestrictionKind::Like
+        ));
     }
 
     #[test]

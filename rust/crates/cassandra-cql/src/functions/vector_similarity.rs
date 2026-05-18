@@ -70,7 +70,10 @@ impl CqlFunction for SimilarityCosine {
         "similarity_cosine"
     }
     fn arg_types(&self) -> Vec<CqlType> {
-        vec![CqlType::Blob, CqlType::Blob]
+        vec![
+            CqlType::Vector(Box::new(CqlType::Float), 0),
+            CqlType::Vector(Box::new(CqlType::Float), 0),
+        ]
     }
     fn return_type(&self) -> CqlType {
         CqlType::Float
@@ -89,7 +92,10 @@ impl CqlFunction for SimilarityEuclidean {
         "similarity_euclidean"
     }
     fn arg_types(&self) -> Vec<CqlType> {
-        vec![CqlType::Blob, CqlType::Blob]
+        vec![
+            CqlType::Vector(Box::new(CqlType::Float), 0),
+            CqlType::Vector(Box::new(CqlType::Float), 0),
+        ]
     }
     fn return_type(&self) -> CqlType {
         CqlType::Float
@@ -108,7 +114,10 @@ impl CqlFunction for SimilarityDotProduct {
         "similarity_dot_product"
     }
     fn arg_types(&self) -> Vec<CqlType> {
-        vec![CqlType::Blob, CqlType::Blob]
+        vec![
+            CqlType::Vector(Box::new(CqlType::Float), 0),
+            CqlType::Vector(Box::new(CqlType::Float), 0),
+        ]
     }
     fn return_type(&self) -> CqlType {
         CqlType::Float

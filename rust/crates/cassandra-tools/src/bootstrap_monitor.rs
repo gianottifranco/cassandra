@@ -28,12 +28,7 @@ pub fn format_progress_bar(progress: u64, bar_width: usize) -> String {
     let clamped = progress.min(100);
     let filled = (clamped as usize * bar_width) / 100;
     let empty = bar_width - filled;
-    format!(
-        "[{}{}] {}%",
-        "#".repeat(filled),
-        "-".repeat(empty),
-        clamped,
-    )
+    format!("[{}{}] {}%", "#".repeat(filled), "-".repeat(empty), clamped,)
 }
 
 /// Monitor bootstrap progress by polling the admin API operations endpoint.
@@ -66,16 +61,12 @@ pub fn run(client: &AdminClient) {
                     }
 
                     for op in &bootstrap_ops {
-                        let progress =
-                            op.get("progress").and_then(|p| p.as_u64()).unwrap_or(0);
+                        let progress = op.get("progress").and_then(|p| p.as_u64()).unwrap_or(0);
                         let status = op
                             .get("status")
                             .and_then(|s| s.as_str())
                             .unwrap_or("UNKNOWN");
-                        let desc = op
-                            .get("description")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or("");
+                        let desc = op.get("description").and_then(|d| d.as_str()).unwrap_or("");
                         let elapsed = op
                             .get("elapsed_secs")
                             .and_then(|e| e.as_f64())
@@ -231,7 +222,10 @@ mod tests {
 
         let arr = ops.as_array().unwrap();
         let op = &arr[0];
-        let status = op.get("status").and_then(|s| s.as_str()).unwrap_or("UNKNOWN");
+        let status = op
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("UNKNOWN");
         let progress = op.get("progress").and_then(|p| p.as_u64()).unwrap_or(0);
 
         assert_eq!(status, "COMPLETED");
@@ -249,9 +243,15 @@ mod tests {
         let arr = ops.as_array().unwrap();
         let op = &arr[0];
         let progress = op.get("progress").and_then(|p| p.as_u64()).unwrap_or(0);
-        let status = op.get("status").and_then(|s| s.as_str()).unwrap_or("UNKNOWN");
+        let status = op
+            .get("status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("UNKNOWN");
         let desc = op.get("description").and_then(|d| d.as_str()).unwrap_or("");
-        let elapsed = op.get("elapsed_secs").and_then(|e| e.as_f64()).unwrap_or(0.0);
+        let elapsed = op
+            .get("elapsed_secs")
+            .and_then(|e| e.as_f64())
+            .unwrap_or(0.0);
 
         assert_eq!(progress, 0);
         assert_eq!(status, "UNKNOWN");

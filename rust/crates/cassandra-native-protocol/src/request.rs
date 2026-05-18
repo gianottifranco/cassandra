@@ -174,7 +174,7 @@ fn decode_batch(
         None
     };
 
-    // v5 keyspace flag ignored for now.
+    // Batch messages do not carry a keyspace field in the current message model.
     let _ = version;
 
     Ok(Message::Batch(BatchMessage {
@@ -396,7 +396,7 @@ mod tests {
         types::write_long_string(&mut buf, "SELECT 1");
         types::write_consistency(&mut buf, crate::types::Consistency::One);
         types::write_byte(&mut buf, 0); // flags: none
-        // Trailing int for now_in_seconds (v5).
+        // Trailing int carrying now_in_seconds (v5).
         types::write_int(&mut buf, 12345);
 
         let frame = Frame {

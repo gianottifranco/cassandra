@@ -12,14 +12,14 @@
 //! In Mixed mode, uses per-key migration state to route individual
 //! operations to the appropriate protocol.
 
-use cassandra_accord::service::AccordService;
 use cassandra_accord::migration::{KeyMigrationState, TableMigrationState};
+use cassandra_accord::service::AccordService;
 use cassandra_schema::table::TransactionalMode;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use parking_lot::RwLock;
-use tracing::{debug, info, warn};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::paxos::coordinator::{CasResult, PaxosCoordinator};
@@ -96,12 +96,31 @@ impl ConsensusRouter {
         self.migration_states.write().insert(table_id, state);
     }
 
+    /// Deterministic table identifier for routing contexts that only have a
+    /// keyspace/table name. Schema-integrated callers should register the real
+    /// `TableMetadata.id`; this fallback keeps mixed-mode routing stable.
+    pub fn table_id_for_name(keyspace: &str, table: &str) -> Uuid {
+        let mut hash1 = 0xcbf2_9ce4_8422_2325u64;
+        let mut hash2 = 0x9e37_79b9_7f4a_7c15u64;
+        for byte in keyspace
+            .as_bytes()
+            .iter()
+            .chain(std::iter::once(&b'.'))
+            .chain(table.as_bytes().iter())
+        {
+            hash1 ^= u64::from(*byte);
+            hash1 = hash1.wrapping_mul(0x0000_0100_0000_01b3);
+            hash2 ^= u64::from(*byte).rotate_left(1);
+            hash2 = hash2.rotate_left(5).wrapping_mul(0x517c_c1b7_2722_0a95);
+        }
+        let mut bytes = [0u8; 16];
+        bytes[..8].copy_from_slice(&hash1.to_be_bytes());
+        bytes[8..].copy_from_slice(&hash2.to_be_bytes());
+        Uuid::from_bytes(bytes)
+    }
+
     /// Get the per-key migration state for Mixed mode routing.
-    fn get_key_migration_state(
-        &self,
-        table_id: &Uuid,
-        partition_key: &[u8],
-    ) -> KeyMigrationState {
+    fn get_key_migration_state(&self, table_id: &Uuid, partition_key: &[u8]) -> KeyMigrationState {
         let states = self.migration_states.read();
         match states.get(table_id) {
             Some(table_state) => table_state.get_key_state(partition_key),
@@ -164,6 +183,7 @@ impl ConsensusRouter {
                 self.execute_cas_mixed(
                     keyspace,
                     table,
+                    Self::table_id_for_name(keyspace, table),
                     partition_key,
                     mutation,
                     read_current_fn,
@@ -188,6 +208,7 @@ impl ConsensusRouter {
         &self,
         keyspace: &str,
         table: &str,
+        table_id: Uuid,
         partition_key: &[u8],
         mutation: Vec<u8>,
         read_current_fn: F1,
@@ -200,9 +221,6 @@ impl ConsensusRouter {
     {
         self.metrics.record_migration();
 
-        // Look up per-key migration state using a nil table_id as placeholder.
-        // In production, table_id would come from TableMetadata.
-        let table_id = Uuid::nil();
         let key_state = self.get_key_migration_state(&table_id, partition_key);
 
         match key_state {
@@ -229,8 +247,7 @@ impl ConsensusRouter {
             KeyMigrationState::Accord => {
                 info!(
                     keyspace,
-                    table,
-                    "Mixed mode: key migrated, routing to Accord"
+                    table, "Mixed mode: key migrated, routing to Accord"
                 );
                 self.accord
                     .execute_transaction(keyspace, vec![mutation])
@@ -310,7 +327,7 @@ mod tests {
             "Transactions are disabled for this table (TransactionalMode::Off)"
         );
 
-        // Accord Mode (disabled so will error in stub)
+        // Accord mode returns the configured service error while disabled.
         let accord_res = router
             .execute_cas(
                 "ks",
@@ -363,7 +380,7 @@ mod tests {
         let router = ConsensusRouter::new(paxos, accord);
 
         // Register migration state with a migrated key
-        let table_id = Uuid::nil();
+        let table_id = ConsensusRouter::table_id_for_name("ks", "t1");
         let mut migration = TableMigrationState::new(table_id);
         migration.mark_migrated(b"migrated_key".to_vec());
         router.register_migration_state(table_id, migration);

@@ -30,12 +30,13 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use cassandra_cluster_metadata::{ClusterSnapshot, Endpoint, ReplicationStrategy, Snitch};
+use cassandra_messaging::{Message, MessagingService, Verb};
 
 use crate::consistency::ConsistencyLevel;
-use crate::write::{
-    CellMutation, CoordinatedMutation, MutationKind, MutationRow, WriteCoordinator, WriteError,
-    WriteResult,
+use crate::verb_handlers::batch_handler::{
+    BatchRemoveRequest, BatchRemoveResponse, BatchStoreRequest, BatchStoreResponse,
 };
+use crate::write::{CoordinatedMutation, MutationKind, WriteCoordinator, WriteError, WriteResult};
 
 // ─── Batch Types ─────────────────────────────────────────────────
 
@@ -226,10 +227,7 @@ impl BatchLogManager {
     /// Store a new batch entry before executing mutations.
     pub fn store(&self, batch_type: BatchType, mutations: Vec<CoordinatedMutation>) -> Uuid {
         let id = Uuid::new_v4();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as i64;
+        let now = current_epoch_millis();
 
         let entry = BatchEntry {
             id,
@@ -243,6 +241,14 @@ impl BatchLogManager {
         self.metrics.batches_stored.fetch_add(1, Ordering::Relaxed);
         debug!(batch_id = %id, "Batch log entry stored");
         id
+    }
+
+    /// Store a batch entry received from another coordinator.
+    pub fn store_entry(&self, entry: BatchEntry) {
+        let id = entry.id;
+        self.entries.write().insert(id, entry);
+        self.metrics.batches_stored.fetch_add(1, Ordering::Relaxed);
+        debug!(batch_id = %id, "Batch log entry stored from replica request");
     }
 
     /// Remove a batch entry after all mutations succeed.
@@ -297,6 +303,13 @@ impl Default for BatchLogManager {
     }
 }
 
+fn current_epoch_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
+}
+
 // ─── Replay Result ──────────────────────────────────────────────
 
 /// Result of a batchlog replay operation.
@@ -335,6 +348,7 @@ pub struct ReplayResult {
 pub struct BatchCoordinator {
     write_coordinator: Arc<WriteCoordinator>,
     batchlog: Arc<BatchLogManager>,
+    messaging: Option<Arc<MessagingService>>,
     guardrails: BatchGuardrails,
     /// Local datacenter name for batchlog replica selection.
     local_dc: String,
@@ -366,6 +380,7 @@ impl BatchCoordinator {
         Self {
             write_coordinator,
             batchlog,
+            messaging: None,
             guardrails: BatchGuardrails::default(),
             local_dc: "dc1".to_string(),
             metrics: BatchCoordinatorMetrics::new(),
@@ -379,6 +394,11 @@ impl BatchCoordinator {
 
     pub fn with_local_dc(mut self, dc: String) -> Self {
         self.local_dc = dc;
+        self
+    }
+
+    pub fn with_messaging(mut self, messaging: Arc<MessagingService>) -> Self {
+        self.messaging = Some(messaging);
         self
     }
 
@@ -510,9 +530,7 @@ impl BatchCoordinator {
 
         // Counter batches must only contain counter mutations
         if batch_type == BatchType::Counter {
-            let all_counters = mutations
-                .iter()
-                .all(|m| m.kind == crate::write::MutationKind::Counter);
+            let all_counters = mutations.iter().all(|m| m.kind == MutationKind::Counter);
             if !all_counters {
                 return Err(WriteError::Internal(
                     "Counter batch contains non-counter mutations".to_string(),
@@ -522,9 +540,7 @@ impl BatchCoordinator {
 
         // Non-counter batches must not contain counter mutations
         if batch_type != BatchType::Counter {
-            let has_counters = mutations
-                .iter()
-                .any(|m| m.kind == crate::write::MutationKind::Counter);
+            let has_counters = mutations.iter().any(|m| m.kind == MutationKind::Counter);
             if has_counters {
                 return Err(WriteError::Internal(
                     "Non-counter batch contains counter mutations".to_string(),
@@ -596,10 +612,7 @@ impl BatchCoordinator {
             let retry_count = self.batchlog.retry_count(&entry.id);
             if retry_count > 0 {
                 // Backoff: 2^retry_count seconds, capped at 5 min
-                let backoff_ms = std::cmp::min(
-                    (1u64 << retry_count.min(18)) * 1000,
-                    300_000,
-                );
+                let backoff_ms = std::cmp::min((1u64 << retry_count.min(18)) * 1000, 300_000);
                 let age_ms = {
                     let now_ms = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -710,10 +723,11 @@ impl BatchCoordinator {
         candidates.into_iter().take(2).collect()
     }
 
-    /// Store a batch entry to batchlog replicas (stub).
+    /// Store a batch entry in the local batchlog.
     ///
-    /// In production, this sends a Verb::BatchStore message to the
-    /// batchlog endpoints. Currently stores locally only.
+    /// This is the synchronous local path used by tests and recovery code.
+    /// Use [`Self::send_batchlog_store_to_replicas`] when internode messaging
+    /// is available and the selected batchlog endpoints should be contacted.
     ///
     /// ## Java Oracle
     ///
@@ -724,23 +738,129 @@ impl BatchCoordinator {
         batch_type: BatchType,
         mutations: Vec<CoordinatedMutation>,
     ) -> Uuid {
-        // TODO: Send Verb::BatchStore to remote batchlog endpoints
-        // For now, store locally
         self.batchlog.store(batch_type, mutations)
     }
 
-    /// Remove a batch entry from batchlog replicas (stub).
-    ///
-    /// In production, this sends a Verb::BatchRemove message to the
-    /// batchlog endpoints.
+    /// Store a batch entry on the selected batchlog replicas with
+    /// `Verb::BatchStore` and require every replica response to confirm it.
+    pub async fn send_batchlog_store_to_replicas(
+        &self,
+        endpoints: &[Endpoint],
+        batch_type: BatchType,
+        mutations: Vec<CoordinatedMutation>,
+    ) -> Result<Uuid, WriteError> {
+        if endpoints.is_empty() {
+            return Ok(self.batchlog.store(batch_type, mutations));
+        }
+
+        let messaging = self.messaging.as_ref().ok_or_else(|| {
+            WriteError::Internal("Messaging service not configured for batchlog store".to_string())
+        })?;
+
+        let id = Uuid::new_v4();
+        let created_at = current_epoch_millis();
+        let request = BatchStoreRequest {
+            id,
+            batch_type,
+            mutations,
+            created_at,
+        };
+        let payload = serde_json::to_vec(&request)
+            .map_err(|e| WriteError::Internal(format!("Serialize batchlog store request: {e}")))?;
+
+        for endpoint in endpoints {
+            let msg = Message::request(Verb::BatchStore, messaging.next_id(), payload.clone());
+            let response = messaging
+                .send_and_wait(endpoint.addr(), msg, Duration::from_secs(5))
+                .await
+                .map_err(|e| {
+                    WriteError::Internal(format!(
+                        "Batchlog store to {endpoint} failed before response: {e}"
+                    ))
+                })?;
+
+            if response.header.verb != Verb::BatchStoreResponse {
+                return Err(WriteError::Internal(format!(
+                    "Batchlog store to {endpoint} returned unexpected verb {}",
+                    response.header.verb
+                )));
+            }
+
+            let body: BatchStoreResponse =
+                serde_json::from_slice(&response.payload).map_err(|e| {
+                    WriteError::Internal(format!(
+                        "Batchlog store response from {endpoint} was invalid: {e}"
+                    ))
+                })?;
+            if !body.success {
+                return Err(WriteError::Internal(format!(
+                    "Batchlog store to {endpoint} was rejected"
+                )));
+            }
+        }
+
+        Ok(id)
+    }
+
+    /// Remove a local batch entry after all mutations succeed.
     ///
     /// ## Java Oracle
     ///
     /// `StorageProxy.syncWriteBatchedMutations()` — batchlog remove phase
     pub fn send_batchlog_remove(&self, _endpoints: &[Endpoint], id: &Uuid) {
-        // TODO: Send Verb::BatchRemove to remote batchlog endpoints
-        // For now, remove locally
         self.batchlog.remove(id);
+    }
+
+    /// Remove a batch entry from selected batchlog replicas with
+    /// `Verb::BatchRemove`.
+    pub async fn send_batchlog_remove_from_replicas(
+        &self,
+        endpoints: &[Endpoint],
+        id: &Uuid,
+    ) -> Result<(), WriteError> {
+        if endpoints.is_empty() {
+            self.batchlog.remove(id);
+            return Ok(());
+        }
+
+        let messaging = self.messaging.as_ref().ok_or_else(|| {
+            WriteError::Internal("Messaging service not configured for batchlog remove".to_string())
+        })?;
+        let payload = serde_json::to_vec(&BatchRemoveRequest { id: *id })
+            .map_err(|e| WriteError::Internal(format!("Serialize batchlog remove request: {e}")))?;
+
+        for endpoint in endpoints {
+            let msg = Message::request(Verb::BatchRemove, messaging.next_id(), payload.clone());
+            let response = messaging
+                .send_and_wait(endpoint.addr(), msg, Duration::from_secs(5))
+                .await
+                .map_err(|e| {
+                    WriteError::Internal(format!(
+                        "Batchlog remove from {endpoint} failed before response: {e}"
+                    ))
+                })?;
+
+            // BatchRemove reuses BatchStoreResponse as the ack verb on this
+            // Rust wire enum; the payload remains BatchRemoveResponse.
+            if response.header.verb != Verb::BatchStoreResponse {
+                return Err(WriteError::Internal(format!(
+                    "Batchlog remove from {endpoint} returned unexpected verb {}",
+                    response.header.verb
+                )));
+            }
+
+            let body: BatchRemoveResponse =
+                serde_json::from_slice(&response.payload).map_err(|e| {
+                    WriteError::Internal(format!(
+                        "Batchlog remove response from {endpoint} was invalid: {e}"
+                    ))
+                })?;
+            if !body.removed {
+                debug!(batch_id = %id, endpoint = %endpoint, "Batchlog replica did not have entry to remove");
+            }
+        }
+
+        Ok(())
     }
 
     /// Merge counter mutations per-partition for counter batch optimization.
@@ -854,11 +974,13 @@ impl BatchCoordinator {
 mod tests {
     use super::*;
     use crate::hints::HintStore;
+    use crate::verb_handlers::{BatchRemoveVerbHandler, BatchStoreVerbHandler};
     use crate::write::{CellMutation, MutationKind, MutationRow};
     use cassandra_cluster_metadata::{
         ClusterMetadata, Endpoint, NodeId, NodeInfo, SimpleSnitch, SimpleStrategy,
     };
     use cassandra_common::Token;
+    use cassandra_messaging::MessagingService;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn ep(port: u16) -> Endpoint {
@@ -866,6 +988,13 @@ mod tests {
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
             port,
         ))
+    }
+
+    fn free_addr() -> SocketAddr {
+        std::net::TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
     }
 
     fn node(port: u16, tokens: Vec<i64>) -> NodeInfo {
@@ -916,6 +1045,24 @@ mod tests {
         let entry = blm.remove(&id).unwrap();
         assert_eq!(entry.id, id);
         assert_eq!(blm.pending_count(), 0);
+    }
+
+    #[test]
+    fn store_entry_preserves_remote_batch_id() {
+        let blm = BatchLogManager::new();
+        let id = Uuid::new_v4();
+        blm.store_entry(BatchEntry {
+            id,
+            batch_type: BatchType::Logged,
+            mutations: vec![test_mutation()],
+            created_at: 1_700_000_000_000,
+            version: 1,
+        });
+
+        let stored = blm.get(&id).unwrap();
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.batch_type, BatchType::Logged);
+        assert_eq!(stored.mutations.len(), 1);
     }
 
     #[test]
@@ -1347,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn send_batchlog_store_and_remove_stubs() {
+    fn send_batchlog_store_and_remove_local_entry() {
         let (_wc, blm, bc) = setup();
         let endpoints = vec![ep(7001), ep(7002)];
 
@@ -1356,5 +1503,42 @@ mod tests {
 
         bc.send_batchlog_remove(&endpoints, &id);
         assert_eq!(blm.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn send_batchlog_store_and_remove_replicas_via_messaging() {
+        let (_wc, _blm, bc) = setup();
+        let remote_batchlog = Arc::new(BatchLogManager::new());
+        let remote_addr = free_addr();
+        let remote_service = Arc::new(MessagingService::new(remote_addr));
+
+        let store_batchlog = Arc::clone(&remote_batchlog);
+        remote_service.register_handler(
+            Verb::BatchStore,
+            Arc::new(move |msg| BatchStoreVerbHandler::handle_with_batchlog(msg, &store_batchlog)),
+        );
+        let remove_batchlog = Arc::clone(&remote_batchlog);
+        remote_service.register_handler(
+            Verb::BatchRemove,
+            Arc::new(move |msg| {
+                BatchRemoveVerbHandler::handle_with_batchlog(msg, &remove_batchlog)
+            }),
+        );
+        Arc::clone(&remote_service).start_listener().await.unwrap();
+
+        let coordinator_service = Arc::new(MessagingService::new(free_addr()));
+        let bc = bc.with_messaging(coordinator_service);
+        let endpoint = Endpoint::new(remote_addr);
+
+        let id = bc
+            .send_batchlog_store_to_replicas(&[endpoint], BatchType::Logged, vec![test_mutation()])
+            .await
+            .unwrap();
+        assert!(remote_batchlog.get(&id).is_some());
+
+        bc.send_batchlog_remove_from_replicas(&[endpoint], &id)
+            .await
+            .unwrap();
+        assert!(remote_batchlog.get(&id).is_none());
     }
 }

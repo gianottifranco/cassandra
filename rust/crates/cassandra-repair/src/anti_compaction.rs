@@ -65,24 +65,58 @@ pub struct AntiCompactionResult {
 }
 
 /// Check whether a token range is fully covered by repaired ranges.
-pub fn is_range_fully_repaired(
-    range: (Token, Token),
-    repaired_ranges: &[(Token, Token)],
-) -> bool {
-    let (start, end) = (range.0.value(), range.1.value());
-    if start >= end {
-        return false; // Empty or wrapping range not supported here
+pub fn is_range_fully_repaired(range: (Token, Token), repaired_ranges: &[(Token, Token)]) -> bool {
+    let target_segments = normalize_ring_range(range);
+    if target_segments.is_empty() {
+        return false;
     }
 
-    // Collect repaired sub-ranges that overlap [start, end)
-    let mut covering: Vec<(i64, i64)> = repaired_ranges
+    let repaired_segments: Vec<(u128, u128)> = repaired_ranges
+        .iter()
+        .flat_map(|range| normalize_ring_range(*range))
+        .collect();
+
+    target_segments
+        .iter()
+        .all(|segment| is_linear_segment_covered(*segment, &repaired_segments))
+}
+
+const RING_SIZE: u128 = 1u128 << 64;
+
+fn ring_position(token: Token) -> u128 {
+    (token.value() as i128 - i64::MIN as i128) as u128
+}
+
+fn normalize_ring_range(range: (Token, Token)) -> Vec<(u128, u128)> {
+    let start = ring_position(range.0);
+    let end = ring_position(range.1);
+
+    if start == end {
+        if range.0 == Token::MINIMUM {
+            vec![(0, RING_SIZE)]
+        } else {
+            Vec::new()
+        }
+    } else if start < end {
+        vec![(start, end)]
+    } else {
+        let mut segments = vec![(start, RING_SIZE)];
+        if end > 0 {
+            segments.push((0, end));
+        }
+        segments
+    }
+}
+
+fn is_linear_segment_covered(segment: (u128, u128), repaired_segments: &[(u128, u128)]) -> bool {
+    let (start, end) = segment;
+    let mut covering: Vec<(u128, u128)> = repaired_segments
         .iter()
         .filter_map(|(rs, re)| {
-            let (rs, re) = (rs.value(), re.value());
-            if rs >= end || re <= start {
+            if *rs >= end || *re <= start {
                 None
             } else {
-                Some((rs.max(start), re.min(end)))
+                Some(((*rs).max(start), (*re).min(end)))
             }
         })
         .collect();
@@ -91,7 +125,6 @@ pub fn is_range_fully_repaired(
         return false;
     }
 
-    // Sort by start and merge
     covering.sort_by_key(|(s, _)| *s);
     let mut covered_end = start;
     for (s, e) in &covering {
@@ -130,10 +163,14 @@ fn token_in_any_range(tok: Token, ranges: &[(Token, Token)]) -> bool {
     let v = tok.value();
     ranges.iter().any(|(start, end)| {
         let (s, e) = (start.value(), end.value());
-        if s <= e {
+        if *start == Token::MINIMUM && *end == Token::MINIMUM {
+            true
+        } else if s < e {
             v >= s && v < e
-        } else {
+        } else if s > e {
             v >= s || v < e
+        } else {
+            false
         }
     })
 }
@@ -181,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn range_with_gap() {
+    fn range_with_unrepaired_middle() {
         let range = (tok(0), tok(100));
         let repaired = vec![(tok(0), tok(40)), (tok(60), tok(100))];
         assert!(!is_range_fully_repaired(range, &repaired));
@@ -191,6 +228,34 @@ mod tests {
     fn range_superset() {
         let range = (tok(10), tok(90));
         let repaired = vec![(tok(0), tok(100))];
+        assert!(is_range_fully_repaired(range, &repaired));
+    }
+
+    #[test]
+    fn wrapping_range_fully_repaired_by_wrapping_range() {
+        let range = (tok(100), tok(-100));
+        let repaired = vec![(tok(100), tok(-100))];
+        assert!(is_range_fully_repaired(range, &repaired));
+    }
+
+    #[test]
+    fn wrapping_range_fully_repaired_by_split_segments() {
+        let range = (tok(100), tok(-100));
+        let repaired = vec![(tok(100), Token::MINIMUM), (Token::MINIMUM, tok(-100))];
+        assert!(is_range_fully_repaired(range, &repaired));
+    }
+
+    #[test]
+    fn wrapping_range_with_unrepaired_segment() {
+        let range = (tok(100), tok(-100));
+        let repaired = vec![(tok(100), Token::MINIMUM)];
+        assert!(!is_range_fully_repaired(range, &repaired));
+    }
+
+    #[test]
+    fn full_ring_range_repaired_by_full_ring() {
+        let range = (Token::MINIMUM, Token::MINIMUM);
+        let repaired = vec![(Token::MINIMUM, Token::MINIMUM)];
         assert!(is_range_fully_repaired(range, &repaired));
     }
 
@@ -229,11 +294,24 @@ mod tests {
     }
 
     #[test]
+    fn classify_full_ring_repaired() {
+        let tokens = vec![Token::MINIMUM, tok(0), Token::MAXIMUM];
+        let repaired = vec![(Token::MINIMUM, Token::MINIMUM)];
+        let (rep, unrep) = classify_partitions(&tokens, &repaired);
+        assert_eq!(rep, tokens);
+        assert!(unrep.is_empty());
+    }
+
+    #[test]
     fn repaired_state_display() {
         let id = Uuid::new_v4();
         assert_eq!(RepairedState::Unrepaired.to_string(), "unrepaired");
         assert!(RepairedState::Repaired(id).to_string().contains("repaired"));
-        assert!(RepairedState::PendingRepair(id).to_string().contains("pending"));
+        assert!(
+            RepairedState::PendingRepair(id)
+                .to_string()
+                .contains("pending")
+        );
     }
 
     #[test]

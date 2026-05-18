@@ -34,6 +34,12 @@ byteorder = { workspace = true }
 serde_yaml.workspace = true
 uuid = { workspace = true }
 md-5 = { workspace = true }
+fs2 = { workspace = true }
+regex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+[features]
+default = []
+sasi = ["cassandra-storage/sasi"]

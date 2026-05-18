@@ -16,7 +16,7 @@
 use std::net::SocketAddr;
 use std::path::Path;
 
-use tracing::{info, warn};
+use tracing::info;
 
 // ─── Errors ─────────────────────────────────────────────────────
 
@@ -29,7 +29,9 @@ pub enum StartupError {
     #[error("Data directory is not writable: {path}")]
     DataDirectoryNotWritable { path: String },
 
-    #[error("Insufficient disk space in {path}: {available_mb} MiB available, {required_mb} MiB required")]
+    #[error(
+        "Insufficient disk space in {path}: {available_mb} MiB available, {required_mb} MiB required"
+    )]
     InsufficientDiskSpace {
         path: String,
         available_mb: u64,
@@ -96,14 +98,14 @@ fn check_data_directories(directories: &[String]) -> Result<(), StartupError> {
     for dir in directories {
         let path = Path::new(dir);
         if !path.exists() {
-            return Err(StartupError::DataDirectoryMissing {
-                path: dir.clone(),
-            });
+            return Err(StartupError::DataDirectoryMissing { path: dir.clone() });
         }
-        if path.metadata().map(|m| m.permissions().readonly()).unwrap_or(true) {
-            return Err(StartupError::DataDirectoryNotWritable {
-                path: dir.clone(),
-            });
+        if path
+            .metadata()
+            .map(|m| m.permissions().readonly())
+            .unwrap_or(true)
+        {
+            return Err(StartupError::DataDirectoryNotWritable { path: dir.clone() });
         }
     }
     Ok(())
@@ -111,17 +113,13 @@ fn check_data_directories(directories: &[String]) -> Result<(), StartupError> {
 
 /// Check that minimum disk space is available.
 fn check_disk_space(directories: &[String], min_free_mb: u64) -> Result<(), StartupError> {
-    // On real systems we would use statvfs or similar. For now, we just
-    // verify the directories exist (the actual space check is a stub that
-    // always passes, since portable disk space queries need platform-specific code).
     for dir in directories {
         let path = Path::new(dir);
         if !path.exists() {
             continue; // Already caught by check_data_directories.
         }
-        // Stub: assume sufficient space. A real implementation would
-        // call platform-specific APIs here.
-        let available_mb = u64::MAX; // Placeholder.
+        let available_mb =
+            available_space_mb(path).map_err(|e| StartupError::ConfigError(e.to_string()))?;
         if available_mb < min_free_mb {
             return Err(StartupError::InsufficientDiskSpace {
                 path: dir.clone(),
@@ -131,6 +129,11 @@ fn check_disk_space(directories: &[String], min_free_mb: u64) -> Result<(), Star
         }
     }
     Ok(())
+}
+
+fn available_space_mb(path: &Path) -> std::io::Result<u64> {
+    let available_bytes = fs2::available_space(path)?;
+    Ok(available_bytes / (1024 * 1024))
 }
 
 /// Check that a listen port is available by attempting to bind.
@@ -173,6 +176,20 @@ mod tests {
         };
         let err = run_startup_checks(&config).unwrap_err();
         assert!(matches!(err, StartupError::DataDirectoryMissing { .. }));
+    }
+
+    #[test]
+    fn check_disk_space_rejects_impossible_requirement() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = check_disk_space(&[dir.path().to_string_lossy().to_string()], u64::MAX)
+            .expect_err("impossibly high requirement must fail");
+        assert!(matches!(
+            err,
+            StartupError::InsufficientDiskSpace {
+                required_mb: u64::MAX,
+                ..
+            }
+        ));
     }
 
     #[test]

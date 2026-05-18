@@ -69,7 +69,8 @@ impl RandomAccessReader {
         self.position = target;
         // Invalidate buffer if position left cached range.
         if let Some(ref buf) = self.buffer {
-            if self.position < buf.offset() || self.position >= buf.offset() + buf.data().len() as u64
+            if self.position < buf.offset()
+                || self.position >= buf.offset() + buf.data().len() as u64
             {
                 self.buffer = None;
             }

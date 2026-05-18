@@ -63,9 +63,7 @@ pub fn compare_bytes(cql_type: &CqlType, left: &[u8], right: &[u8]) -> Ordering 
 
         // List/Set: element-wise comparison using inner type.
         // Java oracle: ListType.compare / SetType.compare
-        CqlType::List(inner, _) | CqlType::Set(inner, _) => {
-            cmp_collection_seq(inner, left, right)
-        }
+        CqlType::List(inner, _) | CqlType::Set(inner, _) => cmp_collection_seq(inner, left, right),
 
         // Map: compare key-value pairs in order.
         // Java oracle: MapType.compare
@@ -78,6 +76,10 @@ pub fn compare_bytes(cql_type: &CqlType, left: &[u8], right: &[u8]) -> Ordering 
         // UDT: same wire format as Tuple.
         // Java oracle: UserType.compare
         CqlType::Udt { field_types, .. } => cmp_tuple(field_types, left, right),
+
+        // Vector: compare fixed-width elements in order.
+        // Java oracle: VectorType delegates element comparison to the subtype.
+        CqlType::Vector(inner, dimensions) => cmp_vector(inner, *dimensions, left, right),
 
         // Default: unsigned byte-by-byte (safe fallback)
         _ => left.cmp(right),
@@ -284,6 +286,26 @@ fn cmp_tuple(types: &[CqlType], left: &[u8], right: &[u8]) -> Ordering {
     Ordering::Equal
 }
 
+/// Fixed-width vector comparison.
+fn cmp_vector(inner: &CqlType, dimensions: u32, left: &[u8], right: &[u8]) -> Ordering {
+    let Some(element_size) = inner.fixed_size() else {
+        return left.cmp(right);
+    };
+    let expected_len = element_size.saturating_mul(dimensions as usize);
+    if left.len() != expected_len || right.len() != expected_len {
+        return left.len().cmp(&right.len()).then_with(|| left.cmp(right));
+    }
+    for idx in 0..dimensions as usize {
+        let start = idx * element_size;
+        let end = start + element_size;
+        let cmp = compare_bytes(inner, &left[start..end], &right[start..end]);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+    }
+    Ordering::Equal
+}
+
 /// Variable-length signed integer comparison.
 fn cmp_varint(left: &[u8], right: &[u8]) -> Ordering {
     if left.is_empty() && right.is_empty() {
@@ -374,6 +396,26 @@ mod tests {
         let a = [0xFF, 0xFF, 0xFF]; // truncated vint
         let b = [0xFF, 0xFF, 0xFE];
         assert_eq!(compare_bytes(&CqlType::Duration, &a, &b), Ordering::Greater);
+    }
+
+    #[test]
+    fn vector_compares_elements_by_inner_type() {
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let a = [1.0_f32, 2.0, 3.0]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let b = [1.0_f32, 2.0, 4.0]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+        let c = [1.0_f32, 2.0, 3.0]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+
+        assert_eq!(compare_bytes(&ty, &a, &b), Ordering::Less);
+        assert_eq!(compare_bytes(&ty, &a, &c), Ordering::Equal);
     }
 
     #[test]

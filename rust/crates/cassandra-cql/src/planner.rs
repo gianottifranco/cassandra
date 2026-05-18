@@ -9,10 +9,13 @@
 use crate::ast::*;
 use crate::parser::ParseError;
 use crate::restrictions::RestrictionSet;
-use cassandra_schema::SchemaSnapshot;
+use cassandra_schema::{
+    ColumnConstraintMetadata, ConstraintRelationOp as SchemaConstraintRelationOp, KeyspaceMetadata,
+    SchemaSnapshot, TableMetadata, canonical_cql_type_name,
+};
 use std::collections::HashMap;
 
-/// A planned, validated query ready for (stub) execution.
+/// A planned, validated query ready for the coordinator execution layer.
 #[derive(Debug, Clone)]
 pub enum QueryPlan {
     CreateKeyspace(CreateKeyspacePlan),
@@ -116,6 +119,7 @@ pub struct ResolvedColumnDef {
     pub cql_type: cassandra_types::CqlType,
     pub is_static: bool,
     pub masked_with: Option<(String, Vec<String>)>,
+    pub constraints: Vec<ColumnConstraintMetadata>,
 }
 
 #[derive(Debug, Clone)]
@@ -140,6 +144,7 @@ pub struct SelectPlan {
     pub distinct: bool,
     pub json: bool,
     pub where_clause: Vec<Relation>,
+    pub group_by: Vec<String>,
     pub order_by: Vec<(String, ClusteringOrder)>,
     pub limit: Option<Term>,
     pub allow_filtering: bool,
@@ -147,6 +152,10 @@ pub struct SelectPlan {
     pub restrictions: Option<RestrictionSet>,
     /// ANN clause detected from ORDER BY ... ANN OF [...] LIMIT k.
     pub ann_clause: Option<AnnClause>,
+    /// WU-06: Maximum number of rows per page (from protocol page_size).
+    pub page_size: Option<i32>,
+    /// WU-06: Opaque paging state from a previous page (from protocol paging_state).
+    pub paging_state: Option<Vec<u8>>,
 }
 
 /// Approximate Nearest Neighbor clause for vector search.
@@ -505,6 +514,11 @@ pub fn plan(
                     cql_type,
                     is_static: col.is_static,
                     masked_with,
+                    constraints: col
+                        .constraints
+                        .iter()
+                        .map(resolve_column_constraint)
+                        .collect(),
                 });
             }
 
@@ -557,16 +571,24 @@ pub fn plan(
                 if let SelectColumns::Named(ref selectors) = s.columns {
                     validate_selectors(selectors, table_meta)?;
                 }
+                if s.distinct {
+                    validate_distinct_select(&s.columns, table_meta)?;
+                }
+                validate_group_by_select(
+                    &s.columns,
+                    &s.group_by,
+                    table_meta,
+                    schema.keyspace(&ks),
+                )?;
 
                 // Validate WHERE clause restrictions.
                 if !s.where_clause.is_empty() {
-                    let restriction_set =
-                        crate::restrictions::statement_restrictions::build(
-                            &s.where_clause,
-                            table_meta,
-                            s.allow_filtering,
-                        )
-                        .map_err(|e| PlanError::InvalidQuery(e.to_string()))?;
+                    let restriction_set = crate::restrictions::statement_restrictions::build(
+                        &s.where_clause,
+                        table_meta,
+                        s.allow_filtering,
+                    )
+                    .map_err(|e| PlanError::InvalidQuery(e.to_string()))?;
                     Some(restriction_set)
                 } else {
                     Some(crate::restrictions::RestrictionSet::default())
@@ -575,9 +597,7 @@ pub fn plan(
                 None
             };
 
-            // Detect ANN clause: placeholder detection — in practice, the AST
-            // would encode ANN OF explicitly. For now, ann_clause is None.
-            let ann_clause: Option<AnnClause> = None;
+            let ann_clause = detect_ann_clause(s.ann_order_by.as_ref(), &s.limit)?;
 
             Ok(QueryPlan::Select(SelectPlan {
                 keyspace: ks,
@@ -586,11 +606,14 @@ pub fn plan(
                 distinct: s.distinct,
                 json: s.json,
                 where_clause: s.where_clause.clone(),
+                group_by: s.group_by.clone(),
                 order_by: s.order_by.clone(),
                 limit: s.limit.clone(),
                 allow_filtering: s.allow_filtering,
                 restrictions,
                 ann_clause,
+                page_size: None,
+                paging_state: None,
             }))
         }
 
@@ -707,23 +730,21 @@ pub fn plan(
             let ks = resolve_keyspace(ci.keyspace.as_deref(), active_keyspace)?;
 
             // Validate keyspace and table exist
-            let ks_meta = schema
-                .keyspace(&ks)
-                .ok_or_else(|| PlanError::InvalidQuery(format!("Keyspace '{}' does not exist", ks)))?;
+            let ks_meta = schema.keyspace(&ks).ok_or_else(|| {
+                PlanError::InvalidQuery(format!("Keyspace '{}' does not exist", ks))
+            })?;
 
-            let table_meta = ks_meta
-                .table(&ci.table)
-                .ok_or_else(|| {
-                    PlanError::InvalidQuery(format!("Table '{}.{}' does not exist", ks, ci.table))
-                })?;
+            let table_meta = ks_meta.table(&ci.table).ok_or_else(|| {
+                PlanError::InvalidQuery(format!("Table '{}.{}' does not exist", ks, ci.table))
+            })?;
 
             // Validate column exists
-            if table_meta.column(&ci.column).is_none() {
-                return Err(PlanError::InvalidQuery(format!(
+            let column_meta = table_meta.column(&ci.column).ok_or_else(|| {
+                PlanError::InvalidQuery(format!(
                     "Column '{}' does not exist in table '{}.{}'",
                     ci.column, ks, ci.table
-                )));
-            }
+                ))
+            })?;
 
             // Validate column is not a partition key
             let pk_names: Vec<&str> = table_meta
@@ -758,6 +779,19 @@ pub fn plan(
                 "KEYS".to_string()
             };
 
+            let mut options = ci.options.clone();
+            if ci
+                .custom_class
+                .as_deref()
+                .is_some_and(|class| class.contains("StorageAttachedIndex"))
+            {
+                if let cassandra_types::CqlType::Vector(_, dimensions) = &column_meta.column_type {
+                    options
+                        .entry("vector_dimensions".to_string())
+                        .or_insert_with(|| dimensions.to_string());
+                }
+            }
+
             Ok(QueryPlan::CreateIndex(CreateIndexPlan {
                 keyspace: ks,
                 table: ci.table.clone(),
@@ -765,7 +799,7 @@ pub fn plan(
                 column: ci.column.clone(),
                 kind,
                 custom_class: ci.custom_class.clone(),
-                options: ci.options.clone(),
+                options,
                 if_not_exists: ci.if_not_exists,
             }))
         }
@@ -808,18 +842,20 @@ pub fn plan(
                     });
                 }
             }
-            Ok(QueryPlan::CreateMaterializedView(CreateMaterializedViewPlan {
-                keyspace: ks,
-                name: cmv.name.clone(),
-                if_not_exists: cmv.if_not_exists,
-                base_table: cmv.select.table.clone(),
-                select_columns: cmv.select.columns.clone(),
-                where_clause: cmv.select.where_clause.clone(),
-                partition_key: cmv.partition_key.clone(),
-                clustering_key: cmv.clustering_key.clone(),
-                clustering_order: cmv.clustering_order.clone(),
-                options: cmv.options.clone(),
-            }))
+            Ok(QueryPlan::CreateMaterializedView(
+                CreateMaterializedViewPlan {
+                    keyspace: ks,
+                    name: cmv.name.clone(),
+                    if_not_exists: cmv.if_not_exists,
+                    base_table: cmv.select.table.clone(),
+                    select_columns: cmv.select.columns.clone(),
+                    where_clause: cmv.select.where_clause.clone(),
+                    partition_key: cmv.partition_key.clone(),
+                    clustering_key: cmv.clustering_key.clone(),
+                    clustering_order: cmv.clustering_order.clone(),
+                    options: cmv.options.clone(),
+                },
+            ))
         }
 
         Statement::DropMaterializedView(dmv) => {
@@ -843,11 +879,13 @@ pub fn plan(
 
         Statement::AlterMaterializedView(amv) => {
             let ks = resolve_keyspace(amv.keyspace.as_deref(), active_keyspace)?;
-            Ok(QueryPlan::AlterMaterializedView(AlterMaterializedViewPlan {
-                keyspace: ks,
-                name: amv.name.clone(),
-                options: amv.options.clone(),
-            }))
+            Ok(QueryPlan::AlterMaterializedView(
+                AlterMaterializedViewPlan {
+                    keyspace: ks,
+                    name: amv.name.clone(),
+                    options: amv.options.clone(),
+                },
+            ))
         }
 
         Statement::CreateType(ct) => {
@@ -862,7 +900,9 @@ pub fn plan(
                     }
                 }
             }
-            let fields = ct.fields.iter()
+            let fields = ct
+                .fields
+                .iter()
                 .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
                 .collect();
             Ok(QueryPlan::CreateType(CreateTypePlan {
@@ -892,16 +932,16 @@ pub fn plan(
             }))
         }
 
-        Statement::AlterType(_at) => {
-            Err(PlanError::InvalidQuery(
-                "ALTER TYPE is not yet fully supported".into(),
-            ))
-        }
+        Statement::AlterType(_at) => Err(PlanError::InvalidQuery(
+            "ALTER TYPE is not yet fully supported".into(),
+        )),
 
         Statement::CreateFunction(cf) => {
             let ks = resolve_keyspace(cf.keyspace.as_deref(), active_keyspace)?;
-            let args: Vec<(String, String)> = cf.args.iter()
-                .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
+            let args: Vec<(String, String)> = cf
+                .args
+                .iter()
+                .map(|(name, typ)| (name.clone(), canonical_ast_type_name(typ)))
                 .collect();
             Ok(QueryPlan::CreateFunction(CreateFunctionPlan {
                 keyspace: ks,
@@ -910,7 +950,7 @@ pub fn plan(
                 if_not_exists: cf.if_not_exists,
                 args,
                 called_on_null_input: cf.called_on_null_input,
-                return_type: format!("{:?}", cf.return_type),
+                return_type: canonical_ast_type_name(&cf.return_type),
                 language: cf.language.clone(),
                 body: cf.body.clone(),
             }))
@@ -918,9 +958,7 @@ pub fn plan(
 
         Statement::DropFunction(df) => {
             let ks = resolve_keyspace(df.keyspace.as_deref(), active_keyspace)?;
-            let arg_types: Vec<String> = df.arg_types.iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
+            let arg_types: Vec<String> = df.arg_types.iter().map(canonical_ast_type_name).collect();
             Ok(QueryPlan::DropFunction(DropFunctionPlan {
                 keyspace: ks,
                 name: df.name.clone(),
@@ -931,10 +969,8 @@ pub fn plan(
 
         Statement::CreateAggregate(ca) => {
             let ks = resolve_keyspace(ca.keyspace.as_deref(), active_keyspace)?;
-            let arg_types: Vec<String> = ca.arg_types.iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
-            let initcond = ca.initcond.as_ref().map(|t| format!("{:?}", t));
+            let arg_types: Vec<String> = ca.arg_types.iter().map(canonical_ast_type_name).collect();
+            let initcond = ca.initcond.as_ref().map(render_term_literal);
             Ok(QueryPlan::CreateAggregate(CreateAggregatePlan {
                 keyspace: ks,
                 name: ca.name.clone(),
@@ -942,7 +978,7 @@ pub fn plan(
                 if_not_exists: ca.if_not_exists,
                 arg_types,
                 sfunc: ca.sfunc.clone(),
-                stype: format!("{:?}", ca.stype),
+                stype: canonical_ast_type_name(&ca.stype),
                 finalfunc: ca.finalfunc.clone(),
                 initcond,
             }))
@@ -950,9 +986,7 @@ pub fn plan(
 
         Statement::DropAggregate(da) => {
             let ks = resolve_keyspace(da.keyspace.as_deref(), active_keyspace)?;
-            let arg_types: Vec<String> = da.arg_types.iter()
-                .map(|t| format!("{:?}", t))
-                .collect();
+            let arg_types: Vec<String> = da.arg_types.iter().map(canonical_ast_type_name).collect();
             Ok(QueryPlan::DropAggregate(DropAggregatePlan {
                 keyspace: ks,
                 name: da.name.clone(),
@@ -1025,9 +1059,191 @@ fn validate_selector(
         Selector::Alias { selector, .. } => {
             validate_selector(selector, table)?;
         }
-        Selector::Count | Selector::WritetimeOrTtl(_, _) => {}
+        Selector::WritetimeOrTtl(_, name) => {
+            if table.column(name).is_none() {
+                return Err(PlanError::InvalidQuery(format!(
+                    "Undefined column name '{}'",
+                    name
+                )));
+            }
+        }
+        Selector::Count => {}
     }
     Ok(())
+}
+
+fn validate_distinct_select(
+    columns: &SelectColumns,
+    table: &cassandra_schema::table::TableMetadata,
+) -> Result<(), PlanError> {
+    use cassandra_schema::ColumnKind;
+    use std::collections::HashSet;
+
+    let selectors = match columns {
+        SelectColumns::Named(selectors) => selectors,
+        SelectColumns::All => {
+            return Err(PlanError::InvalidQuery(
+                "SELECT DISTINCT does not support SELECT *".to_string(),
+            ));
+        }
+    };
+
+    let mut selected = HashSet::new();
+    for selector in selectors {
+        let name = match selector {
+            Selector::Column(name) => name,
+            Selector::Alias { selector, .. } => match selector.as_ref() {
+                Selector::Column(name) => name,
+                _ => {
+                    return Err(PlanError::InvalidQuery(
+                        "SELECT DISTINCT only supports partition key and static columns"
+                            .to_string(),
+                    ));
+                }
+            },
+            _ => {
+                return Err(PlanError::InvalidQuery(
+                    "SELECT DISTINCT only supports partition key and static columns".to_string(),
+                ));
+            }
+        };
+
+        let Some(column) = table.column(name) else {
+            return Err(PlanError::InvalidQuery(format!(
+                "Undefined column name '{}'",
+                name
+            )));
+        };
+        if !matches!(column.kind, ColumnKind::PartitionKey | ColumnKind::Static) {
+            return Err(PlanError::InvalidQuery(format!(
+                "SELECT DISTINCT cannot select non partition-key/non-static column '{}'",
+                name
+            )));
+        }
+        selected.insert(name.as_str());
+    }
+
+    for pk in table.partition_key_columns() {
+        if !selected.contains(pk.name.as_str()) {
+            return Err(PlanError::InvalidQuery(format!(
+                "SELECT DISTINCT must include partition key column '{}'",
+                pk.name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_group_by_select(
+    columns: &SelectColumns,
+    group_by: &[String],
+    table: &TableMetadata,
+    keyspace: Option<&KeyspaceMetadata>,
+) -> Result<(), PlanError> {
+    use std::collections::HashSet;
+
+    for column in group_by {
+        if table.column(column).is_none() {
+            return Err(PlanError::InvalidQuery(format!(
+                "Undefined column name '{}'",
+                column
+            )));
+        }
+    }
+
+    let SelectColumns::Named(selectors) = columns else {
+        return Ok(());
+    };
+
+    let has_aggregate = selectors
+        .iter()
+        .any(|selector| selector_is_aggregate(selector, table, keyspace));
+    if !has_aggregate && group_by.is_empty() {
+        return Ok(());
+    }
+
+    let grouped: HashSet<&str> = group_by.iter().map(String::as_str).collect();
+    for selector in selectors {
+        if selector_is_aggregate(selector, table, keyspace) {
+            continue;
+        }
+        let Some(name) = selector_column_name(selector) else {
+            return Err(PlanError::InvalidQuery(
+                "Non-aggregate selectors in aggregate queries must be grouped columns".to_string(),
+            ));
+        };
+        if has_aggregate && !grouped.contains(name) {
+            return Err(PlanError::InvalidQuery(format!(
+                "Column '{}' must appear in GROUP BY or be used in an aggregate",
+                name
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn selector_is_aggregate(
+    selector: &Selector,
+    table: &TableMetadata,
+    keyspace: Option<&KeyspaceMetadata>,
+) -> bool {
+    match selector {
+        Selector::Count => true,
+        Selector::Function(name, args) => {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "count" | "sum" | "avg" | "min" | "max"
+            ) || selector_matches_user_aggregate(name, args, table, keyspace)
+        }
+        Selector::Alias { selector, .. } => selector_is_aggregate(selector, table, keyspace),
+        _ => false,
+    }
+}
+
+fn selector_matches_user_aggregate(
+    name: &str,
+    args: &[Selector],
+    table: &TableMetadata,
+    keyspace: Option<&KeyspaceMetadata>,
+) -> bool {
+    let Some(keyspace) = keyspace else {
+        return false;
+    };
+    let Some(arg_types) = selector_arg_type_names(args, table) else {
+        return false;
+    };
+    let signature = format!("{}({})", name, arg_types.join(", "));
+    keyspace.aggregate(&signature).is_some()
+}
+
+fn selector_arg_type_names(args: &[Selector], table: &TableMetadata) -> Option<Vec<String>> {
+    args.iter()
+        .map(|arg| selector_result_type_name(arg, table))
+        .collect()
+}
+
+fn selector_result_type_name(selector: &Selector, table: &TableMetadata) -> Option<String> {
+    match selector {
+        Selector::Column(name) => table
+            .column(name)
+            .map(|column| column.column_type.cql_name()),
+        Selector::Alias { selector, .. } => selector_result_type_name(selector, table),
+        Selector::Count => Some("bigint".to_string()),
+        Selector::Function(name, _) if name.eq_ignore_ascii_case("count") => {
+            Some("bigint".to_string())
+        }
+        _ => None,
+    }
+}
+
+fn selector_column_name(selector: &Selector) -> Option<&str> {
+    match selector {
+        Selector::Column(name) => Some(name.as_str()),
+        Selector::Alias { selector, .. } => selector_column_name(selector),
+        _ => None,
+    }
 }
 
 /// Extract timestamp and TTL from a USING clause list.
@@ -1060,23 +1276,169 @@ fn resolve_keyspace(explicit: Option<&str>, active: Option<&str>) -> Result<Stri
     }
 }
 
-/// Detect an ANN clause from the ORDER BY and WHERE clause.
+fn canonical_ast_type_name(cql_type: &CqlTypeName) -> String {
+    cql_type
+        .resolve()
+        .map(|resolved| resolved.cql_name())
+        .unwrap_or_else(|| canonical_cql_type_name(&render_ast_type_name(cql_type)))
+}
+
+fn render_ast_type_name(cql_type: &CqlTypeName) -> String {
+    match cql_type {
+        CqlTypeName::Simple(name) => name.clone(),
+        CqlTypeName::List(inner) => format!("list<{}>", render_ast_type_name(inner)),
+        CqlTypeName::Set(inner) => format!("set<{}>", render_ast_type_name(inner)),
+        CqlTypeName::Map(key, value) => {
+            format!(
+                "map<{}, {}>",
+                render_ast_type_name(key),
+                render_ast_type_name(value)
+            )
+        }
+        CqlTypeName::Tuple(types) => {
+            let inner = types
+                .iter()
+                .map(render_ast_type_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("tuple<{}>", inner)
+        }
+        CqlTypeName::Frozen(inner) => format!("frozen<{}>", render_ast_type_name(inner)),
+        CqlTypeName::Vector(inner, dimensions) => {
+            format!("vector<{}, {}>", render_ast_type_name(inner), dimensions)
+        }
+    }
+}
+
+fn render_term_literal(term: &Term) -> String {
+    match term {
+        Term::Literal(Literal::String(value)) => {
+            format!("'{}'", value.replace('\'', "''"))
+        }
+        Term::Literal(Literal::Integer(value)) => value.to_string(),
+        Term::Literal(Literal::Float(value)) => value.to_string(),
+        Term::Literal(Literal::Blob(bytes)) => {
+            let mut value = String::from("0x");
+            for byte in bytes {
+                value.push_str(&format!("{:02x}", byte));
+            }
+            value
+        }
+        Term::Literal(Literal::Uuid(value)) => value.clone(),
+        Term::Literal(Literal::Boolean(value)) => value.to_string(),
+        Term::Literal(Literal::Null) => "null".to_string(),
+        Term::TypeHint(_, inner) => render_term_literal(inner),
+        Term::CollectionLiteral(values) => {
+            let values = values
+                .iter()
+                .map(render_term_literal)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{}]", values)
+        }
+        Term::MapLiteral(values) => {
+            let values = values
+                .iter()
+                .map(|(key, value)| {
+                    format!(
+                        "{}: {}",
+                        render_term_literal(key),
+                        render_term_literal(value)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{}}}", values)
+        }
+        Term::TupleLiteral(values) => {
+            let values = values
+                .iter()
+                .map(render_term_literal)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("({})", values)
+        }
+        Term::FunctionCall(name, args) => {
+            let args = args
+                .iter()
+                .map(render_term_literal)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{}({})", name, args)
+        }
+        Term::BindMarker(BindMarker::Anonymous) => "?".to_string(),
+        Term::BindMarker(BindMarker::Named(name)) => format!(":{}", name),
+    }
+}
+
+fn resolve_column_constraint(constraint: &ColumnConstraint) -> ColumnConstraintMetadata {
+    match constraint {
+        ColumnConstraint::Scalar { column, op, term } => ColumnConstraintMetadata::Scalar {
+            column: column.clone(),
+            op: resolve_constraint_op(*op),
+            term: term.clone(),
+        },
+        ColumnConstraint::Function {
+            name,
+            args,
+            op,
+            term,
+        } => ColumnConstraintMetadata::Function {
+            name: name.clone(),
+            args: args.clone(),
+            op: resolve_constraint_op(*op),
+            term: term.clone(),
+        },
+        ColumnConstraint::UnaryFunction { name, args } => ColumnConstraintMetadata::UnaryFunction {
+            name: name.clone(),
+            args: args.clone(),
+        },
+        ColumnConstraint::NotNull => ColumnConstraintMetadata::NotNull,
+    }
+}
+
+fn resolve_constraint_op(op: ConstraintRelationOp) -> SchemaConstraintRelationOp {
+    match op {
+        ConstraintRelationOp::Eq => SchemaConstraintRelationOp::Eq,
+        ConstraintRelationOp::NotEq => SchemaConstraintRelationOp::NotEq,
+        ConstraintRelationOp::Lt => SchemaConstraintRelationOp::Lt,
+        ConstraintRelationOp::Lte => SchemaConstraintRelationOp::Lte,
+        ConstraintRelationOp::Gt => SchemaConstraintRelationOp::Gt,
+        ConstraintRelationOp::Gte => SchemaConstraintRelationOp::Gte,
+    }
+}
+
+/// Detect an ANN clause from the parsed ORDER BY node.
 ///
 /// In Cassandra 5, the syntax is:
 /// `ORDER BY <col> ANN OF [x, y, z] LIMIT k`
-///
-/// Since the AST doesn't yet encode ANN OF natively, this is a placeholder
-/// that returns None. When the parser adds ANN support, this function will
-/// extract the vector literal and top_k from the AST.
-#[allow(unused_variables)]
 fn detect_ann_clause(
-    order_by: &[(String, ClusteringOrder)],
+    ann_order_by: Option<&SelectAnnOrder>,
     limit: &Option<Term>,
-    where_clause: &[Relation],
-) -> Option<AnnClause> {
-    // GAP(gap_guard_index_differential_testing): Implement when AST supports ANN OF syntax — tracked in gap_guards.rs
-    // For now, ANN is not parseable and this always returns None.
-    None
+) -> Result<Option<AnnClause>, PlanError> {
+    let Some(ann_order_by) = ann_order_by else {
+        return Ok(None);
+    };
+
+    let top_k = match limit {
+        Some(Term::Literal(Literal::Integer(value))) if *value > 0 => *value as usize,
+        Some(_) => {
+            return Err(PlanError::InvalidQuery(
+                "ANN ORDER BY requires a positive integer LIMIT".to_string(),
+            ));
+        }
+        None => {
+            return Err(PlanError::InvalidQuery(
+                "ANN ORDER BY requires LIMIT".to_string(),
+            ));
+        }
+    };
+
+    Ok(Some(AnnClause {
+        column: ann_order_by.column.clone(),
+        vector_literal: ann_order_by.vector_literal.clone(),
+        top_k,
+    }))
 }
 
 /// Planner error.
@@ -1114,10 +1476,42 @@ impl From<ParseError> for PlanError {
 mod tests {
     use super::*;
     use crate::parser;
-    use cassandra_schema::{KeyspaceMetadata, KeyspaceParams, SchemaSnapshot};
+    use cassandra_schema::{
+        ColumnMetadata, KeyspaceMetadata, KeyspaceParams, SchemaSnapshot, TableMetadataBuilder,
+        UserAggregate,
+    };
+    use cassandra_types::CqlType;
 
     fn test_schema() -> SchemaSnapshot {
         let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default());
+        let mut snapshot = SchemaSnapshot::empty();
+        snapshot.keyspaces.insert("test_ks".to_string(), ks);
+        snapshot
+    }
+
+    fn schema_with_events() -> SchemaSnapshot {
+        let table = TableMetadataBuilder::new("test_ks", "events")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular("v", CqlType::Int))
+            .build();
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
+        let mut snapshot = SchemaSnapshot::empty();
+        snapshot.keyspaces.insert("test_ks".to_string(), ks);
+        snapshot
+    }
+
+    fn schema_with_events_and_aggregate() -> SchemaSnapshot {
+        let table = TableMetadataBuilder::new("test_ks", "events")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular("v", CqlType::Int))
+            .build();
+        let aggregate = UserAggregate::new("test_ks", "sum_bucket", "int", "plus")
+            .with_arg_type("int")
+            .with_return_type("int")
+            .with_initcond("0");
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default())
+            .with_table(table)
+            .with_aggregate(aggregate);
         let mut snapshot = SchemaSnapshot::empty();
         snapshot.keyspaces.insert("test_ks".to_string(), ks);
         snapshot
@@ -1136,6 +1530,58 @@ mod tests {
         let schema = test_schema();
         let stmt = parser::parse("USE nonexistent").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
+    fn plan_function_types_are_canonical_cql_names() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "CREATE FUNCTION test_ks.echo(val varchar, tags list<varchar>) RETURNS varchar LANGUAGE java AS 'return val;'",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::CreateFunction(cf) => {
+                assert_eq!(
+                    cf.args,
+                    vec![
+                        ("val".to_string(), "text".to_string()),
+                        ("tags".to_string(), "list<text>".to_string())
+                    ]
+                );
+                assert_eq!(cf.return_type, "text");
+            }
+            _ => panic!("expected CreateFunction"),
+        }
+
+        let stmt = parser::parse(
+            "CREATE AGGREGATE test_ks.collect(varchar) SFUNC state_fn STYPE list<varchar>",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::CreateAggregate(ca) => {
+                assert_eq!(ca.arg_types, vec!["text"]);
+                assert_eq!(ca.stype, "list<text>");
+            }
+            _ => panic!("expected CreateAggregate"),
+        }
+    }
+
+    #[test]
+    fn plan_aggregate_initcond_is_cql_literal() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "CREATE AGGREGATE test_ks.mean(int) SFUNC avg_state STYPE tuple<int, bigint> INITCOND (0, 0)",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        match p {
+            QueryPlan::CreateAggregate(ca) => {
+                assert_eq!(ca.initcond, Some("(0, 0)".to_string()));
+            }
+            _ => panic!("expected CreateAggregate"),
+        }
     }
 
     #[test]
@@ -1174,6 +1620,30 @@ mod tests {
     }
 
     #[test]
+    fn plan_create_table_with_vector_column() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "CREATE TABLE test_ks.items (id int PRIMARY KEY, embedding vector<float, 3>)",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::CreateTable(ct) => {
+                let embedding = ct
+                    .columns
+                    .iter()
+                    .find(|col| col.name == "embedding")
+                    .unwrap();
+                assert_eq!(
+                    embedding.cql_type,
+                    CqlType::Vector(Box::new(CqlType::Float), 3)
+                );
+            }
+            _ => panic!("expected CreateTable"),
+        }
+    }
+
+    #[test]
     fn plan_select_no_keyspace() {
         let schema = test_schema();
         let stmt = parser::parse("SELECT * FROM users").unwrap();
@@ -1207,6 +1677,78 @@ mod tests {
     }
 
     #[test]
+    fn plan_select_with_group_by() {
+        let schema = schema_with_events();
+        let stmt = parser::parse("SELECT id, sum(v) FROM test_ks.events GROUP BY id").unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::Select(s) => assert_eq!(s.group_by, vec!["id"]),
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn plan_select_with_user_aggregate_group_by() {
+        let schema = schema_with_events_and_aggregate();
+        let stmt =
+            parser::parse("SELECT id, sum_bucket(v) FROM test_ks.events GROUP BY id").unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::Select(s) => assert_eq!(s.group_by, vec!["id"]),
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn plan_rejects_writetime_unknown_column() {
+        let schema = schema_with_events();
+        let stmt = parser::parse("SELECT writetime(missing) FROM test_ks.events").unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
+    fn plan_select_with_ann_clause() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "SELECT * FROM test_ks.items ORDER BY embedding ANN OF [0.1, -2, 3] LIMIT 7",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::Select(s) => {
+                let ann = s.ann_clause.unwrap();
+                assert_eq!(ann.column, "embedding");
+                assert_eq!(ann.vector_literal, vec![0.1, -2.0, 3.0]);
+                assert_eq!(ann.top_k, 7);
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn plan_select_with_ann_requires_limit() {
+        let schema = test_schema();
+        let stmt =
+            parser::parse("SELECT * FROM test_ks.items ORDER BY embedding ANN OF [0.1, 0.2]")
+                .unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
+    fn plan_rejects_ungrouped_column_with_aggregate() {
+        let schema = schema_with_events();
+        let stmt = parser::parse("SELECT id, sum(v) FROM test_ks.events").unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
+    fn plan_rejects_ungrouped_column_with_user_aggregate() {
+        let schema = schema_with_events_and_aggregate();
+        let stmt = parser::parse("SELECT id, sum_bucket(v) FROM test_ks.events").unwrap();
+        assert!(plan(&stmt, &schema, None).is_err());
+    }
+
+    #[test]
     fn plan_is_schema_altering() {
         let schema = SchemaSnapshot::empty();
         let stmt = parser::parse("CREATE KEYSPACE k WITH replication = {'class': 'SimpleStrategy', 'replication_factor': '1'}").unwrap();
@@ -1224,8 +1766,7 @@ mod tests {
             .add_column(ColumnMetadata::regular("email", CqlType::Varchar))
             .add_column(ColumnMetadata::regular("name", CqlType::Varchar))
             .build();
-        let ks =
-            KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
         let mut snapshot = SchemaSnapshot::empty();
         snapshot.keyspaces.insert("test_ks".to_string(), ks);
         snapshot
@@ -1234,8 +1775,7 @@ mod tests {
     #[test]
     fn plan_create_index_basic() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX email_idx ON test_ks.users (email)").unwrap();
+        let stmt = parser::parse("CREATE INDEX email_idx ON test_ks.users (email)").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         assert!(p.is_schema_altering());
         match p {
@@ -1254,8 +1794,7 @@ mod tests {
     #[test]
     fn plan_create_index_auto_name() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX ON test_ks.users (email)").unwrap();
+        let stmt = parser::parse("CREATE INDEX ON test_ks.users (email)").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         match p {
             QueryPlan::CreateIndex(ci) => {
@@ -1268,26 +1807,21 @@ mod tests {
     #[test]
     fn plan_create_index_on_partition_key_fails() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX ON test_ks.users (id)").unwrap();
+        let stmt = parser::parse("CREATE INDEX ON test_ks.users (id)").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
     }
 
     #[test]
     fn plan_create_index_nonexistent_column_fails() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("CREATE INDEX ON test_ks.users (nonexistent)").unwrap();
+        let stmt = parser::parse("CREATE INDEX ON test_ks.users (nonexistent)").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
     }
 
     #[test]
     fn plan_create_index_if_not_exists() {
         let schema = schema_with_table();
-        let stmt = parser::parse(
-            "CREATE INDEX IF NOT EXISTS ON test_ks.users (email)",
-        )
-        .unwrap();
+        let stmt = parser::parse("CREATE INDEX IF NOT EXISTS ON test_ks.users (email)").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         match p {
             QueryPlan::CreateIndex(ci) => assert!(ci.if_not_exists),
@@ -1296,10 +1830,48 @@ mod tests {
     }
 
     #[test]
+    fn plan_create_sai_vector_index_adds_dimensions_option() {
+        use cassandra_schema::column::ColumnMetadata;
+        use cassandra_schema::table::TableMetadataBuilder;
+        use cassandra_types::CqlType;
+
+        let table = TableMetadataBuilder::new("test_ks", "items")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular(
+                "embedding",
+                CqlType::Vector(Box::new(CqlType::Float), 3),
+            ))
+            .build();
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default()).with_table(table);
+        let mut schema = SchemaSnapshot::empty();
+        schema.keyspaces.insert("test_ks".to_string(), ks);
+
+        let stmt = parser::parse(
+            "CREATE CUSTOM INDEX embedding_idx ON test_ks.items (embedding) USING 'org.apache.cassandra.index.sai.StorageAttachedIndex' WITH OPTIONS = {'vector_similarity_metric': 'dot_product'}",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, None).unwrap();
+        match p {
+            QueryPlan::CreateIndex(ci) => {
+                assert_eq!(
+                    ci.options.get("vector_dimensions").map(String::as_str),
+                    Some("3")
+                );
+                assert_eq!(
+                    ci.options
+                        .get("vector_similarity_metric")
+                        .map(String::as_str),
+                    Some("dot_product")
+                );
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
     fn plan_drop_index_if_exists() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("DROP INDEX IF EXISTS test_ks.some_idx").unwrap();
+        let stmt = parser::parse("DROP INDEX IF EXISTS test_ks.some_idx").unwrap();
         let p = plan(&stmt, &schema, None).unwrap();
         match p {
             QueryPlan::DropIndex(di) => {
@@ -1314,8 +1886,7 @@ mod tests {
     #[test]
     fn plan_drop_index_nonexistent_fails() {
         let schema = schema_with_table();
-        let stmt =
-            parser::parse("DROP INDEX test_ks.nonexistent_idx").unwrap();
+        let stmt = parser::parse("DROP INDEX test_ks.nonexistent_idx").unwrap();
         assert!(plan(&stmt, &schema, None).is_err());
     }
 
@@ -1392,10 +1963,8 @@ mod tests {
     #[test]
     fn plan_delete_using_timestamp() {
         let schema = test_schema();
-        let stmt = parser::parse(
-            "DELETE FROM test_ks.users USING TIMESTAMP 7000 WHERE id = 1",
-        )
-        .unwrap();
+        let stmt =
+            parser::parse("DELETE FROM test_ks.users USING TIMESTAMP 7000 WHERE id = 1").unwrap();
         let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
         match p {
             QueryPlan::Delete(dp) => {
@@ -1409,10 +1978,8 @@ mod tests {
     #[test]
     fn plan_insert_no_using_clause() {
         let schema = test_schema();
-        let stmt = parser::parse(
-            "INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com')",
-        )
-        .unwrap();
+        let stmt =
+            parser::parse("INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com')").unwrap();
         let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
         match p {
             QueryPlan::Insert(ip) => {

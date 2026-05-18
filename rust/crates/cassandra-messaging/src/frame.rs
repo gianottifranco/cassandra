@@ -17,7 +17,7 @@
 //! Internode message framing and codec.
 //!
 //! Messages are length-prefixed and carry a header with verb, message ID,
-//! and flags. The body is opaque bytes (JSON serialized for now; binary
+//! and flags. The body is opaque bytes (JSON-serialized today; binary
 //! codec planned for hot-path verbs).
 //!
 //! ## Wire format
@@ -433,7 +433,7 @@ mod tests {
         let mut buf = BytesMut::new();
         codec.encode(msg, &mut buf).unwrap();
 
-        // Split the buffer in half to simulate partial read
+        // Split the buffer in half to exercise partial-frame decoding.
         let second_half = buf.split_off(buf.len() / 2);
 
         // First decode should return None (incomplete)

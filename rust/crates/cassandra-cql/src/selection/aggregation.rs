@@ -49,8 +49,7 @@ impl AggregationPipeline {
                     if lower == "count" {
                         AggregateState::CountStar { count: 0 }
                     } else {
-                        // sum, avg, min, max: use passthrough for now
-                        // (full aggregate pipeline would resolve via registry)
+                        // Non-count aggregates are resolved by the registry-backed pipeline.
                         AggregateState::PassThrough(None)
                     }
                 }
@@ -129,10 +128,7 @@ mod tests {
     #[test]
     fn mixed_aggregate_passthrough() {
         let registry = FunctionRegistry::new();
-        let selectors = vec![
-            Selector::Column("name".into()),
-            Selector::Count,
-        ];
+        let selectors = vec![Selector::Column("name".into()), Selector::Count];
         let mut pipeline = AggregationPipeline::new(&selectors, &registry);
 
         pipeline.accumulate(&[Some(b"Alice".to_vec()), Some(1i64.to_be_bytes().to_vec())]);

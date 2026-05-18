@@ -100,12 +100,8 @@ pub fn run(file: &str, output_dir: Option<&str>) {
         None => desc.directory.clone(),
     };
 
-    let mut out_desc = SSTableDescriptor::new(
-        &out_dir,
-        &desc.keyspace,
-        &desc.table,
-        desc.generation + 1,
-    );
+    let mut out_desc =
+        SSTableDescriptor::new(&out_dir, &desc.keyspace, &desc.table, desc.generation + 1);
     out_desc.format = desc.format;
 
     println!("Output SSTable: {}", out_desc.file_prefix());

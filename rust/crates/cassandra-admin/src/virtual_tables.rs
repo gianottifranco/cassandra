@@ -76,6 +76,7 @@ impl VirtualTableRegistry {
         let mut reg = Self::new();
         // ─── Core ──────────────────────────────────────────────────────
         reg.register(Box::new(LocalInfoTable::default()));
+        reg.register(Box::new(PeersTable::default()));
         reg.register(Box::new(SettingsTable::default()));
         reg.register(Box::new(ThreadPoolsTable::default()));
         reg.register(Box::new(SstableTasksTable::default()));
@@ -102,7 +103,12 @@ impl VirtualTableRegistry {
         // ─── Security Caches ───────────────────────────────────────────
         reg.register(Box::new(CredentialsCacheKeysTable::default()));
         reg.register(Box::new(PermissionsCacheKeysTable::default()));
+        reg.register(Box::new(JmxPermissionsCacheKeysTable::default()));
+        reg.register(Box::new(NetworkPermissionsCacheKeysTable::default()));
         reg.register(Box::new(RolesCacheKeysTable::default()));
+        for table in build_virtual_schema_tables(&reg) {
+            reg.register(table);
+        }
         reg
     }
 }
@@ -195,6 +201,100 @@ impl VirtualTable for LocalInfoTable {
         );
         row.insert("release_version".into(), self.release_version.clone());
         vec![row]
+    }
+}
+
+// ─── system_views.peers ────────────────────────────────────────────────────
+
+/// One row in `system_views.peers`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerInfo {
+    pub peer: String,
+    pub host_id: String,
+    pub data_center: String,
+    pub rack: String,
+    pub preferred_ip: String,
+    pub native_address: String,
+    pub native_port: u16,
+    pub release_version: String,
+    pub schema_version: String,
+    pub tokens: Vec<String>,
+}
+
+/// `system_views.peers` — known peer nodes and topology metadata.
+#[derive(Default)]
+pub struct PeersTable {
+    pub peers: Vec<PeerInfo>,
+}
+
+impl VirtualTable for PeersTable {
+    fn name(&self) -> &str {
+        "peers"
+    }
+
+    fn columns(&self) -> Vec<VirtualColumn> {
+        vec![
+            VirtualColumn {
+                name: "peer".into(),
+                cql_type: "inet".into(),
+            },
+            VirtualColumn {
+                name: "host_id".into(),
+                cql_type: "uuid".into(),
+            },
+            VirtualColumn {
+                name: "data_center".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "rack".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "preferred_ip".into(),
+                cql_type: "inet".into(),
+            },
+            VirtualColumn {
+                name: "native_address".into(),
+                cql_type: "inet".into(),
+            },
+            VirtualColumn {
+                name: "native_port".into(),
+                cql_type: "int".into(),
+            },
+            VirtualColumn {
+                name: "release_version".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "schema_version".into(),
+                cql_type: "uuid".into(),
+            },
+            VirtualColumn {
+                name: "tokens".into(),
+                cql_type: "set<text>".into(),
+            },
+        ]
+    }
+
+    fn rows(&self) -> Vec<HashMap<String, String>> {
+        self.peers
+            .iter()
+            .map(|peer| {
+                let mut row = HashMap::new();
+                row.insert("peer".into(), peer.peer.clone());
+                row.insert("host_id".into(), peer.host_id.clone());
+                row.insert("data_center".into(), peer.data_center.clone());
+                row.insert("rack".into(), peer.rack.clone());
+                row.insert("preferred_ip".into(), peer.preferred_ip.clone());
+                row.insert("native_address".into(), peer.native_address.clone());
+                row.insert("native_port".into(), peer.native_port.to_string());
+                row.insert("release_version".into(), peer.release_version.clone());
+                row.insert("schema_version".into(), peer.schema_version.clone());
+                row.insert("tokens".into(), peer.tokens.join(","));
+                row
+            })
+            .collect()
     }
 }
 
@@ -1556,7 +1656,254 @@ macro_rules! cache_keys_table {
 
 cache_keys_table!(CredentialsCacheKeysTable, "credentials_cache_keys");
 cache_keys_table!(PermissionsCacheKeysTable, "permissions_cache_keys");
+cache_keys_table!(JmxPermissionsCacheKeysTable, "jmx_permissions_cache_keys");
+cache_keys_table!(
+    NetworkPermissionsCacheKeysTable,
+    "network_permissions_cache_keys"
+);
 cache_keys_table!(RolesCacheKeysTable, "roles_cache_keys");
+
+// ─── system_virtual_schema ─────────────────────────────────────────────────
+
+#[derive(Debug, Clone)]
+struct VirtualTableSummary {
+    keyspace: String,
+    table: String,
+}
+
+#[derive(Debug, Clone)]
+struct VirtualColumnSummary {
+    keyspace: String,
+    table: String,
+    column: String,
+    cql_type: String,
+}
+
+pub struct VirtualKeyspacesSchemaTable {
+    keyspaces: Vec<String>,
+}
+
+impl VirtualTable for VirtualKeyspacesSchemaTable {
+    fn keyspace(&self) -> &str {
+        "system_virtual_schema"
+    }
+
+    fn name(&self) -> &str {
+        "keyspaces"
+    }
+
+    fn columns(&self) -> Vec<VirtualColumn> {
+        vec![VirtualColumn {
+            name: "keyspace_name".into(),
+            cql_type: "text".into(),
+        }]
+    }
+
+    fn rows(&self) -> Vec<HashMap<String, String>> {
+        self.keyspaces
+            .iter()
+            .map(|keyspace| {
+                let mut row = HashMap::new();
+                row.insert("keyspace_name".into(), keyspace.clone());
+                row
+            })
+            .collect()
+    }
+}
+
+pub struct VirtualTablesSchemaTable {
+    tables: Vec<VirtualTableSummary>,
+}
+
+impl VirtualTable for VirtualTablesSchemaTable {
+    fn keyspace(&self) -> &str {
+        "system_virtual_schema"
+    }
+
+    fn name(&self) -> &str {
+        "tables"
+    }
+
+    fn columns(&self) -> Vec<VirtualColumn> {
+        vec![
+            VirtualColumn {
+                name: "keyspace_name".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "table_name".into(),
+                cql_type: "text".into(),
+            },
+        ]
+    }
+
+    fn rows(&self) -> Vec<HashMap<String, String>> {
+        self.tables
+            .iter()
+            .map(|table| {
+                let mut row = HashMap::new();
+                row.insert("keyspace_name".into(), table.keyspace.clone());
+                row.insert("table_name".into(), table.table.clone());
+                row
+            })
+            .collect()
+    }
+}
+
+pub struct VirtualColumnsSchemaTable {
+    columns: Vec<VirtualColumnSummary>,
+}
+
+impl VirtualTable for VirtualColumnsSchemaTable {
+    fn keyspace(&self) -> &str {
+        "system_virtual_schema"
+    }
+
+    fn name(&self) -> &str {
+        "columns"
+    }
+
+    fn columns(&self) -> Vec<VirtualColumn> {
+        vec![
+            VirtualColumn {
+                name: "keyspace_name".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "table_name".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "column_name".into(),
+                cql_type: "text".into(),
+            },
+            VirtualColumn {
+                name: "type".into(),
+                cql_type: "text".into(),
+            },
+        ]
+    }
+
+    fn rows(&self) -> Vec<HashMap<String, String>> {
+        self.columns
+            .iter()
+            .map(|column| {
+                let mut row = HashMap::new();
+                row.insert("keyspace_name".into(), column.keyspace.clone());
+                row.insert("table_name".into(), column.table.clone());
+                row.insert("column_name".into(), column.column.clone());
+                row.insert("type".into(), column.cql_type.clone());
+                row
+            })
+            .collect()
+    }
+}
+
+fn build_virtual_schema_tables(registry: &VirtualTableRegistry) -> Vec<Box<dyn VirtualTable>> {
+    let mut tables = registry
+        .tables
+        .values()
+        .map(|table| VirtualTableSummary {
+            keyspace: table.keyspace().to_string(),
+            table: table.name().to_string(),
+        })
+        .collect::<Vec<_>>();
+    tables.extend([
+        VirtualTableSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "keyspaces".to_string(),
+        },
+        VirtualTableSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "tables".to_string(),
+        },
+        VirtualTableSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "columns".to_string(),
+        },
+    ]);
+    tables.sort_by(|left, right| {
+        left.keyspace
+            .cmp(&right.keyspace)
+            .then_with(|| left.table.cmp(&right.table))
+    });
+    tables.dedup_by(|left, right| left.keyspace == right.keyspace && left.table == right.table);
+
+    let mut keyspaces = tables
+        .iter()
+        .map(|table| table.keyspace.clone())
+        .collect::<Vec<_>>();
+    keyspaces.sort();
+    keyspaces.dedup();
+
+    let mut columns = Vec::new();
+    for table in registry.tables.values() {
+        for column in table.columns() {
+            columns.push(VirtualColumnSummary {
+                keyspace: table.keyspace().to_string(),
+                table: table.name().to_string(),
+                column: column.name,
+                cql_type: column.cql_type,
+            });
+        }
+    }
+    columns.extend([
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "keyspaces".to_string(),
+            column: "keyspace_name".to_string(),
+            cql_type: "text".to_string(),
+        },
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "tables".to_string(),
+            column: "keyspace_name".to_string(),
+            cql_type: "text".to_string(),
+        },
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "tables".to_string(),
+            column: "table_name".to_string(),
+            cql_type: "text".to_string(),
+        },
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "columns".to_string(),
+            column: "keyspace_name".to_string(),
+            cql_type: "text".to_string(),
+        },
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "columns".to_string(),
+            column: "table_name".to_string(),
+            cql_type: "text".to_string(),
+        },
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "columns".to_string(),
+            column: "column_name".to_string(),
+            cql_type: "text".to_string(),
+        },
+        VirtualColumnSummary {
+            keyspace: "system_virtual_schema".to_string(),
+            table: "columns".to_string(),
+            column: "type".to_string(),
+            cql_type: "text".to_string(),
+        },
+    ]);
+    columns.sort_by(|left, right| {
+        left.keyspace
+            .cmp(&right.keyspace)
+            .then_with(|| left.table.cmp(&right.table))
+            .then_with(|| left.column.cmp(&right.column))
+    });
+
+    vec![
+        Box::new(VirtualKeyspacesSchemaTable { keyspaces }),
+        Box::new(VirtualTablesSchemaTable { tables }),
+        Box::new(VirtualColumnsSchemaTable { columns }),
+    ]
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
@@ -1570,10 +1917,10 @@ mod tests {
     fn registry_with_builtins() {
         let reg = VirtualTableRegistry::with_builtins();
         let tables = reg.list_tables();
-        // Now we have 22 built-in virtual tables
+        // Now we have 25 built-in virtual tables
         assert!(
-            tables.len() >= 22,
-            "expected >=22 virtual tables, got {}",
+            tables.len() >= 25,
+            "expected >=25 virtual tables, got {}",
             tables.len()
         );
     }
@@ -1599,6 +1946,30 @@ mod tests {
             rows.iter()
                 .any(|r| r.get("name").map(|v| v == "cluster_name").unwrap_or(false))
         );
+    }
+
+    #[test]
+    fn peers_table() {
+        let table = PeersTable {
+            peers: vec![PeerInfo {
+                peer: "127.0.0.2".into(),
+                host_id: uuid::Uuid::nil().to_string(),
+                data_center: "dc1".into(),
+                rack: "rack1".into(),
+                preferred_ip: "127.0.0.2".into(),
+                native_address: "127.0.0.2".into(),
+                native_port: 9042,
+                release_version: "5.0".into(),
+                schema_version: uuid::Uuid::nil().to_string(),
+                tokens: vec!["0".into(), "100".into()],
+            }],
+        };
+        assert_eq!(table.name(), "peers");
+        assert_eq!(table.columns().len(), 10);
+        let rows = table.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get("native_port").map(String::as_str), Some("9042"));
+        assert_eq!(rows[0].get("tokens").map(String::as_str), Some("0,100"));
     }
 
     #[test]

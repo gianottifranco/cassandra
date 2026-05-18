@@ -82,10 +82,7 @@ fn handle_removenode_inner(body_bytes: &[u8], state: &AdminState) -> Response<Fu
 }
 
 /// Move the local node to a new token.
-pub async fn handle_move(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_move(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -133,10 +130,7 @@ fn handle_move_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<Byt
 }
 
 /// Rebuild data from another datacenter.
-pub async fn handle_rebuild(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_rebuild(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -189,10 +183,7 @@ fn handle_rebuild_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<
 }
 
 /// Refresh SSTables for a specific table (load new SSTables from disk).
-pub async fn handle_refresh(
-    req: Request<Incoming>,
-    _state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_refresh(req: Request<Incoming>, _state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {
@@ -240,10 +231,9 @@ pub fn handle_join(_state: &AdminState) -> Response<Full<Bytes>> {
 
 /// Bootstrap the local node into the cluster.
 pub fn handle_bootstrap(state: &AdminState) -> Response<Full<Bytes>> {
-    let op_id = state.operations.register(
-        OperationType::Bootstrap,
-        "Bootstrap local node".to_string(),
-    );
+    let op_id = state
+        .operations
+        .register(OperationType::Bootstrap, "Bootstrap local node".to_string());
 
     json_response(
         StatusCode::OK,
@@ -482,8 +472,7 @@ mod tests {
 
     #[test]
     fn refresh_with_valid_body() {
-        let body =
-            serde_json::to_vec(&json!({"keyspace": "ks1", "table": "tbl1"})).unwrap();
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1", "table": "tbl1"})).unwrap();
 
         let resp = handle_refresh_inner(&body);
         assert_eq!(resp.status(), StatusCode::OK);

@@ -285,7 +285,7 @@ fn soak_mixed_workload_with_compaction() {
     );
 }
 
-/// Writes with simulated clock drift, verifies LWW resolution.
+/// Writes with explicit clock drift, verifies LWW resolution.
 #[test]
 #[ignore]
 fn soak_clock_skew_tolerance() {

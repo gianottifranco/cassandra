@@ -71,9 +71,9 @@ impl FilteredPartition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memtable::partition::PartitionData;
     use crate::memtable::partition::{Cell, Row};
     use crate::partitions::iterators::InMemoryRowIterator;
-    use crate::memtable::partition::PartitionData;
 
     #[test]
     fn materialize_partition() {

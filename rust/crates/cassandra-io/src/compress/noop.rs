@@ -50,9 +50,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
         assert_eq!(input, compressed, "Noop should not alter data");
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -62,9 +60,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
         assert!(compressed.is_empty());
-        let decompressed = compressor()
-            .decompress(&compressed, 0)
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, 0).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -74,9 +70,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
         assert_eq!(input.len(), compressed.len());
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 
@@ -88,9 +82,7 @@ mod tests {
         let mut compressed = Vec::new();
         compressor().compress(&input, &mut compressed).unwrap();
         assert_eq!(input, compressed);
-        let decompressed = compressor()
-            .decompress(&compressed, input.len())
-            .unwrap();
+        let decompressed = compressor().decompress(&compressed, input.len()).unwrap();
         assert_eq!(input, decompressed);
     }
 

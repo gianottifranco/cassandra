@@ -5,9 +5,9 @@
 //! ## Java Oracle
 //! `org.apache.cassandra.db.transform.Filter`
 
+use super::transformation::Transformation;
 use crate::filter::row_filter::{FilterExpression, Operator, RowFilter};
 use crate::rows::unfiltered::{ColumnData, RowData};
-use super::transformation::Transformation;
 
 /// Evaluates a `RowFilter` against each row, dropping non-matching rows.
 pub struct FilterTransform {
@@ -40,11 +40,7 @@ impl FilterTransform {
                     Some(cv) => Self::compare_bytes(cv, operator, value),
                 }
             }
-            FilterExpression::MapEquality {
-                column,
-                key,
-                value,
-            } => {
+            FilterExpression::MapEquality { column, key, value } => {
                 // For map equality, look for a cell with path matching key
                 if let Some(ColumnData::Complex(ccd)) = row.columns.get(column.as_str()) {
                     use crate::rows::cell::CellPath;

@@ -50,10 +50,7 @@ pub fn apply_filters(partition: PartitionData, options: &ScanOptions) -> Partiti
 
     // 1. Clustering filter: retain only rows whose clustering key is selected.
     if let Some(ref cf) = options.clustering_filter {
-        rows = rows
-            .into_iter()
-            .filter(|(ck, _)| cf.selects(ck))
-            .collect();
+        rows = rows.into_iter().filter(|(ck, _)| cf.selects(ck)).collect();
     }
 
     // 2. Row filter: evaluate expressions on cell values.
@@ -155,8 +152,7 @@ impl FilteredPartitionReader {
                     PartitionData {
                         rows: limited_rows,
                         tombstone_timestamp: filtered.tombstone_timestamp,
-                        tombstone_local_deletion_time: filtered
-                            .tombstone_local_deletion_time,
+                        tombstone_local_deletion_time: filtered.tombstone_local_deletion_time,
                     },
                 ));
             }
@@ -183,26 +179,48 @@ fn evaluate_expression(row: &Row, expr: &FilterExpression) -> bool {
             value,
         } => {
             let cell = row.cells.iter().find(|c| c.column == *column);
-            match operator {
-                Operator::Eq => match cell {
-                    Some(c) => c.value.as_deref() == Some(value.as_slice()),
-                    None => false,
-                },
-                // Other operators: pass through (not yet implemented).
-                _ => true,
-            }
+            let cell_value = cell.and_then(|cell| cell.value.as_deref());
+            compare_cell_value(cell_value, operator, value)
         }
-        // MapEquality, Custom: pass through (not yet implemented).
-        _ => true,
+        FilterExpression::MapEquality { column, key, value } => {
+            let cell_name = format!("{column}[{}]", String::from_utf8_lossy(key));
+            row.cells
+                .iter()
+                .find(|cell| cell.column == cell_name)
+                .and_then(|cell| cell.value.as_deref())
+                == Some(value.as_slice())
+        }
+        FilterExpression::Custom { column, .. } => {
+            row.cells.iter().any(|cell| cell.column == *column)
+        }
+    }
+}
+
+fn compare_cell_value(cell_value: Option<&[u8]>, operator: &Operator, filter_value: &[u8]) -> bool {
+    match cell_value {
+        None => matches!(operator, Operator::Neq),
+        Some(value) => match operator {
+            Operator::Eq => value == filter_value,
+            Operator::Neq => value != filter_value,
+            Operator::Lt => value < filter_value,
+            Operator::Lte => value <= filter_value,
+            Operator::Gt => value > filter_value,
+            Operator::Gte => value >= filter_value,
+            Operator::Contains | Operator::ContainsKey => {
+                !filter_value.is_empty()
+                    && value
+                        .windows(filter_value.len())
+                        .any(|window| window == filter_value)
+            }
+            Operator::Ann => true,
+        },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::clustering_filter::{
-        ClusteringBound, ClusteringIndexFilter, Slice, Slices,
-    };
+    use crate::filter::clustering_filter::{ClusteringBound, ClusteringIndexFilter, Slice, Slices};
     use crate::memtable::partition::Cell;
     use std::collections::BTreeSet;
 
@@ -235,9 +253,10 @@ mod tests {
 
     #[test]
     fn column_filter_removes_unneeded_columns() {
-        let pd = make_partition(vec![
-            make_row(b"ck1", &[("name", b"alice"), ("age", b"30"), ("score", b"99")]),
-        ]);
+        let pd = make_partition(vec![make_row(
+            b"ck1",
+            &[("name", b"alice"), ("age", b"30"), ("score", b"99")],
+        )]);
 
         let mut fetched = BTreeSet::new();
         fetched.insert("name".to_string());
@@ -331,19 +350,112 @@ mod tests {
             column_filter: None,
             clustering_filter: None,
             data_limits: None,
-            row_filter: Some(
-                RowFilter::none().with(FilterExpression::Simple {
-                    column: "name".to_string(),
-                    operator: Operator::Eq,
-                    value: b"alice".to_vec(),
-                }),
-            ),
+            row_filter: Some(RowFilter::none().with(FilterExpression::Simple {
+                column: "name".to_string(),
+                operator: Operator::Eq,
+                value: b"alice".to_vec(),
+            })),
         };
 
         let filtered = apply_filters(pd, &options);
         assert_eq!(filtered.rows.len(), 2);
         assert!(filtered.rows.contains_key(&b"ck1".to_vec()));
         assert!(filtered.rows.contains_key(&b"ck3".to_vec()));
+    }
+
+    #[test]
+    fn row_filter_evaluates_range_and_neq_operators() {
+        let pd = make_partition(vec![
+            make_row(b"ck1", &[("score", &[10])]),
+            make_row(b"ck2", &[("score", &[20])]),
+            make_row(b"ck3", &[("score", &[30])]),
+            make_row(b"ck4", &[("other", &[40])]),
+        ]);
+
+        let options = ScanOptions {
+            column_filter: None,
+            clustering_filter: None,
+            data_limits: None,
+            row_filter: Some(
+                RowFilter::none()
+                    .with(FilterExpression::Simple {
+                        column: "score".to_string(),
+                        operator: Operator::Gte,
+                        value: vec![20],
+                    })
+                    .with(FilterExpression::Simple {
+                        column: "score".to_string(),
+                        operator: Operator::Lt,
+                        value: vec![30],
+                    }),
+            ),
+        };
+
+        let filtered = apply_filters(pd.clone(), &options);
+        assert_eq!(filtered.rows.len(), 1);
+        assert!(filtered.rows.contains_key(&b"ck2".to_vec()));
+
+        let options = ScanOptions {
+            column_filter: None,
+            clustering_filter: None,
+            data_limits: None,
+            row_filter: Some(RowFilter::none().with(FilterExpression::Simple {
+                column: "score".to_string(),
+                operator: Operator::Neq,
+                value: vec![20],
+            })),
+        };
+
+        let filtered = apply_filters(pd, &options);
+        assert_eq!(filtered.rows.len(), 3);
+        assert!(filtered.rows.contains_key(&b"ck1".to_vec()));
+        assert!(filtered.rows.contains_key(&b"ck3".to_vec()));
+        assert!(filtered.rows.contains_key(&b"ck4".to_vec()));
+    }
+
+    #[test]
+    fn row_filter_evaluates_contains_map_and_custom_expressions() {
+        let pd = make_partition(vec![
+            make_row(
+                b"ck1",
+                &[
+                    ("tags", b"red,green,blue"),
+                    ("attrs[region]", b"eu"),
+                    ("embedding", b"vec"),
+                ],
+            ),
+            make_row(b"ck2", &[("tags", b"yellow"), ("attrs[region]", b"us")]),
+            make_row(b"ck3", &[("tags", b"green")]),
+        ]);
+
+        let options = ScanOptions {
+            column_filter: None,
+            clustering_filter: None,
+            data_limits: None,
+            row_filter: Some(
+                RowFilter::none()
+                    .with(FilterExpression::Simple {
+                        column: "tags".to_string(),
+                        operator: Operator::Contains,
+                        value: b"green".to_vec(),
+                    })
+                    .with(FilterExpression::MapEquality {
+                        column: "attrs".to_string(),
+                        key: b"region".to_vec(),
+                        value: b"eu".to_vec(),
+                    })
+                    .with(FilterExpression::Custom {
+                        column: "embedding".to_string(),
+                        operator: Operator::Ann,
+                        value: b"query".to_vec(),
+                        index_name: "embedding_idx".to_string(),
+                    }),
+            ),
+        };
+
+        let filtered = apply_filters(pd, &options);
+        assert_eq!(filtered.rows.len(), 1);
+        assert!(filtered.rows.contains_key(&b"ck1".to_vec()));
     }
 
     #[test]
@@ -379,13 +491,11 @@ mod tests {
                 rows_limit: 2,
                 per_partition_limit: u32::MAX,
             }),
-            row_filter: Some(
-                RowFilter::none().with(FilterExpression::Simple {
-                    column: "name".to_string(),
-                    operator: Operator::Eq,
-                    value: b"alice".to_vec(),
-                }),
-            ),
+            row_filter: Some(RowFilter::none().with(FilterExpression::Simple {
+                column: "name".to_string(),
+                operator: Operator::Eq,
+                value: b"alice".to_vec(),
+            })),
         };
 
         let filtered = apply_filters(pd, &options);

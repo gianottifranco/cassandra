@@ -83,6 +83,7 @@ pub fn compute_schema_version(snapshot: &SchemaSnapshot) -> Uuid {
             hasher.update(b"aggregate:");
             hasher.update(sig.as_bytes());
             hasher.update(agg.state_type.as_bytes());
+            hasher.update(agg.return_type.as_bytes());
         }
     }
 

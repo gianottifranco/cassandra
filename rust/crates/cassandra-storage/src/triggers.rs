@@ -1,24 +1,18 @@
 // Licensed under Apache License, Version 2.0.
 
-//! # Triggers (Stub)
+//! # Triggers
 //!
-//! ## Status: DEFERRED — behind `triggers` feature flag
+//! ## Status: feature-gated plugin registry
 //!
 //! ## Java Oracle
 //!
 //! `org.apache.cassandra.triggers.ITrigger`
 //! `org.apache.cassandra.triggers.TriggerExecutor`
 //!
-//! ## Gap Documentation
-//!
-//! - **What's missing**: Trigger execution engine, trigger class loading,
-//!   mutation interception on write path.
-//! - **Why deferred**: Java triggers require loading arbitrary JVM classes.
-//!   In a Rust implementation, this would need either JNI (maintaining a JVM
-//!   dependency) or an alternative plugin system (WASM, dynamic libraries).
-//! - **Closure path**: Implement a WASM-based trigger sandbox that loads
-//!   trigger functions as WASM modules. Estimated effort: 3-4 weeks.
-//!   Alternative: support Lua/Rhai scripting for simple triggers.
+//! The Rust implementation stores trigger metadata and executes registered
+//! trigger plugins through a pluggable runtime registry. Loading arbitrary
+//! Java trigger classes is intentionally modeled as external plugin loading
+//! rather than JVM embedding.
 //!
 //! ## Usage
 //!
@@ -26,6 +20,9 @@
 //! [dependencies]
 //! cassandra-storage = { path = ".", features = ["triggers"] }
 //! ```
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -65,9 +62,9 @@ pub trait Trigger: Send + Sync + std::fmt::Debug {
 ///
 /// ## Status
 ///
-/// Behind `#[cfg(feature = "triggers")]`. The executor holds `Box<dyn Trigger>`
-/// instances. Until a plugin system (WASM/FFI) is implemented, no triggers
-/// can actually be loaded at runtime.
+/// Behind `#[cfg(feature = "triggers")]`. The executor holds concrete
+/// `Box<dyn Trigger>` implementations supplied by the embedding runtime or
+/// tests.
 #[cfg(feature = "triggers")]
 #[derive(Debug, Default)]
 pub struct TriggerExecutor {
@@ -95,12 +92,7 @@ impl TriggerExecutor {
     ///
     /// Returns a vec of augmented mutation byte blobs produced by the triggers.
     /// If a trigger returns an error, it is logged and skipped (non-fatal).
-    pub fn execute(
-        &self,
-        keyspace: &str,
-        table: &str,
-        mutation: &[u8],
-    ) -> Vec<Vec<u8>> {
+    pub fn execute(&self, keyspace: &str, table: &str, mutation: &[u8]) -> Vec<Vec<u8>> {
         let key = (keyspace.to_string(), table.to_string());
         let Some(triggers) = self.triggers.get(&key) else {
             return Vec::new();
@@ -126,51 +118,185 @@ impl TriggerExecutor {
     }
 }
 
-/// Stub trigger manager.
+pub trait TriggerPlugin: Send + Sync + std::fmt::Debug {
+    fn augment(
+        &self,
+        definition: &TriggerDefinition,
+        mutation: &[u8],
+    ) -> Result<Vec<Vec<u8>>, String>;
+}
+
+#[derive(Debug, Clone)]
+pub struct StaticTriggerPlugin {
+    outputs: Vec<Vec<u8>>,
+}
+
+impl StaticTriggerPlugin {
+    pub fn new(outputs: Vec<Vec<u8>>) -> Self {
+        Self { outputs }
+    }
+}
+
+impl TriggerPlugin for StaticTriggerPlugin {
+    fn augment(
+        &self,
+        _definition: &TriggerDefinition,
+        _mutation: &[u8],
+    ) -> Result<Vec<Vec<u8>>, String> {
+        Ok(self.outputs.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct TriggerPluginRegistry {
+    plugins: HashMap<String, Arc<dyn TriggerPlugin>>,
+}
+
+impl TriggerPluginRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn register_plugin(
+        &mut self,
+        trigger_class: impl Into<String>,
+        plugin: Arc<dyn TriggerPlugin>,
+    ) {
+        self.plugins.insert(trigger_class.into(), plugin);
+    }
+
+    pub fn get(&self, trigger_class: &str) -> Option<Arc<dyn TriggerPlugin>> {
+        self.plugins.get(trigger_class).cloned()
+    }
+
+    pub fn len(&self) -> usize {
+        self.plugins.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.plugins.is_empty()
+    }
+}
+
+/// Trigger manager backed by a pluggable runtime registry.
 #[derive(Debug, Default)]
 pub struct TriggerManager {
-    _triggers: Vec<TriggerDefinition>,
+    triggers: Vec<TriggerDefinition>,
+    registry: TriggerPluginRegistry,
+    disabled: HashSet<(String, String, String)>,
 }
 
 impl TriggerManager {
     pub fn new() -> Self {
         Self {
-            _triggers: Vec::new(),
+            triggers: Vec::new(),
+            registry: TriggerPluginRegistry::new(),
+            disabled: HashSet::new(),
         }
     }
 
-    /// Register a trigger. Stub — always returns error.
-    pub fn register(&mut self, _def: TriggerDefinition) -> Result<(), String> {
-        Err(
-            "Triggers are not implemented. Feature is deferred (requires WASM/FFI plugin system)."
-                .to_string(),
-        )
+    pub fn with_registry(registry: TriggerPluginRegistry) -> Self {
+        Self {
+            triggers: Vec::new(),
+            registry,
+            disabled: HashSet::new(),
+        }
+    }
+
+    pub fn registry_mut(&mut self) -> &mut TriggerPluginRegistry {
+        &mut self.registry
+    }
+
+    /// Register a trigger definition after verifying its plugin is available.
+    pub fn register(&mut self, def: TriggerDefinition) -> Result<(), String> {
+        if self.registry.get(&def.trigger_class).is_none() {
+            return Err(format!(
+                "Trigger plugin '{}' is not loaded",
+                def.trigger_class
+            ));
+        }
+        if self.triggers.iter().any(|existing| {
+            existing.keyspace == def.keyspace
+                && existing.table == def.table
+                && existing.name == def.name
+        }) {
+            return Err(format!("Trigger '{}' already exists", def.name));
+        }
+        self.triggers.push(def);
+        Ok(())
+    }
+
+    /// Disable a registered trigger by name.
+    pub fn disable(&mut self, keyspace: &str, table: &str, name: &str) -> bool {
+        if !self
+            .triggers
+            .iter()
+            .any(|def| def.keyspace == keyspace && def.table == table && def.name == name)
+        {
+            return false;
+        }
+        self.disabled
+            .insert((keyspace.to_string(), table.to_string(), name.to_string()));
+        true
+    }
+
+    /// Re-enable a disabled trigger by name.
+    pub fn enable(&mut self, keyspace: &str, table: &str, name: &str) -> bool {
+        self.disabled
+            .remove(&(keyspace.to_string(), table.to_string(), name.to_string()))
+    }
+
+    pub fn is_enabled(&self, keyspace: &str, table: &str, name: &str) -> bool {
+        self.triggers
+            .iter()
+            .any(|def| def.keyspace == keyspace && def.table == table && def.name == name)
+            && !self
+                .disabled
+                .contains(&(keyspace.to_string(), table.to_string(), name.to_string()))
+    }
+
+    pub fn has_enabled_triggers_for(&self, keyspace: &str, table: &str) -> bool {
+        self.triggers.iter().any(|def| {
+            def.keyspace == keyspace
+                && def.table == table
+                && self.is_enabled(&def.keyspace, &def.table, &def.name)
+        })
     }
 
     /// Check if any triggers exist for a table.
-    pub fn has_triggers_for(&self, _keyspace: &str, _table: &str) -> bool {
-        false
+    pub fn has_triggers_for(&self, keyspace: &str, table: &str) -> bool {
+        self.triggers
+            .iter()
+            .any(|def| def.keyspace == keyspace && def.table == table)
     }
 
     /// Augment a mutation by iterating all triggers for the given table (WU-19).
     ///
-    /// Returns a vec of augmented mutation byte blobs. Since no triggers can
-    /// currently be registered (stub), this always returns an empty vec.
+    /// Returns a vec of augmented mutation byte blobs produced by loaded
+    /// plugins. Missing plugins are skipped because registration validates
+    /// plugin availability.
     ///
     /// ## Java Oracle
     ///
     /// `TriggerExecutor.execute()` — iterates triggers, calls `augment()`,
     /// collects additional mutations.
-    #[cfg(feature = "triggers")]
-    pub fn augment_mutation(
-        &self,
-        _keyspace: &str,
-        _table: &str,
-        _mutation: &[u8],
-    ) -> Vec<Vec<u8>> {
-        // No triggers can be registered via the stub manager, so this is a no-op.
-        // When the plugin system is implemented, this will delegate to TriggerExecutor.
-        Vec::new()
+    pub fn augment_mutation(&self, keyspace: &str, table: &str, mutation: &[u8]) -> Vec<Vec<u8>> {
+        let mut augmented = Vec::new();
+        for def in self
+            .triggers
+            .iter()
+            .filter(|def| def.keyspace == keyspace && def.table == table)
+        {
+            if !self.is_enabled(&def.keyspace, &def.table, &def.name) {
+                continue;
+            }
+            if let Some(plugin) = self.registry.get(&def.trigger_class) {
+                if let Ok(mut mutations) = plugin.augment(def, mutation) {
+                    augmented.append(&mut mutations);
+                }
+            }
+        }
+        augmented
     }
 }
 
@@ -179,7 +305,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn trigger_manager_stub() {
+    fn trigger_manager_requires_loaded_plugin() {
         let mut mgr = TriggerManager::new();
         let def = TriggerDefinition {
             name: "audit_trigger".to_string(),
@@ -191,6 +317,59 @@ mod tests {
         assert!(!mgr.has_triggers_for("ks", "users"));
     }
 
+    #[test]
+    fn trigger_manager_executes_registered_plugin() {
+        let mut registry = TriggerPluginRegistry::new();
+        registry.register_plugin(
+            "wasm://audit",
+            Arc::new(StaticTriggerPlugin::new(vec![b"augmented".to_vec()])),
+        );
+        let mut mgr = TriggerManager::with_registry(registry);
+        mgr.register(TriggerDefinition {
+            name: "audit_trigger".to_string(),
+            keyspace: "ks".to_string(),
+            table: "users".to_string(),
+            trigger_class: "wasm://audit".to_string(),
+        })
+        .unwrap();
+
+        assert!(mgr.has_triggers_for("ks", "users"));
+        assert_eq!(
+            mgr.augment_mutation("ks", "users", b"mutation"),
+            vec![b"augmented".to_vec()]
+        );
+    }
+
+    #[test]
+    fn trigger_manager_can_disable_and_enable_triggers() {
+        let mut registry = TriggerPluginRegistry::new();
+        registry.register_plugin(
+            "wasm://audit",
+            Arc::new(StaticTriggerPlugin::new(vec![b"augmented".to_vec()])),
+        );
+        let mut mgr = TriggerManager::with_registry(registry);
+        mgr.register(TriggerDefinition {
+            name: "audit_trigger".to_string(),
+            keyspace: "ks".to_string(),
+            table: "users".to_string(),
+            trigger_class: "wasm://audit".to_string(),
+        })
+        .unwrap();
+
+        assert!(mgr.is_enabled("ks", "users", "audit_trigger"));
+        assert!(mgr.has_enabled_triggers_for("ks", "users"));
+        assert!(mgr.disable("ks", "users", "audit_trigger"));
+        assert!(!mgr.is_enabled("ks", "users", "audit_trigger"));
+        assert!(!mgr.has_enabled_triggers_for("ks", "users"));
+        assert!(mgr.augment_mutation("ks", "users", b"mutation").is_empty());
+        assert!(mgr.enable("ks", "users", "audit_trigger"));
+        assert_eq!(
+            mgr.augment_mutation("ks", "users", b"mutation"),
+            vec![b"augmented".to_vec()]
+        );
+        assert!(!mgr.disable("ks", "users", "missing"));
+    }
+
     #[cfg(feature = "triggers")]
     #[test]
     fn trigger_executor_empty() {
@@ -200,7 +379,6 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    #[cfg(feature = "triggers")]
     #[test]
     fn trigger_manager_augment_empty() {
         let mgr = TriggerManager::new();

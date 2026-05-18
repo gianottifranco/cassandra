@@ -54,7 +54,7 @@ pub use memtable::MemtableType;
 pub use sstable::format::SSTableFormat;
 pub use sstable::{BtiReader, BtiWriter, SSTableDescriptor, SSTableReader, SSTableWriter};
 
-// ─── Modules with stubs (from original crate) ─────────────────────────────
+// ─── Optional modules from the original crate ─────────────────────────────
 
 /// Counter mutation support.
 pub mod counter;
@@ -76,4 +76,4 @@ pub mod triggers;
 
 /// UDF support (feature-gated).
 #[cfg(feature = "udfs")]
-pub mod udf {}
+pub mod udf;

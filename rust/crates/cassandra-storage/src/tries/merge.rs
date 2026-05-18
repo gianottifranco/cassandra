@@ -84,8 +84,7 @@ mod tests {
 
     #[test]
     fn merge_empty() {
-        let merged: InMemoryTrie<i32> =
-            MergeTrie::new(vec![]).materialize(|a, _b| *a);
+        let merged: InMemoryTrie<i32> = MergeTrie::new(vec![]).materialize(|a, _b| *a);
         assert!(merged.is_empty());
     }
 

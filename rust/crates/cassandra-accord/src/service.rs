@@ -97,7 +97,7 @@ impl AccordService {
     ///
     /// ## Protocol Phases
     /// 1. PreAccept -- register with initial timestamp
-    /// 2. Accept -- resolve conflicts (simplified: use initial timestamp)
+    /// 2. Accept -- resolve conflicts and agree on execution timestamp
     /// 3. Commit -- durably decide
     /// 4. Apply -- execute mutation via executor
     pub async fn execute_transaction(
@@ -115,9 +115,10 @@ impl AccordService {
         debug!(%txn_id, "Starting Accord transaction");
 
         // Build the transaction
+        let keys = keys_from_mutations(&mutations);
         let mutation = mutations.into_iter().flatten().collect::<Vec<u8>>();
         let txn = Txn {
-            keys: Keys::single(vec![]),
+            keys,
             mutation,
             keyspace: keyspace.to_string(),
         };
@@ -125,46 +126,33 @@ impl AccordService {
         // Phase 1: PreAccept
         self.command_store
             .pre_accept(txn_id, txn, execute_at)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         self.journal
             .write(txn_id, CommandStatus::PreAccepted, execute_at, vec![])
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
-        // Phase 2: Accept (simplified -- no conflict resolution in stub)
-        self.command_store
-            .accept(txn_id, execute_at)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+        // Phase 2: Accept
+        let execute_at = self
+            .command_store
+            .accept_resolving_conflicts(txn_id, execute_at)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         self.journal
             .write(txn_id, CommandStatus::Accepted, execute_at, vec![])
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
         // Phase 3: Commit
         self.command_store
             .commit(txn_id, execute_at)
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         self.journal
             .write(txn_id, CommandStatus::Committed, execute_at, vec![])
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
         // Phase 4: Apply
         self.executor
             .execute(txn_id)
             .await
-            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-                e.to_string().into()
-            })?;
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
 
         info!(%txn_id, "Accord transaction completed");
         Ok(())
@@ -183,18 +171,34 @@ impl AccordService {
         let txn_id = TxnId::new(self.node_id);
         let execute_at = Timestamp::now();
 
+        let keys = keys_from_mutations(&mutations);
         let mutation = mutations.into_iter().flatten().collect::<Vec<u8>>();
         let txn = Txn {
-            keys: Keys::single(vec![]),
+            keys,
             mutation,
             keyspace: keyspace.to_string(),
         };
 
         // 4-phase protocol
         self.command_store.pre_accept(txn_id, txn, execute_at)?;
-        self.command_store.accept(txn_id, execute_at)?;
+        let execute_at = self
+            .command_store
+            .accept_resolving_conflicts(txn_id, execute_at)?;
         self.command_store.commit(txn_id, execute_at)?;
         self.executor.execute(txn_id).await
+    }
+}
+
+fn keys_from_mutations(mutations: &[Vec<u8>]) -> Keys {
+    let keys = mutations
+        .iter()
+        .filter(|mutation| !mutation.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        Keys::single(Vec::new())
+    } else {
+        Keys::multiple(keys)
     }
 }
 
@@ -221,9 +225,7 @@ mod tests {
     #[tokio::test]
     async fn execute_transaction_when_disabled() {
         let svc = AccordService::new(AccordConfig::default(), Uuid::new_v4());
-        let result = svc
-            .execute_transaction("ks", vec![b"data".to_vec()])
-            .await;
+        let result = svc.execute_transaction("ks", vec![b"data".to_vec()]).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Accord is disabled");
     }

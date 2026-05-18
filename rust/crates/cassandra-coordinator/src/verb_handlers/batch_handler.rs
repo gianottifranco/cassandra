@@ -18,7 +18,7 @@ use cassandra_messaging::verb::Verb;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
-use crate::batch::{BatchEntry, BatchType};
+use crate::batch::{BatchEntry, BatchLogManager, BatchType};
 use crate::write::CoordinatedMutation;
 
 // ─── Payload Types ──────────────────────────────────────────────
@@ -63,8 +63,16 @@ pub struct BatchRemoveResponse {
 pub struct BatchStoreVerbHandler;
 
 impl BatchStoreVerbHandler {
-    /// Handle an incoming batch store request.
+    /// Handle an incoming batch store request when no local batchlog manager is configured.
     pub fn handle(msg: Message) -> Option<Message> {
+        Some(Message::failure(
+            msg.header.message_id,
+            b"Local batchlog manager not configured for BatchStore".to_vec(),
+        ))
+    }
+
+    /// Handle an incoming batch store request using the local batchlog manager.
+    pub fn handle_with_batchlog(msg: Message, batchlog: &BatchLogManager) -> Option<Message> {
         let request: BatchStoreRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(e) => {
@@ -83,8 +91,13 @@ impl BatchStoreVerbHandler {
             "Storing batch log entry locally"
         );
 
-        // In a full implementation, this would persist the batch entry
-        // to the local BatchLogManager.
+        batchlog.store_entry(BatchEntry {
+            id: request.id,
+            batch_type: request.batch_type,
+            mutations: request.mutations,
+            created_at: request.created_at,
+            version: 1,
+        });
         let response = BatchStoreResponse { success: true };
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
@@ -102,8 +115,16 @@ impl BatchStoreVerbHandler {
 pub struct BatchRemoveVerbHandler;
 
 impl BatchRemoveVerbHandler {
-    /// Handle an incoming batch remove request.
+    /// Handle an incoming batch remove request when no local batchlog manager is configured.
     pub fn handle(msg: Message) -> Option<Message> {
+        Some(Message::failure(
+            msg.header.message_id,
+            b"Local batchlog manager not configured for BatchRemove".to_vec(),
+        ))
+    }
+
+    /// Handle an incoming batch remove request using the local batchlog manager.
+    pub fn handle_with_batchlog(msg: Message, batchlog: &BatchLogManager) -> Option<Message> {
         let request: BatchRemoveRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(e) => {
@@ -120,9 +141,9 @@ impl BatchRemoveVerbHandler {
             "Removing batch log entry locally"
         );
 
-        // In a full implementation, this would remove the entry from
-        // the local BatchLogManager.
-        let response = BatchRemoveResponse { removed: true };
+        let response = BatchRemoveResponse {
+            removed: batchlog.remove(&request.id).is_some(),
+        };
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
         // BatchRemove has no dedicated response verb; use the request ID
@@ -173,7 +194,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_batch_store_valid() {
+    fn handle_batch_store_without_batchlog_fails() {
         let req = make_batch_store_request();
         let payload = serde_json::to_vec(&req).unwrap();
         let msg = Message::request(Verb::BatchStore, 50, payload);
@@ -181,11 +202,29 @@ mod tests {
         let response = BatchStoreVerbHandler::handle(msg);
         assert!(response.is_some());
         let resp = response.unwrap();
+        assert!(resp.is_failure());
+    }
+
+    #[test]
+    fn handle_batch_store_persists_to_batchlog() {
+        let batchlog = BatchLogManager::new();
+        let req = make_batch_store_request();
+        let id = req.id;
+        let payload = serde_json::to_vec(&req).unwrap();
+        let msg = Message::request(Verb::BatchStore, 50, payload);
+
+        let response = BatchStoreVerbHandler::handle_with_batchlog(msg, &batchlog);
+        assert!(response.is_some());
+        let resp = response.unwrap();
         assert_eq!(resp.header.verb, Verb::BatchStoreResponse);
         assert!(resp.is_response());
 
         let body: BatchStoreResponse = serde_json::from_slice(&resp.payload).unwrap();
         assert!(body.success);
+        let stored = batchlog.get(&id).unwrap();
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.batch_type, BatchType::Logged);
+        assert_eq!(stored.mutations.len(), 1);
     }
 
     #[test]
@@ -197,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_batch_remove_valid() {
+    fn handle_batch_remove_without_batchlog_fails() {
         let req = BatchRemoveRequest { id: Uuid::new_v4() };
         let payload = serde_json::to_vec(&req).unwrap();
         let msg = Message::request(Verb::BatchRemove, 60, payload);
@@ -205,10 +244,47 @@ mod tests {
         let response = BatchRemoveVerbHandler::handle(msg);
         assert!(response.is_some());
         let resp = response.unwrap();
+        assert!(resp.is_failure());
+    }
+
+    #[test]
+    fn handle_batch_remove_deletes_from_batchlog() {
+        let batchlog = BatchLogManager::new();
+        let id = batchlog.store(
+            BatchType::Logged,
+            vec![CoordinatedMutation::simple(
+                "ks".to_string(),
+                "tbl".to_string(),
+                vec![1],
+                vec![],
+                1000,
+            )],
+        );
+        let req = BatchRemoveRequest { id };
+        let payload = serde_json::to_vec(&req).unwrap();
+        let msg = Message::request(Verb::BatchRemove, 60, payload);
+
+        let response = BatchRemoveVerbHandler::handle_with_batchlog(msg, &batchlog);
+        assert!(response.is_some());
+        let resp = response.unwrap();
         assert!(resp.is_response());
 
         let body: BatchRemoveResponse = serde_json::from_slice(&resp.payload).unwrap();
         assert!(body.removed);
+        assert!(batchlog.get(&id).is_none());
+    }
+
+    #[test]
+    fn handle_batch_remove_reports_missing_entry() {
+        let batchlog = BatchLogManager::new();
+        let req = BatchRemoveRequest { id: Uuid::new_v4() };
+        let payload = serde_json::to_vec(&req).unwrap();
+        let msg = Message::request(Verb::BatchRemove, 60, payload);
+
+        let response = BatchRemoveVerbHandler::handle_with_batchlog(msg, &batchlog);
+        let resp = response.unwrap();
+        let body: BatchRemoveResponse = serde_json::from_slice(&resp.payload).unwrap();
+        assert!(!body.removed);
     }
 
     #[test]

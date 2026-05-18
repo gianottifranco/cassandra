@@ -366,9 +366,27 @@ fn fmix64(mut k: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Golden test values: these are the output of our Murmur3 implementation.
-    /// GAP(gap_guard_gossip_wire_compat): Validate against Java MurmurHash.hash3_x64_128 — tracked in gap_guards.rs
-    /// using the diff-testing harness to confirm bit-for-bit compatibility.
+    const CASSANDRA_GOLDEN_TOKENS: &[(&[u8], i64)] = &[
+        (&[], 0),
+        (&[0], 5_048_724_184_180_415_669),
+        (&[0, 1, 2, 3], -2_178_171_369_485_783_280),
+        (
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            4_920_504_430_128_807_728,
+        ),
+        (
+            &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            6_662_781_046_685_680_142,
+        ),
+    ];
+
+    #[test]
+    fn cassandra_golden_tokens() {
+        for (input, expected) in CASSANDRA_GOLDEN_TOKENS {
+            assert_eq!(murmur3_token(input), *expected, "input={input:?}");
+        }
+    }
+
     #[test]
     fn golden_empty() {
         let (h1, _h2) = murmur3_128(&[], 0);

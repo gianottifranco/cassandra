@@ -218,6 +218,7 @@ pub enum Keyword {
     Let,
     Returning,
     Commit,
+    Check,
 }
 
 impl Keyword {
@@ -332,6 +333,7 @@ impl Keyword {
             "LET" => Some(Keyword::Let),
             "RETURNING" => Some(Keyword::Returning),
             "COMMIT" => Some(Keyword::Commit),
+            "CHECK" => Some(Keyword::Check),
             _ => None,
         }
     }

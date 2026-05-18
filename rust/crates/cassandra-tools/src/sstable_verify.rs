@@ -17,9 +17,10 @@ use byteorder::{BigEndian, ReadBytesExt};
 use cassandra_storage::sstable::{
     bloom::BloomFilter,
     format::{
-        Component, SSTableDescriptor, SSTableFormat, DATA_MAGIC, DATA_VERSION, FILTER_MAGIC,
-        INDEX_MAGIC,
+        Component, DATA_MAGIC, DATA_VERSION, FILTER_MAGIC, INDEX_MAGIC, SSTableDescriptor,
+        SSTableFormat,
     },
+    metadata::MetadataSerializer,
 };
 
 /// Severity levels for verification findings.
@@ -503,40 +504,35 @@ fn verify_statistics(desc: &SSTableDescriptor, findings: &mut Vec<Finding>) {
         return;
     }
 
-    match std::fs::read_to_string(&stats_path) {
-        Ok(contents) => match serde_json::from_str::<serde_json::Value>(&contents) {
-            Ok(val) => {
+    match std::fs::read(&stats_path) {
+        Ok(contents) => match MetadataSerializer::deserialize_auto(&contents) {
+            Ok(metadata) => {
                 findings.push(Finding {
                     severity: Severity::Info,
                     component: "Statistics.db".to_string(),
-                    message: "valid JSON".to_string(),
+                    message: "valid metadata".to_string(),
                 });
 
-                // Check expected fields
-                let expected_fields = [
-                    "partition_count",
-                    "row_count",
-                    "cell_count",
-                    "min_timestamp",
-                    "max_timestamp",
-                    "data_size",
-                    "index_size",
-                ];
-                for field in &expected_fields {
-                    if val.get(field).is_none() {
-                        findings.push(Finding {
-                            severity: Severity::Warning,
-                            component: "Statistics.db".to_string(),
-                            message: format!("missing expected field: {}", field),
-                        });
-                    }
+                if metadata.min_timestamp > metadata.max_timestamp {
+                    findings.push(Finding {
+                        severity: Severity::Warning,
+                        component: "Statistics.db".to_string(),
+                        message: "min timestamp exceeds max timestamp".to_string(),
+                    });
+                }
+                if metadata.row_count < metadata.partition_count {
+                    findings.push(Finding {
+                        severity: Severity::Warning,
+                        component: "Statistics.db".to_string(),
+                        message: "row count is lower than partition count".to_string(),
+                    });
                 }
             }
             Err(e) => {
                 findings.push(Finding {
                     severity: Severity::Error,
                     component: "Statistics.db".to_string(),
-                    message: format!("invalid JSON: {}", e),
+                    message: format!("invalid metadata: {}", e),
                 });
             }
         },
@@ -547,5 +543,77 @@ fn verify_statistics(desc: &SSTableDescriptor, findings: &mut Vec<Finding>) {
                 message: format!("failed to read: {}", e),
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cassandra_storage::sstable::metadata::SSTableMetadata;
+
+    #[test]
+    fn verify_statistics_accepts_binary_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "tbl", 7);
+        let metadata = SSTableMetadata {
+            partition_count: 2,
+            row_count: 4,
+            cell_count: 8,
+            min_timestamp: 10,
+            max_timestamp: 20,
+            data_size: 128,
+            index_size: 32,
+            min_partition_key: b"a".to_vec(),
+            max_partition_key: b"z".to_vec(),
+        };
+        std::fs::write(
+            desc.component_path(Component::Statistics),
+            MetadataSerializer::serialize(&metadata),
+        )
+        .unwrap();
+
+        let mut findings = Vec::new();
+        verify_statistics(&desc, &mut findings);
+        assert!(findings.iter().any(|finding| {
+            finding.severity == Severity::Info
+                && finding.component == "Statistics.db"
+                && finding.message == "valid metadata"
+        }));
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.severity == Severity::Error)
+        );
+    }
+
+    #[test]
+    fn verify_statistics_accepts_legacy_json_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "tbl", 8);
+        std::fs::write(
+            desc.component_path(Component::Statistics),
+            serde_json::json!({
+                "partition_count": 2,
+                "row_count": 4,
+                "cell_count": 8,
+                "min_timestamp": 10,
+                "max_timestamp": 20,
+                "data_size": 128,
+                "index_size": 32
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let mut findings = Vec::new();
+        verify_statistics(&desc, &mut findings);
+        assert!(findings.iter().any(|finding| {
+            finding.severity == Severity::Info && finding.message == "valid metadata"
+        }));
+        assert!(
+            !findings
+                .iter()
+                .any(|finding| finding.severity == Severity::Error)
+        );
     }
 }

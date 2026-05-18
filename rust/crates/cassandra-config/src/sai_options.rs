@@ -100,6 +100,8 @@ const KNOWN_SAI_OPTION_KEYS: &[&str] = &[
     "segment_buffer_size",
     "max_terms_per_segment",
     "optimize_for",
+    "analyzer",
+    "analyzer_class",
     "case_sensitive",
     "normalize",
     "ascii",
@@ -107,7 +109,9 @@ const KNOWN_SAI_OPTION_KEYS: &[&str] = &[
 
 /// Validate a CREATE INDEX option map for SAI indexes.
 /// Returns a list of warnings and errors.
-pub fn validate_index_definition(options: &std::collections::HashMap<String, String>) -> Vec<String> {
+pub fn validate_index_definition(
+    options: &std::collections::HashMap<String, String>,
+) -> Vec<String> {
     let mut warnings = Vec::new();
 
     // Check for unknown keys

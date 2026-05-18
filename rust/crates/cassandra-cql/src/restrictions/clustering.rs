@@ -5,7 +5,7 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.cql3.restrictions.ClusteringColumnRestrictions`
 
-use super::{ColumnRestriction, RestrictionError, RestrictionKind};
+use super::{ColumnRestriction, RestrictionError, RestrictionKind, tuple_columns};
 use crate::ast::{Relation, RelationOp};
 use cassandra_schema::table::TableMetadata;
 
@@ -26,8 +26,42 @@ pub fn validate_clustering(
 
     // Build a map of column_name -> (index, restrictions)
     let mut ck_map: Vec<Vec<&Relation>> = vec![Vec::new(); ck_columns.len()];
+    let mut tuple_restrictions = Vec::new();
 
     for relation in relations {
+        if let Some(columns) = tuple_columns(&relation.column) {
+            for column in &columns {
+                if !ck_columns
+                    .iter()
+                    .any(|ck_col| ck_col.name.eq_ignore_ascii_case(column))
+                {
+                    return Err(RestrictionError::InvalidClusteringOrder(format!(
+                        "Multi-column restriction references non-clustering column '{}'",
+                        column
+                    )));
+                }
+            }
+
+            let kind = match relation.op {
+                RelationOp::Eq => RestrictionKind::Eq,
+                RelationOp::In => RestrictionKind::In,
+                op @ (RelationOp::Lt | RelationOp::Gt | RelationOp::Lte | RelationOp::Gte) => {
+                    RestrictionKind::Range { op }
+                }
+                op => {
+                    return Err(RestrictionError::IncompatibleOperator(format!(
+                        "Operator {:?} is not supported on multi-column clustering restriction '{}'",
+                        op, relation.column
+                    )));
+                }
+            };
+            tuple_restrictions.push(ColumnRestriction {
+                column_name: relation.column.clone(),
+                kind,
+            });
+            continue;
+        }
+
         for (i, ck_col) in ck_columns.iter().enumerate() {
             if relation.column.eq_ignore_ascii_case(&ck_col.name) {
                 ck_map[i].push(relation);
@@ -45,7 +79,7 @@ pub fn validate_clustering(
 
     let last_restricted = match last_restricted {
         Some(i) => i,
-        None => return Ok(vec![]), // no clustering restrictions
+        None => return Ok(tuple_restrictions), // no single-column clustering restrictions
     };
 
     // Verify contiguous prefix: no gaps before the last restricted column
@@ -74,10 +108,7 @@ pub fn validate_clustering(
                     }
                     RestrictionKind::In
                 }
-                op @ (RelationOp::Lt
-                | RelationOp::Gt
-                | RelationOp::Lte
-                | RelationOp::Gte) => {
+                op @ (RelationOp::Lt | RelationOp::Gt | RelationOp::Lte | RelationOp::Gte) => {
                     if i < last_restricted {
                         return Err(RestrictionError::InvalidClusteringOrder(
                             "Slice restrictions are only supported on the last clustering column"
@@ -101,6 +132,7 @@ pub fn validate_clustering(
         }
     }
 
+    restrictions.extend(tuple_restrictions);
     Ok(restrictions)
 }
 
@@ -157,10 +189,7 @@ mod tests {
     #[test]
     fn contiguous_prefix() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Eq),
-            rel("ck2", RelationOp::Eq),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Eq), rel("ck2", RelationOp::Eq)];
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }
@@ -180,10 +209,7 @@ mod tests {
     #[test]
     fn slice_on_last() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Eq),
-            rel("ck2", RelationOp::Gt),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Eq), rel("ck2", RelationOp::Gt)];
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }
@@ -191,10 +217,7 @@ mod tests {
     #[test]
     fn slice_not_on_last_rejected() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Gt),
-            rel("ck2", RelationOp::Eq),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Gt), rel("ck2", RelationOp::Eq)];
         let result = validate_clustering(&relations, &table);
         assert!(result.is_err());
     }
@@ -202,10 +225,7 @@ mod tests {
     #[test]
     fn in_on_last() {
         let table = table_with_clustering();
-        let relations = vec![
-            rel("ck1", RelationOp::Eq),
-            rel("ck2", RelationOp::In),
-        ];
+        let relations = vec![rel("ck1", RelationOp::Eq), rel("ck2", RelationOp::In)];
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }

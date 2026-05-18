@@ -17,9 +17,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dashmap::DashMap;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::tracing::TraceSession;
+use crate::tracing::{TraceEventRow, TraceSession};
 
 /// Maximum number of finished sessions kept in the ring buffer.
 const RECENT_CAPACITY: usize = 1000;
@@ -52,6 +53,27 @@ pub struct FinishedSession {
     pub session: TraceSession,
     /// Wall-clock epoch millis when the session was finished.
     pub finished_at_ms: u64,
+}
+
+/// Materialized row for `system_traces.sessions`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceSessionRow {
+    pub session_id: Uuid,
+    pub client: String,
+    pub command: String,
+    pub coordinator: String,
+    pub coordinator_port: i32,
+    pub duration: i32,
+    pub parameters: Vec<(String, String)>,
+    pub request: String,
+    pub started_at: u64,
+}
+
+/// Materialized `system_traces` table rows.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemTracesRows {
+    pub sessions: Vec<TraceSessionRow>,
+    pub events: Vec<TraceEventRow>,
 }
 
 /// Global store for active and recently finished tracing sessions.
@@ -122,6 +144,36 @@ impl TracingManager {
     pub fn list_recent_sessions(&self, limit: usize) -> Vec<FinishedSession> {
         let recent = self.recent.lock();
         recent.iter().rev().take(limit).cloned().collect()
+    }
+
+    /// Project recent finished sessions into rows matching the `system_traces`
+    /// table definitions. This keeps the storage integration boundary explicit
+    /// while preserving the Java-visible row shape.
+    pub fn system_traces_rows(&self, limit: usize) -> SystemTracesRows {
+        let recent = self.list_recent_sessions(limit);
+        let mut rows = SystemTracesRows::default();
+
+        for finished in recent {
+            let session = &finished.session;
+            rows.sessions.push(TraceSessionRow {
+                session_id: session.session_id,
+                client: "unknown".to_string(),
+                command: "Execute CQL3 query".to_string(),
+                coordinator: "local".to_string(),
+                coordinator_port: 0,
+                duration: session.duration_us().min(i32::MAX as u64) as i32,
+                parameters: Vec::new(),
+                request: "query".to_string(),
+                started_at: session.started_at_ms,
+            });
+
+            for (idx, event) in session.events().iter().enumerate() {
+                rows.events
+                    .push(TraceEventRow::from_event(session.session_id, idx, event));
+            }
+        }
+
+        rows
     }
 
     /// Number of currently active sessions.
@@ -285,5 +337,24 @@ mod tests {
         assert!(cfg.enabled);
         assert!((cfg.sample_rate - 1.0).abs() < f64::EPSILON);
         assert_eq!(cfg.default_ttl_secs, 86_400);
+    }
+
+    #[test]
+    fn system_traces_rows_project_finished_sessions_and_events() {
+        let mgr = TracingManager::new(enabled_config());
+        let session = mgr.begin_session().unwrap();
+        session.trace("coordinator", "Selecting replicas");
+        session.trace("replica:7000", "Read command completed");
+        let session_id = session.session_id;
+        mgr.finish_session(session_id);
+
+        let rows = mgr.system_traces_rows(10);
+        assert_eq!(rows.sessions.len(), 1);
+        assert_eq!(rows.sessions[0].session_id, session_id);
+        assert_eq!(rows.sessions[0].command, "Execute CQL3 query");
+        assert!(rows.sessions[0].started_at > 0);
+        assert_eq!(rows.events.len(), 2);
+        assert_eq!(rows.events[0].session_id, session_id);
+        assert_eq!(rows.events[0].activity, "Selecting replicas");
     }
 }

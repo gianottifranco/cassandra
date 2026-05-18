@@ -36,6 +36,7 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use super::bloom::BloomFilter;
 use super::format::*;
+use super::metadata::{MetadataSerializer, SSTableMetadata};
 use crate::memtable::partition::{Cell, PartitionData, Row};
 
 // ─── BTI constants ─────────────────────────────────────────────────────────
@@ -195,7 +196,7 @@ impl BtiWriter {
         self.write_bloom_filter(partitions)?;
 
         // Write Statistics.db
-        self.write_statistics(&stats)?;
+        self.write_statistics(&stats, partitions)?;
 
         // Write TOC.txt
         self.write_toc()?;
@@ -417,10 +418,26 @@ impl BtiWriter {
         Ok(())
     }
 
-    fn write_statistics(&self, stats: &super::writer::SSTableStats) -> io::Result<()> {
+    fn write_statistics(
+        &self,
+        stats: &super::writer::SSTableStats,
+        partitions: &[(Vec<u8>, PartitionData)],
+    ) -> io::Result<()> {
         let path = self.descriptor.component_path(Component::Statistics);
-        let json = serde_json::to_vec_pretty(stats).map_err(io::Error::other)?;
-        fs::write(&path, json)?;
+        let min_partition_key = partitions
+            .iter()
+            .map(|(pk, _)| pk.as_slice())
+            .min()
+            .unwrap_or_default()
+            .to_vec();
+        let max_partition_key = partitions
+            .iter()
+            .map(|(pk, _)| pk.as_slice())
+            .max()
+            .unwrap_or_default()
+            .to_vec();
+        let metadata = SSTableMetadata::from_stats(stats, min_partition_key, max_partition_key);
+        fs::write(&path, MetadataSerializer::serialize(&metadata))?;
         Ok(())
     }
 
@@ -617,8 +634,18 @@ impl BtiReader {
 
     fn load_stats(desc: &SSTableDescriptor) -> io::Result<super::reader::SSTableStats> {
         let path = desc.component_path(Component::Statistics);
-        let data = fs::read_to_string(&path)?;
-        serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let data = fs::read(&path)?;
+        let metadata = MetadataSerializer::deserialize_auto(&data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(super::reader::SSTableStats {
+            partition_count: metadata.partition_count,
+            row_count: metadata.row_count,
+            cell_count: metadata.cell_count,
+            min_timestamp: metadata.min_timestamp,
+            max_timestamp: metadata.max_timestamp,
+            data_size: metadata.data_size,
+            index_size: metadata.index_size,
+        })
     }
 }
 

@@ -60,10 +60,7 @@ pub fn check_create_table(
 }
 
 /// Check guardrails for CREATE INDEX.
-pub fn check_create_index(
-    config: &GuardrailsConfig,
-    indexes_on_table: i64,
-) -> GuardrailResult {
+pub fn check_create_index(config: &GuardrailsConfig, indexes_on_table: i64) -> GuardrailResult {
     if let Some(v) = check_threshold(config, "secondary_indexes_per_table", indexes_on_table + 1) {
         if v.action == GuardrailAction::Fail {
             return GuardrailResult::Rejected(v.message);
@@ -133,6 +130,40 @@ fn check_feature(config: &GuardrailsConfig, feature: &str, display: &str) -> Gua
         }
         _ => GuardrailResult::Allowed,
     }
+}
+
+// ─── Read Guardrails (WU-10) ──────────────────────────────────────
+
+/// Check read-path guardrails at the CQL query execution layer.
+///
+/// Validates:
+/// - ALLOW FILTERING enabled when used
+/// - SELECT column count
+///
+/// ## Java Oracle
+/// `org.apache.cassandra.db.guardrails.Guardrails` — read-path hooks
+pub fn check_select_guardrails(
+    config: &GuardrailsConfig,
+    allow_filtering: bool,
+    column_count: i64,
+) -> GuardrailResult {
+    // Check ALLOW FILTERING
+    if allow_filtering {
+        let result = check_allow_filtering(config);
+        if result.is_rejected() {
+            return result;
+        }
+    }
+
+    // Check columns per query (if threshold configured)
+    if let Some(v) = check_threshold(config, "columns_per_query", column_count) {
+        if v.action == GuardrailAction::Fail {
+            return GuardrailResult::Rejected(v.message);
+        }
+        return GuardrailResult::Warned(v.message);
+    }
+
+    GuardrailResult::Allowed
 }
 
 // ─── Write Guardrails (WU-04) ─────────────────────────────────────
@@ -418,12 +449,37 @@ mod tests {
             ..Default::default()
         };
         let mut m = test_mutation();
-        m.rows[0].cells[0].collection_op =
-            Some(cassandra_coordinator::CollectionOp::Append(vec![
-                b"a".to_vec(),
-                b"b".to_vec(),
-            ]));
+        m.rows[0].cells[0].collection_op = Some(cassandra_coordinator::CollectionOp::Append(vec![
+            b"a".to_vec(),
+            b"b".to_vec(),
+        ]));
         let result = check_write_guardrails(&guardrails, &m);
         assert!(matches!(result, GuardrailResult::Warned(_)));
+    }
+
+    // ── WU-10: Read guardrails ───────────────────────────────────────
+
+    #[test]
+    fn select_guardrail_allowed() {
+        let config = GuardrailsConfig::default();
+        let result = check_select_guardrails(&config, false, 5);
+        assert!(!result.is_rejected());
+    }
+
+    #[test]
+    fn select_guardrail_rejects_allow_filtering() {
+        let mut config = GuardrailsConfig::default();
+        config.allow_filtering_enabled = false;
+        let result = check_select_guardrails(&config, true, 5);
+        assert!(result.is_rejected());
+    }
+
+    #[test]
+    fn select_guardrail_allows_when_no_filtering() {
+        let mut config = GuardrailsConfig::default();
+        config.allow_filtering_enabled = false;
+        // allow_filtering=false in the query, so guardrail should not trigger
+        let result = check_select_guardrails(&config, false, 5);
+        assert!(!result.is_rejected());
     }
 }

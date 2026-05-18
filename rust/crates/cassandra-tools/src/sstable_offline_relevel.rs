@@ -133,10 +133,7 @@ pub fn run(dir: &str) {
 
     println!("Found {} SSTable(s) in {}", sstables.len(), dir);
     println!();
-    println!(
-        "{:<50} {:>12} {:>6}",
-        "SSTable", "Size (bytes)", "Level"
-    );
+    println!("{:<50} {:>12} {:>6}", "SSTable", "Size (bytes)", "Level");
     println!("{:-<70}", "");
 
     let mut level_counts: Vec<u32> = vec![0; (MAX_LEVEL + 1) as usize];
@@ -223,10 +220,7 @@ pub fn run(dir: &str) {
     }
 
     println!();
-    println!(
-        "Releveled {} SSTable(s) ({} error(s)).",
-        updated, errors
-    );
+    println!("Releveled {} SSTable(s) ({} error(s)).", updated, errors);
 }
 
 #[cfg(test)]

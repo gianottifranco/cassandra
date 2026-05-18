@@ -22,8 +22,7 @@ use cassandra_cluster_metadata::Endpoint;
 use cassandra_common::Token;
 
 use crate::messages::{
-    ConsistentSessionState, FinalizePromise, PrepareConsistentRequest,
-    PrepareConsistentResponse,
+    ConsistentSessionState, FinalizePromise, PrepareConsistentRequest, PrepareConsistentResponse,
 };
 
 /// Participant-side session for consistent repair.
@@ -83,10 +82,7 @@ impl LocalSession {
     }
 
     /// Handle a finalize-propose message.
-    pub fn handle_finalize_propose(
-        &mut self,
-        this_endpoint: Endpoint,
-    ) -> FinalizePromise {
+    pub fn handle_finalize_propose(&mut self, this_endpoint: Endpoint) -> FinalizePromise {
         if self.state == ConsistentSessionState::Prepared
             || self.state == ConsistentSessionState::Repairing
         {
@@ -109,10 +105,7 @@ impl LocalSession {
     /// Handle a commit message.
     pub fn handle_commit(&mut self) -> Result<(), String> {
         if self.state != ConsistentSessionState::FinalizePromised {
-            return Err(format!(
-                "Cannot commit from state {}",
-                self.state
-            ));
+            return Err(format!("Cannot commit from state {}", self.state));
         }
         self.state = ConsistentSessionState::Committed;
         self.last_update_millis = Self::now_millis();

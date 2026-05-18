@@ -13,8 +13,10 @@
 
 use cassandra_messaging::frame::Message;
 use cassandra_messaging::verb::Verb;
+use cassandra_storage::engine::StorageEngine;
 use tracing::{debug, warn};
 
+use super::mutation_handler::to_storage_mutation;
 use crate::write::CoordinatedMutation;
 
 // ─── Payload Types ──────────────────────────────────────────────
@@ -44,8 +46,16 @@ pub struct HintResponsePayload {
 pub struct HintVerbHandler;
 
 impl HintVerbHandler {
-    /// Handle an incoming hint delivery message.
+    /// Handle an incoming hint delivery message when no local storage engine is configured.
     pub fn handle(msg: Message) -> Option<Message> {
+        Some(Message::failure(
+            msg.header.message_id,
+            b"Local storage engine not configured for Hint".to_vec(),
+        ))
+    }
+
+    /// Handle an incoming hint delivery message using the local storage engine.
+    pub fn handle_with_storage(msg: Message, storage: &StorageEngine) -> Option<Message> {
         let request: HintRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(e) => {
@@ -64,8 +74,14 @@ impl HintVerbHandler {
             "Applying hint locally"
         );
 
-        // In a full implementation, this would apply the mutation to the
-        // local storage engine, exactly like a normal mutation.
+        let storage_mutation = to_storage_mutation(request.mutation);
+        if let Err(e) = storage.apply_mutation(&storage_mutation) {
+            return Some(Message::failure(
+                msg.header.message_id,
+                format!("Storage apply error: {e}").into_bytes(),
+            ));
+        }
+
         let response = HintResponsePayload { success: true };
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
@@ -80,7 +96,24 @@ impl HintVerbHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::CoordinatedMutation;
+    use crate::write::{CellMutation, CoordinatedMutation, MutationRow};
+    use cassandra_storage::commitlog::CommitLogConfig;
+    use cassandra_storage::engine::EngineConfig;
+    use tempfile::TempDir;
+
+    fn test_storage() -> (StorageEngine, TempDir) {
+        let temp = TempDir::new().unwrap();
+        let storage = StorageEngine::open(EngineConfig {
+            data_directories: vec![temp.path().join("data")],
+            commitlog: CommitLogConfig {
+                directory: temp.path().join("commitlog"),
+                ..CommitLogConfig::default()
+            },
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        (storage, temp)
+    }
 
     fn make_hint_request() -> HintRequest {
         HintRequest {
@@ -88,7 +121,19 @@ mod tests {
                 "ks".to_string(),
                 "tbl".to_string(),
                 vec![1],
-                vec![],
+                vec![MutationRow {
+                    clustering_key: vec![2],
+                    cells: vec![CellMutation {
+                        column: "v".to_string(),
+                        value: Some(b"hinted".to_vec()),
+                        timestamp: 1000,
+                        ttl: 0,
+                        is_tombstone: false,
+                        collection_op: None,
+                    }],
+                    is_tombstone: false,
+                    range_tombstone: None,
+                }],
                 1000,
             ),
             hint_id: 42,
@@ -106,7 +151,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_valid_hint() {
+    fn handle_valid_hint_without_storage_fails() {
         let req = make_hint_request();
         let payload = serde_json::to_vec(&req).unwrap();
         let msg = Message::request(Verb::Hint, 100, payload);
@@ -114,11 +159,27 @@ mod tests {
         let response = HintVerbHandler::handle(msg);
         assert!(response.is_some());
         let resp = response.unwrap();
+        assert!(resp.is_failure());
+    }
+
+    #[test]
+    fn handle_valid_hint_applies_to_storage() {
+        let (storage, _temp) = test_storage();
+        let req = make_hint_request();
+        let payload = serde_json::to_vec(&req).unwrap();
+        let msg = Message::request(Verb::Hint, 100, payload);
+
+        let response = HintVerbHandler::handle_with_storage(msg, &storage);
+        assert!(response.is_some());
+        let resp = response.unwrap();
         assert_eq!(resp.header.verb, Verb::HintResponse);
         assert!(resp.is_response());
 
         let body: HintResponsePayload = serde_json::from_slice(&resp.payload).unwrap();
         assert!(body.success);
+        let partition = storage.read_partition("ks", "tbl", &[1]).unwrap();
+        let row = partition.rows.get(&vec![2]).unwrap();
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"hinted".as_slice()));
     }
 
     #[test]

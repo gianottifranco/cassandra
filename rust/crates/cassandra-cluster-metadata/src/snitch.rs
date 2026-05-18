@@ -30,10 +30,13 @@
 //! - `org.apache.cassandra.locator.Ec2Snitch`
 
 use std::collections::HashMap;
+use std::env;
+use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
+use thiserror::Error;
 
 use crate::node::Endpoint;
 
@@ -417,7 +420,7 @@ impl Snitch for RackInferringSnitch {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Ec2Snitch / Ec2MultiRegionSnitch stubs
+// Ec2Snitch / Ec2MultiRegionSnitch
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Ec2Snitch: reads DC/rack from EC2 instance metadata API.
@@ -451,6 +454,16 @@ impl Ec2Snitch {
             region: location.datacenter,
             availability_zone: location.rack,
         }
+    }
+
+    /// Create from an EC2 availability zone string such as `us-east-1a`.
+    pub fn from_availability_zone(az: &str) -> Result<Self, SnitchFactoryError> {
+        crate::cloud_metadata::parse_ec2_az(az)
+            .map(Self::from_metadata)
+            .ok_or_else(|| SnitchFactoryError::InvalidCloudLocation {
+                provider: "ec2",
+                value: az.to_string(),
+            })
     }
 }
 
@@ -513,6 +526,26 @@ impl Ec2MultiRegionSnitch {
         }
     }
 
+    /// Create from an EC2 availability zone string such as `us-east-1a`.
+    pub fn from_availability_zone(
+        az: &str,
+        local_address: Endpoint,
+        broadcast_address: Endpoint,
+    ) -> Result<Self, SnitchFactoryError> {
+        let location = crate::cloud_metadata::parse_ec2_az(az).ok_or_else(|| {
+            SnitchFactoryError::InvalidCloudLocation {
+                provider: "ec2",
+                value: az.to_string(),
+            }
+        })?;
+        Ok(Self::new(
+            location.datacenter,
+            location.rack,
+            local_address,
+            broadcast_address,
+        ))
+    }
+
     /// Update remote DC/rack info (from gossip or EC2 metadata).
     pub fn update_remote(&self, endpoint: Endpoint, dc: String, rack: String) {
         self.remote_topology.write().insert(endpoint, (dc, rack));
@@ -563,9 +596,6 @@ impl Snitch for Ec2MultiRegionSnitch {
 
 /// GoogleCloudSnitch: reads DC/rack from GCP metadata API.
 ///
-/// **Stub implementation** — returns pre-configured values until the GCE
-/// metadata service is wired. Gated behind feature flag for non-GCP builds.
-///
 /// Convention: project-region = datacenter, zone = rack.
 ///
 /// ## Java Oracle
@@ -594,6 +624,16 @@ impl GoogleCloudSnitch {
             region: location.datacenter,
             zone: location.rack,
         }
+    }
+
+    /// Create from a GCE zone path such as `projects/123/zones/us-central1-a`.
+    pub fn from_zone(zone: &str) -> Result<Self, SnitchFactoryError> {
+        crate::cloud_metadata::parse_gce_zone(zone)
+            .map(Self::from_metadata)
+            .ok_or_else(|| SnitchFactoryError::InvalidCloudLocation {
+                provider: "gce",
+                value: zone.to_string(),
+            })
     }
 }
 
@@ -759,29 +799,189 @@ impl Snitch for CloudstackSnitch {
     }
 }
 
+/// Configuration used by [`create_snitch_with_config`].
+///
+/// Cloud snitches use parsed provider metadata when available. Tests and
+/// embedded deployments can inject the same values without contacting metadata
+/// services from the topology layer.
+#[derive(Debug, Clone)]
+pub struct SnitchFactoryConfig {
+    pub local_datacenter: String,
+    pub local_rack: String,
+    pub local_endpoint: Endpoint,
+    pub broadcast_endpoint: Endpoint,
+    pub ec2_availability_zone: Option<String>,
+    pub gce_zone: Option<String>,
+    pub azure_location: Option<String>,
+    pub azure_zone: Option<String>,
+    pub alibaba_region: Option<String>,
+    pub alibaba_zone: Option<String>,
+    pub cloudstack_availability_zone: Option<String>,
+}
+
+impl Default for SnitchFactoryConfig {
+    fn default() -> Self {
+        Self::from_env()
+    }
+}
+
+impl SnitchFactoryConfig {
+    pub fn from_env() -> Self {
+        Self {
+            local_datacenter: env_or("CASSANDRA_DC", "datacenter1"),
+            local_rack: env_or("CASSANDRA_RACK", "rack1"),
+            local_endpoint: default_endpoint(7000),
+            broadcast_endpoint: default_endpoint(7000),
+            ec2_availability_zone: env_optional("CASSANDRA_EC2_AVAILABILITY_ZONE")
+                .or_else(|| env_optional("AWS_AVAILABILITY_ZONE")),
+            gce_zone: env_optional("CASSANDRA_GCE_ZONE").or_else(|| env_optional("GCE_ZONE")),
+            azure_location: env_optional("CASSANDRA_AZURE_LOCATION")
+                .or_else(|| env_optional("AZURE_LOCATION")),
+            azure_zone: env_optional("CASSANDRA_AZURE_ZONE").or_else(|| env_optional("AZURE_ZONE")),
+            alibaba_region: env_optional("CASSANDRA_ALIBABA_REGION")
+                .or_else(|| env_optional("ALIBABA_REGION_ID")),
+            alibaba_zone: env_optional("CASSANDRA_ALIBABA_ZONE")
+                .or_else(|| env_optional("ALIBABA_ZONE_ID")),
+            cloudstack_availability_zone: env_optional("CASSANDRA_CLOUDSTACK_AVAILABILITY_ZONE"),
+        }
+    }
+
+    fn local_location(&self) -> crate::cloud_metadata::CloudLocation {
+        crate::cloud_metadata::CloudLocation {
+            datacenter: self.local_datacenter.clone(),
+            rack: self.local_rack.clone(),
+        }
+    }
+
+    fn ec2_location(&self) -> Result<crate::cloud_metadata::CloudLocation, SnitchFactoryError> {
+        match self.ec2_availability_zone.as_deref() {
+            Some(az) => crate::cloud_metadata::parse_ec2_az(az).ok_or_else(|| {
+                SnitchFactoryError::InvalidCloudLocation {
+                    provider: "ec2",
+                    value: az.to_string(),
+                }
+            }),
+            None => Ok(self.local_location()),
+        }
+    }
+
+    fn gce_location(&self) -> Result<crate::cloud_metadata::CloudLocation, SnitchFactoryError> {
+        match self.gce_zone.as_deref() {
+            Some(zone) => crate::cloud_metadata::parse_gce_zone(zone).ok_or_else(|| {
+                SnitchFactoryError::InvalidCloudLocation {
+                    provider: "gce",
+                    value: zone.to_string(),
+                }
+            }),
+            None => Ok(self.local_location()),
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum SnitchFactoryError {
+    #[error("invalid {provider} cloud location value: {value}")]
+    InvalidCloudLocation {
+        provider: &'static str,
+        value: String,
+    },
+    #[error("snitch '{0}' requires {1}")]
+    MissingConfig(&'static str, &'static str),
+}
+
+fn env_optional(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_or(name: &str, default: &str) -> String {
+    env_optional(name).unwrap_or_else(|| default.to_string())
+}
+
+fn default_endpoint(port: u16) -> Endpoint {
+    Endpoint::new(SocketAddr::V4(SocketAddrV4::new(
+        Ipv4Addr::new(127, 0, 0, 1),
+        port,
+    )))
+}
+
+fn is_snitch(name: &str, class: &str, alias: &str) -> bool {
+    name.contains(class) || name.eq_ignore_ascii_case(alias)
+}
+
+/// Factory: create a snitch by name using explicit configuration.
+pub fn create_snitch_with_config(
+    name: &str,
+    config: &SnitchFactoryConfig,
+) -> Result<Box<dyn Snitch>, SnitchFactoryError> {
+    if is_snitch(name, "SimpleSnitch", "simple") {
+        Ok(Box::new(SimpleSnitch))
+    } else if is_snitch(name, "RackInferringSnitch", "rackinferring") {
+        Ok(Box::new(RackInferringSnitch))
+    } else if is_snitch(name, "Ec2MultiRegionSnitch", "ec2multiregion") {
+        let location = config.ec2_location()?;
+        Ok(Box::new(Ec2MultiRegionSnitch::new(
+            location.datacenter,
+            location.rack,
+            config.local_endpoint,
+            config.broadcast_endpoint,
+        )))
+    } else if is_snitch(name, "Ec2Snitch", "ec2") {
+        Ok(Box::new(Ec2Snitch::from_metadata(config.ec2_location()?)))
+    } else if is_snitch(name, "GoogleCloudSnitch", "googlecloud") {
+        Ok(Box::new(GoogleCloudSnitch::from_metadata(
+            config.gce_location()?,
+        )))
+    } else if is_snitch(name, "AzureSnitch", "azure") {
+        let location = match config.azure_location.as_deref() {
+            Some(location) => crate::cloud_metadata::parse_azure_metadata(
+                location,
+                config.azure_zone.as_deref().unwrap_or_default(),
+            ),
+            None => config.local_location(),
+        };
+        Ok(Box::new(AzureSnitch::from_metadata(location)))
+    } else if is_snitch(name, "AlibabaCloudSnitch", "alibaba") {
+        let location = match (
+            config.alibaba_region.as_deref(),
+            config.alibaba_zone.as_deref(),
+        ) {
+            (Some(region), Some(zone)) => {
+                crate::cloud_metadata::parse_alibaba_metadata(region, zone)
+            }
+            (None, None) => config.local_location(),
+            (None, Some(_)) => {
+                return Err(SnitchFactoryError::MissingConfig(
+                    "AlibabaCloudSnitch",
+                    "region",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(SnitchFactoryError::MissingConfig(
+                    "AlibabaCloudSnitch",
+                    "zone",
+                ));
+            }
+        };
+        Ok(Box::new(AlibabaCloudSnitch::from_metadata(location)))
+    } else if is_snitch(name, "CloudstackSnitch", "cloudstack") {
+        let location = config
+            .cloudstack_availability_zone
+            .as_deref()
+            .map(crate::cloud_metadata::parse_cloudstack_metadata)
+            .unwrap_or_else(|| config.local_location());
+        Ok(Box::new(CloudstackSnitch::from_metadata(location)))
+    } else {
+        Ok(Box::new(SimpleSnitch))
+    }
+}
+
 /// Factory: create a snitch by name.
 pub fn create_snitch(name: &str) -> Box<dyn Snitch> {
-    if name.contains("SimpleSnitch") || name == "simple" {
-        Box::new(SimpleSnitch)
-    } else if name.contains("RackInferringSnitch") || name == "rackinferring" {
-        Box::new(RackInferringSnitch)
-    } else if name.contains("Ec2MultiRegionSnitch") || name == "ec2multiregion" {
-        // Defaults for stub; real deployment would fetch from metadata API
-        Box::new(Ec2Snitch::new("us-east-1", "us-east-1a"))
-    } else if name.contains("Ec2Snitch") || name == "ec2" {
-        Box::new(Ec2Snitch::new("us-east-1", "us-east-1a"))
-    } else if name.contains("GoogleCloudSnitch") || name == "googlecloud" {
-        Box::new(GoogleCloudSnitch::new("us-central1", "us-central1-a"))
-    } else if name.contains("AzureSnitch") || name == "azure" {
-        Box::new(AzureSnitch::new("eastus", "eastus-1"))
-    } else if name.contains("AlibabaCloudSnitch") || name == "alibaba" {
-        Box::new(AlibabaCloudSnitch::new("cn-hangzhou", "cn-hangzhou-b"))
-    } else if name.contains("CloudstackSnitch") || name == "cloudstack" {
-        Box::new(CloudstackSnitch::new("zone1", "zone1-default"))
-    } else {
-        // Default to SimpleSnitch
-        Box::new(SimpleSnitch)
-    }
+    create_snitch_with_config(name, &SnitchFactoryConfig::from_env())
+        .unwrap_or_else(|_| Box::new(SimpleSnitch))
 }
 
 #[cfg(test)]
@@ -1015,7 +1215,7 @@ mod tests {
 
     #[test]
     fn ec2_from_metadata() {
-        use crate::cloud_metadata::{CloudLocation, parse_ec2_az};
+        use crate::cloud_metadata::parse_ec2_az;
         let loc = parse_ec2_az("us-west-2c").unwrap();
         let snitch = Ec2Snitch::from_metadata(loc);
         assert_eq!(snitch.datacenter(&ep(7001)), "us-west-2");
@@ -1023,12 +1223,62 @@ mod tests {
     }
 
     #[test]
+    fn ec2_from_availability_zone() {
+        let snitch = Ec2Snitch::from_availability_zone("ap-southeast-2b").unwrap();
+        assert_eq!(snitch.datacenter(&ep(7001)), "ap-southeast-2");
+        assert_eq!(snitch.rack(&ep(7001)), "ap-southeast-2b");
+    }
+
+    #[test]
     fn gce_from_metadata() {
-        use crate::cloud_metadata::{CloudLocation, parse_gce_zone};
+        use crate::cloud_metadata::parse_gce_zone;
         let loc = parse_gce_zone("projects/123/zones/europe-west1-b").unwrap();
         let snitch = GoogleCloudSnitch::from_metadata(loc);
         assert_eq!(snitch.datacenter(&ep(7001)), "europe-west1");
         assert_eq!(snitch.rack(&ep(7001)), "europe-west1-b");
+    }
+
+    #[test]
+    fn snitch_factory_uses_configured_ec2_metadata() {
+        let config = SnitchFactoryConfig {
+            ec2_availability_zone: Some("us-west-1c".into()),
+            ..SnitchFactoryConfig::from_env()
+        };
+        let s = create_snitch_with_config("ec2", &config).unwrap();
+        assert_eq!(s.snitch_name(), "Ec2Snitch");
+        assert_eq!(s.datacenter(&ep(7001)), "us-west-1");
+        assert_eq!(s.rack(&ep(7001)), "us-west-1c");
+    }
+
+    #[test]
+    fn snitch_factory_creates_ec2_multi_region_snitch() {
+        let config = SnitchFactoryConfig {
+            ec2_availability_zone: Some("eu-central-1a".into()),
+            local_endpoint: ep(7001),
+            broadcast_endpoint: ep(7002),
+            ..SnitchFactoryConfig::from_env()
+        };
+        let s = create_snitch_with_config("ec2multiregion", &config).unwrap();
+        assert_eq!(s.snitch_name(), "Ec2MultiRegionSnitch");
+        assert_eq!(s.datacenter(&ep(7001)), "eu-central-1");
+        assert_eq!(s.rack(&ep(7002)), "eu-central-1a");
+    }
+
+    #[test]
+    fn snitch_factory_rejects_partial_alibaba_config() {
+        let config = SnitchFactoryConfig {
+            alibaba_region: Some("cn-hangzhou".into()),
+            alibaba_zone: None,
+            ..SnitchFactoryConfig::from_env()
+        };
+        let err = match create_snitch_with_config("alibaba", &config) {
+            Ok(snitch) => panic!("expected error, got {}", snitch.snitch_name()),
+            Err(err) => err,
+        };
+        assert!(matches!(
+            err,
+            SnitchFactoryError::MissingConfig("AlibabaCloudSnitch", "zone")
+        ));
     }
 
     #[test]

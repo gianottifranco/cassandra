@@ -7,7 +7,11 @@
 //! - `org.apache.cassandra.concurrent.Stage`
 
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::{self, JoinHandle};
+
+use crossbeam::channel::{self, Receiver, Sender};
 
 /// Cassandra thread-pool stages matching the Java `Stage` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,6 +176,111 @@ impl Default for StageRegistry {
     }
 }
 
+type StageTask = Box<dyn FnOnce() + Send + 'static>;
+
+enum StageMessage {
+    Run(StageTask),
+    Shutdown,
+}
+
+/// Fixed-size executor for one Cassandra stage.
+pub struct StageExecutor {
+    stage: Stage,
+    metrics: Arc<StageRegistry>,
+    sender: Sender<StageMessage>,
+    workers: Vec<JoinHandle<()>>,
+}
+
+impl StageExecutor {
+    pub fn new(stage: Stage, threads: usize, metrics: Arc<StageRegistry>) -> Self {
+        let threads = threads.max(1);
+        let (sender, receiver) = channel::unbounded();
+        let workers = (0..threads)
+            .map(|idx| spawn_worker(stage, idx, Arc::clone(&metrics), receiver.clone()))
+            .collect();
+        Self {
+            stage,
+            metrics,
+            sender,
+            workers,
+        }
+    }
+
+    pub fn stage(&self) -> Stage {
+        self.stage
+    }
+
+    pub fn metrics(&self) -> &Arc<StageRegistry> {
+        &self.metrics
+    }
+
+    pub fn submit<F>(&self, task: F) -> Result<(), StageSubmitError>
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.metrics.get(self.stage).inc_pending();
+        match self.sender.send(StageMessage::Run(Box::new(task))) {
+            Ok(()) => Ok(()),
+            Err(_) => {
+                self.metrics.get(self.stage).dec_pending();
+                Err(StageSubmitError::Closed)
+            }
+        }
+    }
+}
+
+impl Drop for StageExecutor {
+    fn drop(&mut self) {
+        for _ in &self.workers {
+            let _ = self.sender.send(StageMessage::Shutdown);
+        }
+        while let Some(worker) = self.workers.pop() {
+            let _ = worker.join();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageSubmitError {
+    Closed,
+}
+
+impl fmt::Display for StageSubmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StageSubmitError::Closed => f.write_str("stage executor is closed"),
+        }
+    }
+}
+
+impl std::error::Error for StageSubmitError {}
+
+fn spawn_worker(
+    stage: Stage,
+    idx: usize,
+    metrics: Arc<StageRegistry>,
+    receiver: Receiver<StageMessage>,
+) -> JoinHandle<()> {
+    thread::Builder::new()
+        .name(format!("{}-{}", stage.name(), idx))
+        .spawn(move || {
+            while let Ok(message) = receiver.recv() {
+                match message {
+                    StageMessage::Run(task) => {
+                        let stage_metrics = metrics.get(stage);
+                        stage_metrics.dec_pending();
+                        stage_metrics.inc_active();
+                        task();
+                        stage_metrics.dec_active();
+                        stage_metrics.inc_completed();
+                    }
+                    StageMessage::Shutdown => break,
+                }
+            }
+        })
+        .expect("stage worker thread should spawn")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,6 +325,27 @@ mod tests {
     #[test]
     fn stage_display() {
         assert_eq!(format!("{}", Stage::Read), "ReadStage");
-        assert_eq!(format!("{}", Stage::NativeTransport), "Native-Transport-Requests");
+        assert_eq!(
+            format!("{}", Stage::NativeTransport),
+            "Native-Transport-Requests"
+        );
+    }
+
+    #[test]
+    fn stage_executor_runs_tasks_and_updates_metrics() {
+        let registry = Arc::new(StageRegistry::new());
+        let executor = StageExecutor::new(Stage::Read, 2, Arc::clone(&registry));
+        let (tx, rx) = std::sync::mpsc::channel();
+        for i in 0..4 {
+            let tx = tx.clone();
+            executor.submit(move || tx.send(i).unwrap()).unwrap();
+        }
+        drop(tx);
+
+        let mut values = rx.iter().collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, vec![0, 1, 2, 3]);
+        drop(executor);
+        assert_eq!(registry.get(Stage::Read).snapshot(), (0, 0, 4));
     }
 }

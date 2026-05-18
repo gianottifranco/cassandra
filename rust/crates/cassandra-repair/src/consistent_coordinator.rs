@@ -24,7 +24,7 @@ use cassandra_cluster_metadata::Endpoint;
 use cassandra_common::Token;
 
 use crate::messages::{
-    ConsistentSessionState, FailSessionMessage, FinalizeCommit, FinalizePropose, FinalizePromise,
+    ConsistentSessionState, FailSessionMessage, FinalizeCommit, FinalizePromise, FinalizePropose,
     PrepareConsistentRequest, PrepareConsistentResponse,
 };
 
@@ -160,10 +160,7 @@ impl CoordinatorSession {
     /// Handle a finalize promise from a participant.
     pub fn handle_promise(&mut self, resp: FinalizePromise) -> CoordinatorAction {
         if self.state != ConsistentSessionState::FinalizeProposing {
-            return CoordinatorAction::Fail(format!(
-                "Unexpected promise in state {}",
-                self.state
-            ));
+            return CoordinatorAction::Fail(format!("Unexpected promise in state {}", self.state));
         }
 
         if !resp.success {

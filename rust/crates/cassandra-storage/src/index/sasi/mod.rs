@@ -60,17 +60,8 @@ impl SasiIndex {
             "SasiIndex requires IndexType::Sasi"
         );
 
-        let analyzer_type = definition
-            .options
-            .get("analyzer_class")
-            .and_then(|v| match v.as_str() {
-                "standard" => Some(AnalyzerType::Standard),
-                "non_tokenizing" => Some(AnalyzerType::NonTokenizing),
-                _ => None,
-            })
-            .unwrap_or_default();
-
-        let analyzer = analyzer_type.create();
+        let analyzer_type = AnalyzerType::from_options(&definition.options);
+        let analyzer = analyzer_type.create_with_options(&definition.options);
 
         Self {
             definition,
@@ -262,6 +253,7 @@ mod tests {
     fn non_tokenizing_analyzer() {
         let mut opts = HashMap::new();
         opts.insert("analyzer_class".into(), "non_tokenizing".into());
+        opts.insert("case_sensitive".into(), "false".into());
         let def = IndexDefinition {
             name: "idx".into(),
             keyspace: "ks".into(),
@@ -273,9 +265,32 @@ mod tests {
         let idx = SasiIndex::new(def);
         idx.insert(&entry(b"Hello World", b"pk1", b"")).unwrap();
 
-        // Non-tokenizing: stored as "hello world" (lowercase)
+        // Case-insensitive non-tokenizing: stored as "hello world" (lowercase)
         let results = idx.search(b"hello world").unwrap();
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn non_tokenizing_java_class_preserves_case_by_default() {
+        let mut opts = HashMap::new();
+        opts.insert(
+            "analyzer_class".into(),
+            "org.apache.cassandra.index.sasi.analyzer.NonTokenizingAnalyzer".into(),
+        );
+        let def = IndexDefinition {
+            name: "idx".into(),
+            keyspace: "ks".into(),
+            table: "tbl".into(),
+            column: "col".into(),
+            index_type: IndexType::Sasi,
+            options: opts,
+        };
+        let idx = SasiIndex::new(def);
+        idx.insert(&entry(b"Hello World", b"pk1", b"")).unwrap();
+
+        assert_eq!(idx.analyzer_type(), AnalyzerType::NonTokenizing);
+        assert_eq!(idx.search(b"Hello World").unwrap().len(), 1);
+        assert!(idx.search(b"hello world").unwrap().is_empty());
     }
 
     #[test]

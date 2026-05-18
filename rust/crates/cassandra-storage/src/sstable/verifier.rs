@@ -14,6 +14,7 @@ use crc32fast::Hasher;
 
 use super::bloom::BloomFilter;
 use super::format::*;
+use super::metadata::MetadataSerializer;
 
 /// Severity of a verification issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,9 +194,7 @@ impl SSTableVerifier {
                     issues.push(VerificationIssue {
                         severity: Severity::Error,
                         component: Component::Data,
-                        message: format!(
-                            "Data.db invalid marker byte: {marker:#04x}"
-                        ),
+                        message: format!("Data.db invalid marker byte: {marker:#04x}"),
                     });
                     return;
                 }
@@ -293,9 +292,7 @@ impl SSTableVerifier {
                 issues.push(VerificationIssue {
                     severity: Severity::Error,
                     component: Component::Index,
-                    message: format!(
-                        "Index.db offset {offset} exceeds Data.db size {data_size}"
-                    ),
+                    message: format!("Index.db offset {offset} exceeds Data.db size {data_size}"),
                 });
             }
 
@@ -354,12 +351,9 @@ impl SSTableVerifier {
         }
     }
 
-    fn verify_statistics(
-        desc: &SSTableDescriptor,
-        issues: &mut Vec<VerificationIssue>,
-    ) {
+    fn verify_statistics(desc: &SSTableDescriptor, issues: &mut Vec<VerificationIssue>) {
         let path = desc.component_path(Component::Statistics);
-        let data = match fs::read_to_string(&path) {
+        let data = match fs::read(&path) {
             Ok(d) => d,
             Err(_) => {
                 issues.push(VerificationIssue {
@@ -371,12 +365,30 @@ impl SSTableVerifier {
             }
         };
 
-        if serde_json::from_str::<serde_json::Value>(&data).is_err() {
-            issues.push(VerificationIssue {
-                severity: Severity::Error,
-                component: Component::Statistics,
-                message: "Statistics.db is not valid JSON".into(),
-            });
+        match MetadataSerializer::deserialize_auto(&data) {
+            Ok(metadata) => {
+                if metadata.min_timestamp > metadata.max_timestamp {
+                    issues.push(VerificationIssue {
+                        severity: Severity::Warning,
+                        component: Component::Statistics,
+                        message: "Statistics.db min timestamp exceeds max timestamp".into(),
+                    });
+                }
+                if metadata.row_count < metadata.partition_count {
+                    issues.push(VerificationIssue {
+                        severity: Severity::Warning,
+                        component: Component::Statistics,
+                        message: "Statistics.db row count is lower than partition count".into(),
+                    });
+                }
+            }
+            Err(err) => {
+                issues.push(VerificationIssue {
+                    severity: Severity::Error,
+                    component: Component::Statistics,
+                    message: format!("Statistics.db metadata is not deserializable: {err}"),
+                });
+            }
         }
     }
 
@@ -454,10 +466,7 @@ mod tests {
             .iter()
             .filter(|i| i.severity == Severity::Error)
             .collect();
-        assert!(
-            errors.is_empty(),
-            "Expected no errors, got: {errors:?}"
-        );
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
         assert!(result.is_valid());
     }
 
@@ -479,12 +488,9 @@ mod tests {
 
         let result = SSTableVerifier::verify(&desc);
         assert!(!result.is_valid());
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.severity == Severity::Error
-                && i.component == Component::Data
-                && i.message.contains("CRC")));
+        assert!(result.issues.iter().any(|i| i.severity == Severity::Error
+            && i.component == Component::Data
+            && i.message.contains("CRC")));
     }
 
     #[test]
@@ -501,10 +507,11 @@ mod tests {
 
         let result = SSTableVerifier::verify(&desc);
         assert!(!result.is_valid());
-        assert!(result
-            .issues
-            .iter()
-            .any(|i| i.severity == Severity::Error
-                && i.component == Component::Filter));
+        assert!(
+            result
+                .issues
+                .iter()
+                .any(|i| i.severity == Severity::Error && i.component == Component::Filter)
+        );
     }
 }

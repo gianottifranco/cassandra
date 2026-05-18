@@ -154,10 +154,7 @@ fn cmd_coverage_audit() -> ExitCode {
                 println!("  Total features:        {}", summary.total_features);
                 println!("  Total packages:        {}", summary.total_packages);
                 println!("  Classified packages:   {}", summary.classified_packages);
-                println!(
-                    "  Unclassified packages: {}",
-                    summary.unclassified_count
-                );
+                println!("  Unclassified packages: {}", summary.unclassified_count);
                 println!("  Orphan entries:        {}", summary.orphan_count);
                 println!();
                 if !summary.status_counts.is_empty() {
@@ -234,8 +231,16 @@ fn parse_audit_json(json_str: &str) -> Option<AuditSummary> {
     // Extract status counts
     let mut status_counts = Vec::new();
     for status in &[
-        "done", "partial", "stub", "missing", "trunk-only", "experimental",
-        "baseline-excluded", "tooling-only", "ops-only", "blocked",
+        "done",
+        "partial",
+        "stub",
+        "missing",
+        "trunk-only",
+        "experimental",
+        "baseline-excluded",
+        "tooling-only",
+        "ops-only",
+        "blocked",
     ] {
         let key = format!("\"{}\": ", status);
         if let Some(pos) = json_str.find(&key) {
@@ -287,11 +292,7 @@ fn extract_json_array_len(json_str: &str, key: &str) -> u64 {
     0
 }
 
-fn run_cmd_capture(
-    program: &str,
-    args: &[&str],
-    cwd: Option<&std::path::Path>,
-) -> Option<String> {
+fn run_cmd_capture(program: &str, args: &[&str], cwd: Option<&std::path::Path>) -> Option<String> {
     let mut cmd = Command::new(program);
     cmd.args(args).stderr(Stdio::inherit());
 
@@ -300,9 +301,7 @@ fn run_cmd_capture(
     }
 
     match cmd.output() {
-        Ok(output) if output.status.success() => {
-            String::from_utf8(output.stdout).ok()
-        }
+        Ok(output) if output.status.success() => String::from_utf8(output.stdout).ok(),
         _ => None,
     }
 }

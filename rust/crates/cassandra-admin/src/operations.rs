@@ -2,7 +2,7 @@
 
 //! Operation tracking: status of in-flight topology, repair, and streaming operations.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::time::Instant;
 
 use parking_lot::RwLock;
@@ -51,7 +51,10 @@ pub struct OperationStatus {
 /// Tracks all in-flight operations for admin visibility.
 pub struct OperationTracker {
     operations: RwLock<HashMap<Uuid, OperationEntry>>,
+    history: RwLock<VecDeque<OperationStatus>>,
 }
+
+const HISTORY_LIMIT: usize = 256;
 
 struct OperationEntry {
     operation_type: OperationType,
@@ -65,6 +68,7 @@ impl OperationTracker {
     pub fn new() -> Self {
         Self {
             operations: RwLock::new(HashMap::new()),
+            history: RwLock::new(VecDeque::with_capacity(HISTORY_LIMIT)),
         }
     }
 
@@ -94,7 +98,9 @@ impl OperationTracker {
 
     /// Remove an operation (completed or failed).
     pub fn remove(&self, id: &Uuid) {
-        self.operations.write().remove(id);
+        if let Some(entry) = self.operations.write().remove(id) {
+            self.record_history(status_from_entry(*id, &entry));
+        }
     }
 
     /// List all active operations.
@@ -102,21 +108,38 @@ impl OperationTracker {
         self.operations
             .read()
             .iter()
-            .map(|(id, e)| OperationStatus {
-                id: *id,
-                operation_type: e.operation_type,
-                status: e.status.clone(),
-                progress: e.progress,
-                description: e.description.clone(),
-                started_at: e.started_at,
-                elapsed_secs: e.started_at.elapsed().as_secs(),
-            })
+            .map(|(id, e)| status_from_entry(*id, e))
             .collect()
+    }
+
+    /// List retained completed/removed operations, oldest first.
+    pub fn list_history(&self) -> Vec<OperationStatus> {
+        self.history.read().iter().cloned().collect()
     }
 
     /// Number of active operations.
     pub fn count(&self) -> usize {
         self.operations.read().len()
+    }
+
+    fn record_history(&self, status: OperationStatus) {
+        let mut history = self.history.write();
+        if history.len() == HISTORY_LIMIT {
+            history.pop_front();
+        }
+        history.push_back(status);
+    }
+}
+
+fn status_from_entry(id: Uuid, e: &OperationEntry) -> OperationStatus {
+    OperationStatus {
+        id,
+        operation_type: e.operation_type,
+        status: e.status.clone(),
+        progress: e.progress,
+        description: e.description.clone(),
+        started_at: e.started_at,
+        elapsed_secs: e.started_at.elapsed().as_secs(),
     }
 }
 
@@ -161,5 +184,21 @@ mod tests {
 
         tracker.remove(&id);
         assert_eq!(tracker.count(), 0);
+    }
+
+    #[test]
+    fn remove_records_history() {
+        let tracker = OperationTracker::new();
+        let id = tracker.register(OperationType::Rebuild, "compact ks.t");
+        tracker.update(&id, "COMPLETED", 100);
+
+        tracker.remove(&id);
+
+        let history = tracker.list_history();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert_eq!(history[0].operation_type, OperationType::Rebuild);
+        assert_eq!(history[0].status, "COMPLETED");
+        assert_eq!(history[0].progress, 100);
     }
 }

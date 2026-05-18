@@ -27,8 +27,11 @@ pub fn typed_term_to_bytes(term: &Term, target: &CqlType) -> Option<Vec<u8>> {
         Term::FunctionCall(_, _) => None,
         Term::TypeHint(_, inner) => typed_term_to_bytes(inner, target),
         Term::CollectionLiteral(elems) => collection_literal_to_bytes(elems, target),
-        Term::MapLiteral(pairs) => map_literal_to_bytes(pairs, target),
-        Term::TupleLiteral(elems) => tuple_literal_to_bytes(elems, target),
+        Term::MapLiteral(pairs) => {
+            map_literal_to_bytes(pairs, target).or_else(|| udt_map_literal_to_bytes(pairs, target))
+        }
+        Term::TupleLiteral(elems) => tuple_literal_to_bytes(elems, target)
+            .or_else(|| udt_tuple_literal_to_bytes(elems, target)),
     }
 }
 
@@ -52,7 +55,10 @@ fn typed_literal_to_bytes(lit: &Literal, target: &CqlType) -> Option<Vec<u8>> {
             BigEndian::write_i32(&mut b, *n as i32);
             Some(b)
         }
-        (Literal::Integer(n), CqlType::Bigint | CqlType::Counter | CqlType::Timestamp | CqlType::Time) => {
+        (
+            Literal::Integer(n),
+            CqlType::Bigint | CqlType::Counter | CqlType::Timestamp | CqlType::Time,
+        ) => {
             let mut b = vec![0u8; 8];
             BigEndian::write_i64(&mut b, *n);
             Some(b)
@@ -109,9 +115,7 @@ fn typed_literal_to_bytes(lit: &Literal, target: &CqlType) -> Option<Vec<u8>> {
                 None // invalid: non-ASCII in ASCII column
             }
         }
-        (Literal::String(s), CqlType::Varchar | CqlType::Blob) => {
-            Some(s.as_bytes().to_vec())
-        }
+        (Literal::String(s), CqlType::Varchar | CqlType::Blob) => Some(s.as_bytes().to_vec()),
         (Literal::String(s), _) => Some(s.as_bytes().to_vec()),
 
         // UUID
@@ -132,10 +136,27 @@ fn collection_literal_to_bytes(elems: &[Term], target: &CqlType) -> Option<Vec<u
             let mut buf = vec![0u8; 4];
             BigEndian::write_i32(&mut buf, elems.len() as i32);
             for elem in elems {
-                let bytes = typed_term_to_bytes(elem, inner).unwrap_or_default();
+                let bytes = typed_term_to_bytes(elem, inner)?;
                 let mut lb = [0u8; 4];
                 BigEndian::write_i32(&mut lb, bytes.len() as i32);
                 buf.extend_from_slice(&lb);
+                buf.extend_from_slice(&bytes);
+            }
+            Some(buf)
+        }
+        CqlType::Vector(inner, dimensions) => {
+            if elems.len() != *dimensions as usize {
+                return None;
+            }
+            let Some(element_size) = inner.fixed_size() else {
+                return None;
+            };
+            let mut buf = Vec::with_capacity(element_size * elems.len());
+            for elem in elems {
+                let bytes = typed_term_to_bytes(elem, inner)?;
+                if bytes.len() != element_size {
+                    return None;
+                }
                 buf.extend_from_slice(&bytes);
             }
             Some(buf)
@@ -149,8 +170,8 @@ fn map_literal_to_bytes(pairs: &[(Term, Term)], target: &CqlType) -> Option<Vec<
         let mut buf = vec![0u8; 4];
         BigEndian::write_i32(&mut buf, pairs.len() as i32);
         for (k, v) in pairs {
-            let kb = typed_term_to_bytes(k, key_type).unwrap_or_default();
-            let vb = typed_term_to_bytes(v, value_type).unwrap_or_default();
+            let kb = typed_term_to_bytes(k, key_type)?;
+            let vb = typed_term_to_bytes(v, value_type)?;
             let mut lb = [0u8; 4];
             BigEndian::write_i32(&mut lb, kb.len() as i32);
             buf.extend_from_slice(&lb);
@@ -167,6 +188,9 @@ fn map_literal_to_bytes(pairs: &[(Term, Term)], target: &CqlType) -> Option<Vec<
 
 fn tuple_literal_to_bytes(elems: &[Term], target: &CqlType) -> Option<Vec<u8>> {
     if let CqlType::Tuple(field_types) = target {
+        if elems.len() != field_types.len() {
+            return None;
+        }
         let mut buf = Vec::new();
         for (elem, ftype) in elems.iter().zip(field_types.iter()) {
             match typed_term_to_bytes(elem, ftype) {
@@ -187,6 +211,63 @@ fn tuple_literal_to_bytes(elems: &[Term], target: &CqlType) -> Option<Vec<u8>> {
         Some(buf)
     } else {
         None
+    }
+}
+
+fn udt_map_literal_to_bytes(pairs: &[(Term, Term)], target: &CqlType) -> Option<Vec<u8>> {
+    let CqlType::Udt {
+        field_names,
+        field_types,
+        ..
+    } = target
+    else {
+        return None;
+    };
+
+    let mut buf = Vec::new();
+    for (field_name, field_type) in field_names.iter().zip(field_types.iter()) {
+        let value = pairs.iter().find_map(|(key, value)| {
+            literal_field_name(key)
+                .filter(|name| name == field_name)
+                .map(|_| value)
+        });
+        write_udt_field(&mut buf, value, field_type);
+    }
+    Some(buf)
+}
+
+fn udt_tuple_literal_to_bytes(elems: &[Term], target: &CqlType) -> Option<Vec<u8>> {
+    let CqlType::Udt { field_types, .. } = target else {
+        return None;
+    };
+
+    let mut buf = Vec::new();
+    for (idx, field_type) in field_types.iter().enumerate() {
+        write_udt_field(&mut buf, elems.get(idx), field_type);
+    }
+    Some(buf)
+}
+
+fn literal_field_name(term: &Term) -> Option<&str> {
+    match term {
+        Term::Literal(Literal::String(name)) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn write_udt_field(buf: &mut Vec<u8>, term: Option<&Term>, field_type: &CqlType) {
+    match term.and_then(|term| typed_term_to_bytes(term, field_type)) {
+        Some(bytes) => {
+            let mut lb = [0u8; 4];
+            BigEndian::write_i32(&mut lb, bytes.len() as i32);
+            buf.extend_from_slice(&lb);
+            buf.extend_from_slice(&bytes);
+        }
+        None => {
+            let mut lb = [0u8; 4];
+            BigEndian::write_i32(&mut lb, -1i32);
+            buf.extend_from_slice(&lb);
+        }
     }
 }
 
@@ -241,8 +322,7 @@ mod tests {
 
     #[test]
     fn integer_to_bigint() {
-        let bytes =
-            typed_term_to_bytes(&Term::Literal(Literal::Integer(100)), &CqlType::Bigint);
+        let bytes = typed_term_to_bytes(&Term::Literal(Literal::Integer(100)), &CqlType::Bigint);
         assert_eq!(bytes.unwrap().len(), 8);
     }
 
@@ -273,10 +353,124 @@ mod tests {
     #[test]
     fn bind_marker_returns_none() {
         use cassandra_cql::ast::BindMarker;
-        let bytes = typed_term_to_bytes(
-            &Term::BindMarker(BindMarker::Anonymous),
-            &CqlType::Int,
-        );
+        let bytes = typed_term_to_bytes(&Term::BindMarker(BindMarker::Anonymous), &CqlType::Int);
         assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn collection_literal_rejects_unresolved_nested_terms() {
+        use cassandra_cql::ast::BindMarker;
+
+        let target = CqlType::List(Box::new(CqlType::Int), false);
+        let term = Term::CollectionLiteral(vec![
+            Term::Literal(Literal::Integer(1)),
+            Term::BindMarker(BindMarker::Anonymous),
+        ]);
+
+        assert_eq!(typed_term_to_bytes(&term, &target), None);
+    }
+
+    #[test]
+    fn map_literal_rejects_unresolved_nested_terms() {
+        use cassandra_cql::ast::BindMarker;
+
+        let target = CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false);
+        let term = Term::MapLiteral(vec![(
+            Term::Literal(Literal::String("a".to_string())),
+            Term::BindMarker(BindMarker::Anonymous),
+        )]);
+
+        assert_eq!(typed_term_to_bytes(&term, &target), None);
+    }
+
+    #[test]
+    fn tuple_literal_rejects_arity_mismatch() {
+        let target = CqlType::Tuple(vec![CqlType::Int, CqlType::Int]);
+        let too_short = Term::TupleLiteral(vec![Term::Literal(Literal::Integer(10))]);
+        let too_long = Term::TupleLiteral(vec![
+            Term::Literal(Literal::Integer(10)),
+            Term::Literal(Literal::Integer(20)),
+            Term::Literal(Literal::Integer(30)),
+        ]);
+
+        assert_eq!(typed_term_to_bytes(&too_short, &target), None);
+        assert_eq!(typed_term_to_bytes(&too_long, &target), None);
+    }
+
+    #[test]
+    fn udt_map_literal_serializes_in_field_order() {
+        let target = CqlType::Udt {
+            keyspace: "ks".to_string(),
+            name: "address".to_string(),
+            field_names: vec!["street".to_string(), "zip".to_string(), "city".to_string()],
+            field_types: vec![CqlType::Varchar, CqlType::Int, CqlType::Varchar],
+            is_multi_cell: false,
+        };
+        let term = Term::MapLiteral(vec![
+            (
+                Term::Literal(Literal::String("zip".to_string())),
+                Term::Literal(Literal::Integer(90210)),
+            ),
+            (
+                Term::Literal(Literal::String("street".to_string())),
+                Term::Literal(Literal::String("Main".to_string())),
+            ),
+        ]);
+
+        let bytes = typed_term_to_bytes(&term, &target).unwrap();
+        assert_eq!(BigEndian::read_i32(&bytes[0..4]), 4);
+        assert_eq!(&bytes[4..8], b"Main");
+        assert_eq!(BigEndian::read_i32(&bytes[8..12]), 4);
+        assert_eq!(BigEndian::read_i32(&bytes[12..16]), 90210);
+        assert_eq!(BigEndian::read_i32(&bytes[16..20]), -1);
+    }
+
+    #[test]
+    fn udt_tuple_literal_serializes_by_position() {
+        let target = CqlType::Udt {
+            keyspace: "ks".to_string(),
+            name: "point".to_string(),
+            field_names: vec!["x".to_string(), "y".to_string()],
+            field_types: vec![CqlType::Int, CqlType::Int],
+            is_multi_cell: false,
+        };
+        let term = Term::TupleLiteral(vec![
+            Term::Literal(Literal::Integer(10)),
+            Term::Literal(Literal::Integer(20)),
+        ]);
+
+        let bytes = typed_term_to_bytes(&term, &target).unwrap();
+        assert_eq!(BigEndian::read_i32(&bytes[0..4]), 4);
+        assert_eq!(BigEndian::read_i32(&bytes[4..8]), 10);
+        assert_eq!(BigEndian::read_i32(&bytes[8..12]), 4);
+        assert_eq!(BigEndian::read_i32(&bytes[12..16]), 20);
+    }
+
+    #[test]
+    fn vector_literal_serializes_as_fixed_width_elements() {
+        let target = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let term = Term::CollectionLiteral(vec![
+            Term::Literal(Literal::Float(1.0)),
+            Term::Literal(Literal::Integer(-2)),
+            Term::Literal(Literal::Float(3.25)),
+        ]);
+
+        let bytes = typed_term_to_bytes(&term, &target).unwrap();
+        let expected = [1.0_f32, -2.0, 3.25]
+            .into_iter()
+            .flat_map(f32::to_be_bytes)
+            .collect::<Vec<_>>();
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn vector_literal_rejects_wrong_dimension() {
+        let target = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let term = Term::CollectionLiteral(vec![
+            Term::Literal(Literal::Float(1.0)),
+            Term::Literal(Literal::Float(2.0)),
+        ]);
+
+        assert_eq!(typed_term_to_bytes(&term, &target), None);
     }
 }

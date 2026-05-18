@@ -13,9 +13,14 @@
 
 use cassandra_messaging::frame::Message;
 use cassandra_messaging::verb::Verb;
+use cassandra_storage::commitlog::{
+    CellMutation as StorageCellMutation, Mutation as StorageMutation,
+    MutationRow as StorageMutationRow, RangeTombstoneMarker, TombstoneMarker,
+};
+use cassandra_storage::engine::StorageEngine;
 use tracing::{debug, warn};
 
-use crate::write::CoordinatedMutation;
+use crate::write::{CoordinatedMutation, RangeTombstone};
 
 // ─── Mutation Payload ───────────────────────────────────────────
 
@@ -37,13 +42,20 @@ pub struct MutationResponse {
 
 /// Replica-side handler for `Verb::Mutation` messages.
 ///
-/// Deserializes the mutation, applies it locally (logs success),
-/// and returns a `Verb::MutationResponse`.
+/// Deserializes the mutation, applies it locally, and returns a `Verb::MutationResponse`.
 pub struct MutationVerbHandler;
 
 impl MutationVerbHandler {
-    /// Handle an incoming mutation message.
+    /// Handle an incoming mutation message when no local storage engine is configured.
     pub fn handle(msg: Message) -> Option<Message> {
+        Some(Message::failure(
+            msg.header.message_id,
+            b"Local storage engine not configured for Mutation".to_vec(),
+        ))
+    }
+
+    /// Handle an incoming mutation message using the local storage engine.
+    pub fn handle_with_storage(msg: Message, storage: &StorageEngine) -> Option<Message> {
         let request: MutationRequest = match serde_json::from_slice(&msg.payload) {
             Ok(r) => r,
             Err(e) => {
@@ -61,8 +73,14 @@ impl MutationVerbHandler {
             "Applying mutation locally"
         );
 
-        // In a full implementation, this would write to the local storage engine.
-        // For now, we log and return success.
+        let storage_mutation = to_storage_mutation(request.mutation);
+        if let Err(e) = storage.apply_mutation(&storage_mutation) {
+            return Some(Message::failure(
+                msg.header.message_id,
+                format!("Storage apply error: {e}").into_bytes(),
+            ));
+        }
+
         let response = MutationResponse { success: true };
         let payload = serde_json::to_vec(&response).unwrap_or_default();
 
@@ -74,10 +92,88 @@ impl MutationVerbHandler {
     }
 }
 
+pub(crate) fn to_storage_mutation(mutation: CoordinatedMutation) -> StorageMutation {
+    let range_tombstones = mutation
+        .rows
+        .iter()
+        .filter_map(|row| row.range_tombstone.clone().map(to_storage_range_tombstone))
+        .collect();
+
+    StorageMutation {
+        keyspace: mutation.keyspace,
+        table: mutation.table,
+        partition_key: mutation.partition_key,
+        rows: mutation
+            .rows
+            .into_iter()
+            .map(|row| {
+                let range_tombstone = row.range_tombstone;
+                StorageMutationRow {
+                    clustering_key: row.clustering_key,
+                    cells: row.cells.into_iter().map(to_storage_cell).collect(),
+                    is_tombstone: row.is_tombstone || range_tombstone.is_some(),
+                    local_deletion_time: range_tombstone
+                        .as_ref()
+                        .map(|marker| marker.local_deletion_time),
+                }
+            })
+            .collect(),
+        timestamp: mutation.timestamp,
+        cdc_enabled: false,
+        static_cells: mutation
+            .static_cells
+            .into_iter()
+            .map(to_storage_cell)
+            .collect(),
+        partition_tombstone: mutation.partition_tombstone.map(|marker| TombstoneMarker {
+            timestamp: marker.deletion_time,
+            local_deletion_time: marker.local_deletion_time,
+        }),
+        range_tombstones,
+    }
+}
+
+fn to_storage_cell(cell: crate::write::CellMutation) -> StorageCellMutation {
+    StorageCellMutation {
+        column: cell.column,
+        value: cell.value,
+        timestamp: cell.timestamp,
+        ttl: cell.ttl,
+        local_deletion_time: None,
+        is_tombstone: cell.is_tombstone,
+    }
+}
+
+fn to_storage_range_tombstone(marker: RangeTombstone) -> RangeTombstoneMarker {
+    RangeTombstoneMarker {
+        start: marker.start,
+        end: marker.end,
+        timestamp: marker.deletion_time,
+        local_deletion_time: marker.local_deletion_time,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::{CoordinatedMutation, MutationRow, CellMutation};
+    use crate::write::{CellMutation, CoordinatedMutation, MutationRow};
+    use cassandra_storage::commitlog::CommitLogConfig;
+    use cassandra_storage::engine::EngineConfig;
+    use tempfile::TempDir;
+
+    fn test_storage() -> (StorageEngine, TempDir) {
+        let temp = TempDir::new().unwrap();
+        let storage = StorageEngine::open(EngineConfig {
+            data_directories: vec![temp.path().join("data")],
+            commitlog: CommitLogConfig {
+                directory: temp.path().join("commitlog"),
+                ..CommitLogConfig::default()
+            },
+            ..EngineConfig::default()
+        })
+        .unwrap();
+        (storage, temp)
+    }
 
     fn make_mutation() -> CoordinatedMutation {
         CoordinatedMutation::simple(
@@ -113,7 +209,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_valid_mutation() {
+    fn handle_valid_mutation_without_storage_fails() {
         let request = MutationRequest {
             mutation: make_mutation(),
         };
@@ -123,11 +219,33 @@ mod tests {
         let response = MutationVerbHandler::handle(msg);
         assert!(response.is_some());
         let resp = response.unwrap();
+        assert!(resp.is_failure());
+    }
+
+    #[test]
+    fn handle_valid_mutation_applies_to_storage() {
+        let (storage, _temp) = test_storage();
+        let request = MutationRequest {
+            mutation: make_mutation(),
+        };
+        let payload = serde_json::to_vec(&request).unwrap();
+        let msg = Message::request(Verb::Mutation, 42, payload);
+
+        let response = MutationVerbHandler::handle_with_storage(msg, &storage);
+        assert!(response.is_some());
+        let resp = response.unwrap();
         assert_eq!(resp.header.verb, Verb::MutationResponse);
         assert!(resp.is_response());
 
         let resp_body: MutationResponse = serde_json::from_slice(&resp.payload).unwrap();
         assert!(resp_body.success);
+
+        let partition = storage
+            .read_partition("test_ks", "test_table", &[1, 2, 3])
+            .unwrap();
+        let row = partition.rows.get(&vec![10]).unwrap();
+        assert_eq!(row.cells[0].column, "col1");
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"value1".as_slice()));
     }
 
     #[test]

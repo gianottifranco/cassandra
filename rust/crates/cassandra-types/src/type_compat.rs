@@ -59,7 +59,10 @@ pub fn is_compatible_with(from: &CqlType, to: &CqlType) -> bool {
     }
     match (from, to) {
         // Numeric promotions (widening, same wire encoding family)
-        (CqlType::Tinyint, CqlType::Smallint | CqlType::Int | CqlType::Bigint | CqlType::Varint) => true,
+        (
+            CqlType::Tinyint,
+            CqlType::Smallint | CqlType::Int | CqlType::Bigint | CqlType::Varint,
+        ) => true,
         (CqlType::Smallint, CqlType::Int | CqlType::Bigint | CqlType::Varint) => true,
         (CqlType::Int, CqlType::Bigint | CqlType::Varint) => true,
         (CqlType::Bigint, CqlType::Varint) => true,
@@ -91,6 +94,9 @@ pub fn is_compatible_with(from: &CqlType, to: &CqlType) -> bool {
                 && is_compatible_with(from_k, to_k)
                 && is_compatible_with(from_v, to_v)
         }
+        (CqlType::Vector(from_inner, from_dims), CqlType::Vector(to_inner, to_dims)) => {
+            from_dims == to_dims && is_compatible_with(from_inner, to_inner)
+        }
 
         // Frozen/unfrozen: frozen is compatible with same frozen state
         // Reversed: unwrap and check inner
@@ -119,6 +125,9 @@ pub fn is_value_compatible_with(from: &CqlType, to: &CqlType) -> bool {
         (CqlType::Bigint, CqlType::Double) => true, // both 8 bytes
         (CqlType::Bigint, CqlType::Timestamp) => true,
         (CqlType::Timestamp, CqlType::Bigint) => true,
+        (CqlType::Vector(from_inner, from_dims), CqlType::Vector(to_inner, to_dims)) => {
+            from_dims == to_dims && is_value_compatible_with(from_inner, to_inner)
+        }
         _ => false,
     }
 }
@@ -185,6 +194,19 @@ mod tests {
         let list_bigint = CqlType::List(Box::new(CqlType::Bigint), false);
         assert!(is_compatible_with(&list_int, &list_bigint));
         assert!(!is_compatible_with(&list_bigint, &list_int));
+    }
+
+    #[test]
+    fn vector_covariance_requires_same_dimensions() {
+        let vector_int = CqlType::Vector(Box::new(CqlType::Int), 3);
+        let vector_bigint = CqlType::Vector(Box::new(CqlType::Bigint), 3);
+        let vector_bigint_4 = CqlType::Vector(Box::new(CqlType::Bigint), 4);
+        let vector_float = CqlType::Vector(Box::new(CqlType::Float), 3);
+
+        assert!(is_compatible_with(&vector_int, &vector_bigint));
+        assert!(!is_compatible_with(&vector_bigint, &vector_int));
+        assert!(!is_compatible_with(&vector_int, &vector_bigint_4));
+        assert!(is_value_compatible_with(&vector_int, &vector_float));
     }
 
     #[test]

@@ -25,16 +25,13 @@
 //! The legacy secondary index maintains an in-memory inverted index:
 //! `indexed_value → Set<(partition_key, clustering_key)>`.
 //!
-//! In production Cassandra, this is stored as a hidden table.  Here we
-//! use an in-memory BTreeMap for the initial implementation, which is
-//! sufficient for correctness testing and small-scale validation.
+//! In production Cassandra, this is stored as a hidden table. Here the
+//! query-time structure is an in-memory BTreeMap, and durability comes from
+//! rebuilding the index from base-table memtables and SSTables.
 //!
 //! ## Limitations
 //!
-//! - In-memory only (not persisted to SSTable index segments).
 //! - No bloom filter integration.
-//! - Single-term exact-match only (no range queries).
-//! - TODO: Persist index entries alongside SSTables for durability.
 
 use parking_lot::RwLock;
 use std::collections::{BTreeMap, BTreeSet};
@@ -128,13 +125,35 @@ impl SecondaryIndex for LegacyIndex {
 
     fn range_search(
         &self,
-        _start: Option<&[u8]>,
-        _end: Option<&[u8]>,
+        start: Option<&[u8]>,
+        end: Option<&[u8]>,
     ) -> Result<Vec<IndexEntry>, IndexError> {
-        // Legacy indexes don't support range queries efficiently
-        Err(IndexError::ReadFailed(
-            "Legacy index does not support range queries".to_string(),
-        ))
+        if let (Some(start), Some(end)) = (start, end) {
+            if start > end {
+                return Ok(Vec::new());
+            }
+        }
+
+        let map = self.entries.read();
+        let iter: Box<dyn Iterator<Item = (&Vec<u8>, &BTreeSet<(Vec<u8>, Vec<u8>)>)>> =
+            match (start, end) {
+                (Some(s), Some(e)) => Box::new(map.range(s.to_vec()..=e.to_vec())),
+                (Some(s), None) => Box::new(map.range(s.to_vec()..)),
+                (None, Some(e)) => Box::new(map.range(..=e.to_vec())),
+                (None, None) => Box::new(map.iter()),
+            };
+
+        let mut results = Vec::new();
+        for (term, locations) in iter {
+            for (partition_key, clustering_key) in locations {
+                results.push(IndexEntry {
+                    term: term.clone(),
+                    partition_key: partition_key.clone(),
+                    clustering_key: clustering_key.clone(),
+                });
+            }
+        }
+        Ok(results)
     }
 
     fn truncate(&self) -> Result<(), IndexError> {
@@ -241,9 +260,32 @@ mod tests {
     }
 
     #[test]
-    fn range_search_not_supported() {
+    fn range_search_inclusive_bounds() {
         let idx = test_index();
-        let result = idx.range_search(Some(b"a"), Some(b"z"));
-        assert!(result.is_err());
+        idx.insert(&entry(b"a", b"pk1", b"")).unwrap();
+        idx.insert(&entry(b"b", b"pk2", b"")).unwrap();
+        idx.insert(&entry(b"c", b"pk3", b"")).unwrap();
+
+        let results = idx.range_search(Some(b"b"), Some(b"c")).unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|entry| entry.partition_key.as_slice())
+                .collect::<Vec<_>>(),
+            vec![b"pk2".as_slice(), b"pk3".as_slice()]
+        );
+    }
+
+    #[test]
+    fn range_search_open_bounds_and_empty_reversed_range() {
+        let idx = test_index();
+        idx.insert(&entry(b"a", b"pk1", b"")).unwrap();
+        idx.insert(&entry(b"b", b"pk2", b"")).unwrap();
+        idx.insert(&entry(b"c", b"pk3", b"")).unwrap();
+
+        assert_eq!(idx.range_search(None, Some(b"b")).unwrap().len(), 2);
+        assert_eq!(idx.range_search(Some(b"b"), None).unwrap().len(), 2);
+        assert_eq!(idx.range_search(None, None).unwrap().len(), 3);
+        assert!(idx.range_search(Some(b"z"), Some(b"a")).unwrap().is_empty());
     }
 }

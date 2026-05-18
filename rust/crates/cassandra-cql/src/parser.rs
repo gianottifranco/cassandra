@@ -28,6 +28,19 @@ pub fn parse(input: &str) -> Result<Statement, ParseError> {
     Ok(stmt)
 }
 
+/// Parse a standalone CQL term.
+pub fn parse_term(input: &str) -> Result<Term, ParseError> {
+    let mut lexer = Lexer::new(input);
+    let tokens = lexer.tokenize().map_err(|e| ParseError {
+        message: e.message,
+        position: e.position,
+    })?;
+    let mut parser = Parser::new(tokens);
+    let term = parser.parse_term()?;
+    parser.expect_eof()?;
+    Ok(term)
+}
+
 struct Parser {
     tokens: Vec<Token>,
     pos: usize,
@@ -186,6 +199,160 @@ impl Parser {
         }
     }
 
+    fn parse_column_constraints(&mut self) -> Result<Vec<ColumnConstraint>, ParseError> {
+        let mut constraints = Vec::new();
+        if !self.eat_keyword(Keyword::Check) {
+            return Ok(constraints);
+        }
+
+        loop {
+            constraints.push(self.parse_column_constraint()?);
+            if !self.eat_keyword(Keyword::And) {
+                break;
+            }
+        }
+
+        Ok(constraints)
+    }
+
+    fn parse_column_constraint(&mut self) -> Result<ColumnConstraint, ParseError> {
+        if self.eat_keyword(Keyword::Not) {
+            match self.peek_kind() {
+                TokenKind::NullLiteral | TokenKind::Keyword(Keyword::Null) => {
+                    self.advance();
+                    return Ok(ColumnConstraint::NotNull);
+                }
+                _ => return Err(self.error("expected NULL after CHECK NOT".into())),
+            }
+        }
+
+        let name = self.expect_ident()?;
+        if self.eat_if(TokenKind::LParen) {
+            let args = self.parse_constraint_args()?;
+            self.expect(TokenKind::RParen)?;
+            if self.is_constraint_relation_op() {
+                let op = self.parse_constraint_relation_op()?;
+                let term = self.parse_constraint_term()?;
+                Ok(ColumnConstraint::Function {
+                    name,
+                    args,
+                    op,
+                    term,
+                })
+            } else {
+                Ok(ColumnConstraint::UnaryFunction { name, args })
+            }
+        } else if self.is_constraint_relation_op() {
+            let op = self.parse_constraint_relation_op()?;
+            let term = self.parse_constraint_term()?;
+            Ok(ColumnConstraint::Scalar {
+                column: name,
+                op,
+                term,
+            })
+        } else {
+            Ok(ColumnConstraint::UnaryFunction {
+                name,
+                args: Vec::new(),
+            })
+        }
+    }
+
+    fn parse_constraint_args(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut args = Vec::new();
+        if *self.peek_kind() == TokenKind::RParen {
+            return Ok(args);
+        }
+
+        loop {
+            args.push(self.parse_constraint_arg()?);
+            if !self.eat_if(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(args)
+    }
+
+    fn parse_constraint_arg(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::StringLiteral(s) => {
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::IntegerLiteral(i) => {
+                self.advance();
+                Ok(i.to_string())
+            }
+            TokenKind::FloatLiteral(f) => {
+                self.advance();
+                Ok(f.to_string())
+            }
+            TokenKind::BooleanLiteral(b) => {
+                self.advance();
+                Ok(b.to_string())
+            }
+            TokenKind::Ident(_) | TokenKind::QuotedIdent(_) | TokenKind::Keyword(_) => {
+                self.expect_ident()
+            }
+            other => Err(self.error(format!("expected constraint argument, got {other}"))),
+        }
+    }
+
+    fn is_constraint_relation_op(&self) -> bool {
+        matches!(
+            self.peek_kind(),
+            TokenKind::Eq
+                | TokenKind::Neq
+                | TokenKind::Lt
+                | TokenKind::Lte
+                | TokenKind::Gt
+                | TokenKind::Gte
+        )
+    }
+
+    fn parse_constraint_relation_op(&mut self) -> Result<ConstraintRelationOp, ParseError> {
+        let op = match self.peek_kind() {
+            TokenKind::Eq => ConstraintRelationOp::Eq,
+            TokenKind::Neq => ConstraintRelationOp::NotEq,
+            TokenKind::Lt => ConstraintRelationOp::Lt,
+            TokenKind::Lte => ConstraintRelationOp::Lte,
+            TokenKind::Gt => ConstraintRelationOp::Gt,
+            TokenKind::Gte => ConstraintRelationOp::Gte,
+            other => return Err(self.error(format!("expected constraint operator, got {other}"))),
+        };
+        self.advance();
+        Ok(op)
+    }
+
+    fn parse_constraint_term(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::StringLiteral(s) => {
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::IntegerLiteral(i) => {
+                self.advance();
+                Ok(i.to_string())
+            }
+            TokenKind::FloatLiteral(f) => {
+                self.advance();
+                Ok(f.to_string())
+            }
+            TokenKind::BooleanLiteral(b) => {
+                self.advance();
+                Ok(b.to_string())
+            }
+            TokenKind::NullLiteral | TokenKind::Keyword(Keyword::Null) => {
+                self.advance();
+                Ok("NULL".to_string())
+            }
+            TokenKind::Ident(_) | TokenKind::QuotedIdent(_) | TokenKind::Keyword(_) => {
+                self.expect_ident()
+            }
+            other => Err(self.error(format!("expected constraint term, got {other}"))),
+        }
+    }
+
     // ─── USE ────────────────────────────────────────────────────────────
 
     fn parse_use(&mut self) -> Result<Statement, ParseError> {
@@ -310,6 +477,7 @@ impl Parser {
                 let cql_type = self.parse_cql_type()?;
                 let is_static = self.eat_keyword(Keyword::Static);
                 let masked_with = self.parse_masked_with()?;
+                let constraints = self.parse_column_constraints()?;
                 let is_pk = self.eat_keyword(Keyword::Primary) && {
                     self.expect_keyword(Keyword::Key)?;
                     true
@@ -322,6 +490,7 @@ impl Parser {
                     cql_type,
                     is_static,
                     masked_with,
+                    constraints,
                 });
             }
 
@@ -436,20 +605,28 @@ impl Parser {
                     let cql_type = self.parse_cql_type()?;
                     let is_static = self.eat_keyword(Keyword::Static);
                     let masked_with = self.parse_masked_with()?;
+                    let constraints = self.parse_column_constraints()?;
                     AlterTableOp::AddColumn(ColumnDef {
                         name: col_name,
                         cql_type,
                         is_static,
                         masked_with,
+                        constraints,
                     })
                 } else if self.eat_keyword(Keyword::Alter) {
                     self.eat_keyword(Keyword::Column); // Optional COLUMN keyword
                     let col_name = self.expect_ident()?;
                     if self.eat_keyword(Keyword::Drop) {
-                        self.expect_keyword(Keyword::Masked)?;
-                        AlterTableOp::DropMask(col_name)
+                        if self.eat_keyword(Keyword::Masked) {
+                            AlterTableOp::DropMask(col_name)
+                        } else {
+                            self.expect_keyword(Keyword::Check)?;
+                            AlterTableOp::DropConstraints(col_name)
+                        }
                     } else if let Some((func, args)) = self.parse_masked_with()? {
                         AlterTableOp::MaskColumn(col_name, func, args)
+                    } else if *self.peek_kind() == TokenKind::Keyword(Keyword::Check) {
+                        AlterTableOp::AlterConstraints(col_name, self.parse_column_constraints()?)
                     } else if self.eat_keyword(Keyword::Type) {
                         let cql_type = self.parse_cql_type()?;
                         AlterTableOp::AlterColumn(col_name, cql_type)
@@ -540,9 +717,9 @@ impl Parser {
                     let field_type = self.parse_cql_type()?;
                     AlterTypeOp::AlterFieldType(field_name, field_type)
                 } else {
-                    return Err(self.error(
-                        "expected ADD, RENAME, or ALTER after ALTER TYPE <name>".into(),
-                    ));
+                    return Err(
+                        self.error("expected ADD, RENAME, or ALTER after ALTER TYPE <name>".into())
+                    );
                 };
                 Ok(Statement::AlterType(AlterType {
                     keyspace: ks,
@@ -571,9 +748,8 @@ impl Parser {
                     options: opts,
                 }))
             }
-            _ => Err(self.error(
-                "expected KEYSPACE, TABLE, ROLE, TYPE, or MATERIALIZED after ALTER".into(),
-            )),
+            _ => Err(self
+                .error("expected KEYSPACE, TABLE, ROLE, TYPE, or MATERIALIZED after ALTER".into())),
         }
     }
 
@@ -694,18 +870,39 @@ impl Parser {
             Vec::new()
         };
 
+        let mut group_by = Vec::new();
+        if self.eat_keyword(Keyword::Group) {
+            self.expect_keyword(Keyword::By)?;
+            loop {
+                group_by.push(self.expect_ident()?);
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+
         let mut order_by = Vec::new();
+        let mut ann_order_by = None;
         if self.eat_keyword(Keyword::Order) {
             self.expect_keyword(Keyword::By)?;
             loop {
                 let col = self.expect_ident()?;
-                let order = if self.eat_keyword(Keyword::Desc) {
-                    ClusteringOrder::Desc
+                if self.eat_ident_ci("ANN") {
+                    self.expect_keyword(Keyword::Of)?;
+                    let vector_literal = self.parse_ann_vector_literal()?;
+                    ann_order_by = Some(SelectAnnOrder {
+                        column: col,
+                        vector_literal,
+                    });
                 } else {
-                    self.eat_keyword(Keyword::Asc);
-                    ClusteringOrder::Asc
-                };
-                order_by.push((col, order));
+                    let order = if self.eat_keyword(Keyword::Desc) {
+                        ClusteringOrder::Desc
+                    } else {
+                        self.eat_keyword(Keyword::Asc);
+                        ClusteringOrder::Asc
+                    };
+                    order_by.push((col, order));
+                }
                 if !self.eat_if(TokenKind::Comma) {
                     break;
                 }
@@ -737,7 +934,9 @@ impl Parser {
             keyspace: ks,
             table,
             where_clause,
+            group_by,
             order_by,
+            ann_order_by,
             limit,
             per_partition_limit,
             allow_filtering,
@@ -856,11 +1055,19 @@ impl Parser {
         let mut assignments = Vec::new();
         loop {
             let col = self.expect_ident()?;
-            self.expect(TokenKind::Eq)?;
-            let val = self.parse_term()?;
+            let (op, val) = if self.eat_if(TokenKind::LBracket) {
+                let key = self.parse_term()?;
+                self.expect(TokenKind::RBracket)?;
+                self.expect(TokenKind::Eq)?;
+                (AssignmentOp::MapPut { key }, self.parse_term()?)
+            } else {
+                self.expect(TokenKind::Eq)?;
+                self.parse_assignment_value(&col)?
+            };
             assignments.push(Assignment {
                 column: col,
                 value: val,
+                op,
             });
             if !self.eat_if(TokenKind::Comma) {
                 break;
@@ -971,7 +1178,7 @@ impl Parser {
                     _ => {
                         return Err(self.error(
                             "Only INSERT, UPDATE, DELETE allowed in transactions".to_string(),
-                        ))
+                        ));
                     }
                 }
                 self.eat_if(TokenKind::Semicolon);
@@ -1076,7 +1283,22 @@ impl Parser {
     fn parse_where_clause(&mut self) -> Result<Vec<Relation>, ParseError> {
         let mut relations = Vec::new();
         loop {
-            let col = self.expect_ident()?;
+            let col = if self.eat_if(TokenKind::LParen) {
+                let columns = self.parse_ident_list()?;
+                self.expect(TokenKind::RParen)?;
+                format!("({})", columns.join(","))
+            } else {
+                let ident = self.expect_ident()?;
+                if ident.eq_ignore_ascii_case("token") && self.eat_if(TokenKind::LParen) {
+                    if *self.peek_kind() != TokenKind::RParen {
+                        self.parse_ident_list()?;
+                    }
+                    self.expect(TokenKind::RParen)?;
+                    "token".to_string()
+                } else {
+                    ident
+                }
+            };
             let op = self.parse_relation_op()?;
             let value = self.parse_term()?;
             relations.push(Relation {
@@ -1089,6 +1311,35 @@ impl Parser {
             }
         }
         Ok(relations)
+    }
+
+    fn parse_assignment_value(&mut self, column: &str) -> Result<(AssignmentOp, Term), ParseError> {
+        let left = self.parse_term()?;
+        if self.eat_if(TokenKind::Plus) {
+            let right = self.parse_term()?;
+            if is_column_reference(&left, column) {
+                Ok((AssignmentOp::CollectionAppend, right))
+            } else if is_column_reference(&right, column) {
+                Ok((AssignmentOp::CollectionPrepend, left))
+            } else {
+                Err(self.error(format!(
+                    "collection append/prepend for '{}' must reference the assigned column",
+                    column
+                )))
+            }
+        } else if self.eat_if(TokenKind::Minus) {
+            let right = self.parse_term()?;
+            if is_column_reference(&left, column) {
+                Ok((AssignmentOp::CollectionRemove, right))
+            } else {
+                Err(self.error(format!(
+                    "collection removal for '{}' must reference the assigned column",
+                    column
+                )))
+            }
+        } else {
+            Ok((AssignmentOp::Set, left))
+        }
     }
 
     fn parse_relation_op(&mut self) -> Result<RelationOp, ParseError> {
@@ -1129,11 +1380,64 @@ impl Parser {
                     Ok(RelationOp::Contains)
                 }
             }
+            TokenKind::Keyword(Keyword::Like) => {
+                self.advance();
+                Ok(RelationOp::Like)
+            }
             _ => Err(self.error(format!(
                 "expected comparison operator, got {}",
                 self.peek_kind()
             ))),
         }
+    }
+
+    fn eat_ident_ci(&mut self, expected: &str) -> bool {
+        match self.peek_kind() {
+            TokenKind::Ident(actual) if actual.eq_ignore_ascii_case(expected) => {
+                self.advance();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn parse_ann_vector_literal(&mut self) -> Result<Vec<f32>, ParseError> {
+        self.expect(TokenKind::LBracket)?;
+        let mut values = Vec::new();
+        if *self.peek_kind() != TokenKind::RBracket {
+            loop {
+                values.push(self.parse_f32_literal()?);
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBracket)?;
+        if values.is_empty() {
+            return Err(self.error("ANN vector literal requires at least one value".into()));
+        }
+        Ok(values)
+    }
+
+    fn parse_f32_literal(&mut self) -> Result<f32, ParseError> {
+        let negative = self.eat_if(TokenKind::Minus);
+        let value = match self.peek_kind().clone() {
+            TokenKind::IntegerLiteral(value) => {
+                self.advance();
+                value as f32
+            }
+            TokenKind::FloatLiteral(value) => {
+                self.advance();
+                value as f32
+            }
+            other => {
+                return Err(self.error(format!(
+                    "expected numeric vector literal value, got {}",
+                    other
+                )));
+            }
+        };
+        Ok(if negative { -value } else { value })
     }
 
     fn parse_term(&mut self) -> Result<Term, ParseError> {
@@ -1208,20 +1512,30 @@ impl Parser {
             }
             TokenKind::LBrace => {
                 self.advance();
-                let mut entries = Vec::new();
-                if *self.peek_kind() != TokenKind::RBrace {
-                    loop {
+                if *self.peek_kind() == TokenKind::RBrace {
+                    self.expect(TokenKind::RBrace)?;
+                    return Ok(Term::MapLiteral(Vec::new()));
+                }
+
+                let first = self.parse_term()?;
+                if self.eat_if(TokenKind::Colon) {
+                    let mut entries = vec![(first, self.parse_term()?)];
+                    while self.eat_if(TokenKind::Comma) {
                         let key = self.parse_term()?;
                         self.expect(TokenKind::Colon)?;
                         let val = self.parse_term()?;
                         entries.push((key, val));
-                        if !self.eat_if(TokenKind::Comma) {
-                            break;
-                        }
                     }
+                    self.expect(TokenKind::RBrace)?;
+                    return Ok(Term::MapLiteral(entries));
+                }
+
+                let mut items = vec![first];
+                while self.eat_if(TokenKind::Comma) {
+                    items.push(self.parse_term()?);
                 }
                 self.expect(TokenKind::RBrace)?;
-                Ok(Term::MapLiteral(entries))
+                Ok(Term::CollectionLiteral(items))
             }
             TokenKind::Ident(name) => {
                 let name = name.clone();
@@ -1292,7 +1606,42 @@ impl Parser {
             return Ok(CqlTypeName::Map(Box::new(key_type), Box::new(val_type)));
         }
 
-        // GAP(gap_guard_cql_functions): tuple type parsing — tracked in gap_guards.rs
+        if self.eat_keyword(Keyword::Tuple) {
+            self.expect(TokenKind::Lt)?;
+            if *self.peek_kind() == TokenKind::Gt {
+                return Err(self.error("tuple type requires at least one field".into()));
+            }
+
+            let mut field_types = Vec::new();
+            loop {
+                field_types.push(self.parse_cql_type()?);
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Gt)?;
+            return Ok(CqlTypeName::Tuple(field_types));
+        }
+
+        if self.eat_keyword(Keyword::Vector) {
+            self.expect(TokenKind::Lt)?;
+            let inner = self.parse_cql_type()?;
+            self.expect(TokenKind::Comma)?;
+            let dimensions = match self.peek_kind() {
+                TokenKind::IntegerLiteral(value) if *value > 0 => {
+                    let dimensions = u32::try_from(*value)
+                        .map_err(|_| self.error("vector dimension is too large".into()))?;
+                    self.advance();
+                    dimensions
+                }
+                TokenKind::IntegerLiteral(_) => {
+                    return Err(self.error("vector dimension must be greater than zero".into()));
+                }
+                _ => return Err(self.error("expected positive vector dimension".into())),
+            };
+            self.expect(TokenKind::Gt)?;
+            return Ok(CqlTypeName::Vector(Box::new(inner), dimensions));
+        }
 
         let name = self.expect_ident()?;
         Ok(CqlTypeName::Simple(name))
@@ -1352,7 +1701,8 @@ impl Parser {
             }
             TokenKind::LBrace => {
                 let map = self.parse_map_literal_strings()?;
-                Ok(format!("{:?}", map))
+                serde_json::to_string(&map)
+                    .map_err(|err| self.error(format!("invalid option map: {err}")))
             }
             _ => Err(self.error(format!("expected option value, got {}", self.peek_kind()))),
         }
@@ -1402,6 +1752,16 @@ impl Parser {
         } else {
             None
         };
+        let options = if self.eat_keyword(Keyword::With) {
+            let options_kw = self.expect_ident()?;
+            if !options_kw.eq_ignore_ascii_case("options") {
+                return Err(self.error("expected OPTIONS after WITH in CREATE INDEX".into()));
+            }
+            self.expect(TokenKind::Eq)?;
+            self.parse_map_literal_strings()?
+        } else {
+            HashMap::new()
+        };
         Ok(Statement::CreateIndex(CreateIndex {
             name,
             if_not_exists,
@@ -1410,7 +1770,7 @@ impl Parser {
             column,
             index_target: None,
             custom_class,
-            options: HashMap::new(),
+            options,
         }))
     }
 
@@ -1674,10 +2034,7 @@ impl Parser {
         let permissions = self.parse_permission_list()?;
         self.expect_keyword(Keyword::On)?;
         let resource = self.parse_resource()?;
-        let from = self.expect_ident()?;
-        if from != "from" {
-            return Err(self.error(format!("expected FROM, got {}", from)));
-        }
+        self.expect_keyword(Keyword::From)?;
         let role = self.expect_ident()?;
         Ok(Statement::Revoke(RevokeStatement {
             permissions,
@@ -1893,6 +2250,10 @@ fn is_unreserved_keyword(kw: Keyword) -> bool {
     )
 }
 
+fn is_column_reference(term: &Term, column: &str) -> bool {
+    matches!(term, Term::Literal(Literal::String(name)) if name.eq_ignore_ascii_case(column))
+}
+
 /// Parser error.
 #[derive(Debug, Clone)]
 pub struct ParseError {
@@ -2016,10 +2377,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_select_with_like() {
+        let stmt = parse("SELECT * FROM users WHERE name LIKE 'Al%' ALLOW FILTERING").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.where_clause.len(), 1);
+                assert_eq!(s.where_clause[0].column, "name");
+                assert_eq!(s.where_clause[0].op, RelationOp::Like);
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
     fn parse_select_with_limit() {
         let stmt = parse("SELECT * FROM t LIMIT 10").unwrap();
         match stmt {
             Statement::Select(s) => assert!(s.limit.is_some()),
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn parse_select_with_group_by() {
+        let stmt = parse("SELECT id, count(*) FROM events GROUP BY id").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.group_by, vec!["id"]);
+                assert!(matches!(s.columns, SelectColumns::Named(_)));
+            }
             _ => panic!("expected Select"),
         }
     }
@@ -2043,6 +2429,39 @@ mod tests {
             Statement::Update(u) => {
                 assert_eq!(u.assignments.len(), 1);
                 assert_eq!(u.assignments[0].column, "name");
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn parse_set_literal_as_collection_literal() {
+        let stmt = parse("UPDATE t SET tags = tags - {'old', 'stale'} WHERE id = 1").unwrap();
+        match stmt {
+            Statement::Update(u) => {
+                assert_eq!(u.assignments[0].op, AssignmentOp::CollectionRemove);
+                assert_eq!(
+                    u.assignments[0].value,
+                    Term::CollectionLiteral(vec![
+                        Term::Literal(Literal::String("old".to_string())),
+                        Term::Literal(Literal::String("stale".to_string())),
+                    ])
+                );
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn parse_map_literal_after_set_literal_support() {
+        let stmt =
+            parse("UPDATE t SET attrs = {'region': 'eu', 'tier': 'gold'} WHERE id = 1").unwrap();
+        match stmt {
+            Statement::Update(u) => {
+                assert_eq!(u.assignments[0].op, AssignmentOp::Set);
+                assert!(
+                    matches!(u.assignments[0].value, Term::MapLiteral(ref entries) if entries.len() == 2)
+                );
             }
             _ => panic!("expected Update"),
         }
@@ -2143,7 +2562,7 @@ mod tests {
     #[test]
     fn parse_create_table_with_options() {
         let stmt = parse(
-            "CREATE TABLE t (id int PRIMARY KEY) WITH gc_grace_seconds = 86400 AND comment = 'test'"
+            "CREATE TABLE t (id int PRIMARY KEY) WITH gc_grace_seconds = 86400 AND comment = 'test' AND compression = {'class': 'LZ4Compressor', 'chunk_length_in_kb': 64}"
         ).unwrap();
         match stmt {
             Statement::CreateTable(ct) => {
@@ -2152,9 +2571,97 @@ mod tests {
                     Some(&"86400".to_string())
                 );
                 assert_eq!(ct.options.get("comment"), Some(&"test".to_string()));
+                assert_eq!(
+                    serde_json::from_str::<std::collections::BTreeMap<String, String>>(
+                        ct.options.get("compression").unwrap()
+                    )
+                    .unwrap()
+                    .get("chunk_length_in_kb")
+                    .map(String::as_str),
+                    Some("64")
+                );
             }
             _ => panic!("expected CreateTable"),
         }
+    }
+
+    #[test]
+    fn parse_create_table_with_tuple_types() {
+        let stmt = parse(
+            "CREATE TABLE ks.t (
+                id int PRIMARY KEY,
+                point tuple<double, double>,
+                frozen_point frozen<tuple<int, text>>,
+                attrs map<text, tuple<int, text>>
+            )",
+        )
+        .unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                let point = ct.columns.iter().find(|col| col.name == "point").unwrap();
+                assert_eq!(
+                    point.cql_type,
+                    CqlTypeName::Tuple(vec![
+                        CqlTypeName::Simple("double".to_string()),
+                        CqlTypeName::Simple("double".to_string())
+                    ])
+                );
+
+                let frozen_point = ct
+                    .columns
+                    .iter()
+                    .find(|col| col.name == "frozen_point")
+                    .unwrap();
+                assert_eq!(
+                    frozen_point.cql_type,
+                    CqlTypeName::Frozen(Box::new(CqlTypeName::Tuple(vec![
+                        CqlTypeName::Simple("int".to_string()),
+                        CqlTypeName::Simple("text".to_string())
+                    ])))
+                );
+
+                let attrs = ct.columns.iter().find(|col| col.name == "attrs").unwrap();
+                assert_eq!(
+                    attrs.cql_type,
+                    CqlTypeName::Map(
+                        Box::new(CqlTypeName::Simple("text".to_string())),
+                        Box::new(CqlTypeName::Tuple(vec![
+                            CqlTypeName::Simple("int".to_string()),
+                            CqlTypeName::Simple("text".to_string())
+                        ]))
+                    )
+                );
+            }
+            _ => panic!("expected CreateTable"),
+        }
+    }
+
+    #[test]
+    fn parse_create_table_with_vector_type() {
+        let stmt = parse("CREATE TABLE ks.items (id int PRIMARY KEY, embedding vector<float, 3>)")
+            .unwrap();
+        match stmt {
+            Statement::CreateTable(ct) => {
+                let embedding = ct
+                    .columns
+                    .iter()
+                    .find(|col| col.name == "embedding")
+                    .unwrap();
+                assert_eq!(
+                    embedding.cql_type,
+                    CqlTypeName::Vector(Box::new(CqlTypeName::Simple("float".to_string())), 3)
+                );
+            }
+            _ => panic!("expected CreateTable"),
+        }
+    }
+
+    #[test]
+    fn parse_vector_type_rejects_bad_dimension() {
+        assert!(
+            parse("CREATE TABLE ks.items (id int PRIMARY KEY, embedding vector<float, 0>)")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2164,6 +2671,23 @@ mod tests {
             Statement::Select(s) => {
                 assert_eq!(s.order_by.len(), 1);
                 assert_eq!(s.order_by[0].1, ClusteringOrder::Desc);
+                assert!(s.ann_order_by.is_none());
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
+    fn parse_select_with_ann_order_by() {
+        let stmt =
+            parse("SELECT * FROM ks.items ORDER BY embedding ANN OF [1.0, -2, 3] LIMIT 5").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert!(s.order_by.is_empty());
+                assert_eq!(s.limit, Some(Term::Literal(Literal::Integer(5))));
+                let ann = s.ann_order_by.unwrap();
+                assert_eq!(ann.column, "embedding");
+                assert_eq!(ann.vector_literal, vec![1.0, -2.0, 3.0]);
             }
             _ => panic!("expected Select"),
         }
@@ -2179,6 +2703,29 @@ mod tests {
                 assert_eq!(ci.name, Some("idx_name".into()));
                 assert_eq!(ci.table, "t");
                 assert_eq!(ci.column, "col");
+            }
+            _ => panic!("expected CreateIndex"),
+        }
+    }
+
+    #[test]
+    fn parse_create_custom_index_with_options() {
+        let stmt = parse(
+            "CREATE CUSTOM INDEX embedding_idx ON ks.items (embedding) USING 'org.apache.cassandra.index.sai.StorageAttachedIndex' WITH OPTIONS = {'vector_similarity_metric': 'dot_product'}",
+        )
+        .unwrap();
+        match stmt {
+            Statement::CreateIndex(ci) => {
+                assert_eq!(
+                    ci.custom_class.as_deref(),
+                    Some("org.apache.cassandra.index.sai.StorageAttachedIndex")
+                );
+                assert_eq!(
+                    ci.options
+                        .get("vector_similarity_metric")
+                        .map(String::as_str),
+                    Some("dot_product")
+                );
             }
             _ => panic!("expected CreateIndex"),
         }

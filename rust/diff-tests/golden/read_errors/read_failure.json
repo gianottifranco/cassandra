@@ -1,0 +1,15 @@
+{
+  "error_code": "0x1300",
+  "error_name": "READ_FAILURE",
+  "description": "Read request failed on one or more replicas",
+  "fields": {
+    "cl": "ALL",
+    "required": 3,
+    "received": 2,
+    "block_for": 3,
+    "num_failures": 1,
+    "data_present": true
+  },
+  "java_class": "org.apache.cassandra.exceptions.ReadFailureException",
+  "protocol_version": 4
+}

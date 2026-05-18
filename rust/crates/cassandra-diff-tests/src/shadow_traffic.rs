@@ -32,6 +32,9 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
+use cassandra_cql::ast::Statement;
+use cassandra_cql::parser::parse;
+
 /// A single FQL entry representing a captured query from the Java cluster.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FqlEntry {
@@ -100,6 +103,30 @@ pub struct ShadowReport {
     pub divergences: Vec<ReplayResult>,
 }
 
+/// Executor used by shadow replay.
+pub trait ShadowQueryExecutor {
+    /// Execute a captured FQL entry.
+    ///
+    /// `Ok(Some(result))` means the entry was executed and can be compared
+    /// with the Java baseline. `Ok(None)` means the executor parsed/accepted
+    /// the entry but does not provide a result for that statement class.
+    fn execute(&self, entry: &FqlEntry) -> Result<Option<ExpectedResult>, String>;
+}
+
+/// Parser-backed executor used when no live storage/query engine is supplied.
+pub struct ParserOnlyExecutor;
+
+impl ShadowQueryExecutor for ParserOnlyExecutor {
+    fn execute(&self, entry: &FqlEntry) -> Result<Option<ExpectedResult>, String> {
+        let statement = parse(&entry.query).map_err(|err| err.to_string())?;
+        if statement_returns_void(&statement) {
+            Ok(Some(ExpectedResult::Void))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
 /// Load FQL entries from a JSON file.
 ///
 /// The file should contain a JSON array of `FqlEntry` objects.
@@ -109,27 +136,32 @@ pub fn load_fql_entries(path: &Path) -> Result<Vec<FqlEntry>, String> {
     serde_json::from_str(&content).map_err(|e| format!("Failed to parse FQL JSON: {}", e))
 }
 
-/// Run a shadow traffic replay session.
-///
-/// Currently a framework that validates the replay pipeline without
-/// requiring a live Rust server. The actual engine integration happens
-/// when the query executor is wired to the protocol layer.
+/// Run a shadow traffic replay session using the parser-backed executor.
 pub fn replay_session(entries: &[FqlEntry]) -> ShadowReport {
+    replay_session_with_executor(entries, &ParserOnlyExecutor)
+}
+
+/// Run a shadow traffic replay session with an explicit query executor.
+pub fn replay_session_with_executor<E: ShadowQueryExecutor>(
+    entries: &[FqlEntry],
+    executor: &E,
+) -> ShadowReport {
     let mut results = Vec::with_capacity(entries.len());
     let mut latencies = Vec::with_capacity(entries.len());
 
     for (idx, entry) in entries.iter().enumerate() {
         let start = std::time::Instant::now();
 
-        // GAP(gap_guard_nodetool_commands): Wire to QueryExecutor when protocol layer is connected — tracked in gap_guards.rs
-        // For now, we validate the replay framework itself.
-        let status = match &entry.expected_result {
-            None => ReplayStatus::NoBaseline,
-            Some(_expected) => {
-                // Stub: in a real replay, we'd execute the query against the
-                // Rust engine and compare the result.
-                ReplayStatus::NoBaseline
+        let status = match (executor.execute(entry), &entry.expected_result) {
+            (Err(error), _) => ReplayStatus::ReplayError { error },
+            (Ok(_), None) => ReplayStatus::NoBaseline,
+            (Ok(Some(actual)), Some(expected)) if expected_results_match(&actual, expected) => {
+                ReplayStatus::Match
             }
+            (Ok(Some(actual)), Some(expected)) => ReplayStatus::Divergence {
+                detail: format!("expected {expected:?}, got {actual:?}"),
+            },
+            (Ok(None), Some(_)) => ReplayStatus::NoBaseline,
         };
 
         let latency_us = start.elapsed().as_micros() as u64;
@@ -190,6 +222,66 @@ pub fn replay_session(entries: &[FqlEntry]) -> ShadowReport {
         p99_latency_us,
         divergences,
     }
+}
+
+fn expected_results_match(actual: &ExpectedResult, expected: &ExpectedResult) -> bool {
+    match (actual, expected) {
+        (ExpectedResult::Void, ExpectedResult::Void) => true,
+        (
+            ExpectedResult::Rows {
+                columns: actual_columns,
+                rows: actual_rows,
+            },
+            ExpectedResult::Rows {
+                columns: expected_columns,
+                rows: expected_rows,
+            },
+        ) => actual_columns == expected_columns && actual_rows == expected_rows,
+        (
+            ExpectedResult::Error {
+                code: actual_code,
+                message: actual_message,
+            },
+            ExpectedResult::Error {
+                code: expected_code,
+                message: expected_message,
+            },
+        ) => actual_code == expected_code && actual_message == expected_message,
+        _ => false,
+    }
+}
+
+fn statement_returns_void(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Insert(_)
+            | Statement::Update(_)
+            | Statement::Delete(_)
+            | Statement::Batch(_)
+            | Statement::Truncate(_)
+            | Statement::Use(_)
+            | Statement::CreateKeyspace(_)
+            | Statement::AlterKeyspace(_)
+            | Statement::DropKeyspace(_)
+            | Statement::CreateTable(_)
+            | Statement::AlterTable(_)
+            | Statement::DropTable(_)
+            | Statement::CreateIndex(_)
+            | Statement::DropIndex(_)
+            | Statement::CreateMaterializedView(_)
+            | Statement::DropMaterializedView(_)
+            | Statement::CreateType(_)
+            | Statement::AlterType(_)
+            | Statement::DropType(_)
+            | Statement::CreateFunction(_)
+            | Statement::DropFunction(_)
+            | Statement::CreateAggregate(_)
+            | Statement::DropAggregate(_)
+            | Statement::CreateTrigger(_)
+            | Statement::DropTrigger(_)
+            | Statement::AlterMaterializedView(_)
+            | Statement::Transaction(_)
+    )
 }
 
 #[cfg(test)]
@@ -259,8 +351,29 @@ mod tests {
 
         let report = replay_session(&entries);
         assert_eq!(report.total_entries, 2);
-        assert_eq!(report.no_baseline, 2); // Stub implementation
+        assert_eq!(report.matched, 1);
+        assert_eq!(report.no_baseline, 1);
         assert_eq!(report.diverged, 0);
+    }
+
+    #[test]
+    fn replay_reports_parse_errors() {
+        let entries = vec![FqlEntry {
+            timestamp: 1,
+            query: "not valid cql".to_string(),
+            keyspace: Some("ks".to_string()),
+            consistency: "ONE".to_string(),
+            expected_result: Some(ExpectedResult::Void),
+        }];
+
+        let report = replay_session(&entries);
+
+        assert_eq!(report.total_entries, 1);
+        assert_eq!(report.errors, 1);
+        assert!(matches!(
+            report.divergences.first().map(|r| &r.status),
+            None
+        ));
     }
 
     #[test]
@@ -296,8 +409,7 @@ mod tests {
 
         let report = replay_session(&entries);
         assert_eq!(report.total_entries, 100);
-        // p99 should be defined (not zero, unless all queries are instant)
-        // The stub runs so fast p99 could be 0, but the field should be populated
+        // p99 should be defined even when parser-only replay is effectively instant.
         assert!(report.p99_latency_us <= 1_000_000); // sanity bound
     }
 }

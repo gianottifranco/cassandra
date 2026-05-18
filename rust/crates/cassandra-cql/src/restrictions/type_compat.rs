@@ -29,6 +29,13 @@ pub fn validate_operator_type_compat(
                 ));
             }
         }
+        RelationOp::Like => {
+            if !matches!(column_type, CqlType::Ascii | CqlType::Varchar) {
+                return Err(RestrictionError::IncompatibleOperator(
+                    "LIKE is only supported on text columns".into(),
+                ));
+            }
+        }
         RelationOp::Lt | RelationOp::Gt | RelationOp::Lte | RelationOp::Gte => {
             if !is_comparable(column_type) {
                 return Err(RestrictionError::IncompatibleOperator(format!(
@@ -107,37 +114,52 @@ mod tests {
     fn eq_always_valid() {
         assert!(validate_operator_type_compat(&CqlType::Int, RelationOp::Eq).is_ok());
         assert!(validate_operator_type_compat(&CqlType::Blob, RelationOp::Eq).is_ok());
-        assert!(validate_operator_type_compat(
-            &CqlType::List(Box::new(CqlType::Int), false),
-            RelationOp::Eq
-        )
-        .is_ok());
+        assert!(
+            validate_operator_type_compat(
+                &CqlType::List(Box::new(CqlType::Int), false),
+                RelationOp::Eq
+            )
+            .is_ok()
+        );
     }
 
     #[test]
     fn contains_requires_collection() {
-        assert!(validate_operator_type_compat(
-            &CqlType::List(Box::new(CqlType::Int), false),
-            RelationOp::Contains
-        )
-        .is_ok());
+        assert!(
+            validate_operator_type_compat(
+                &CqlType::List(Box::new(CqlType::Int), false),
+                RelationOp::Contains
+            )
+            .is_ok()
+        );
 
         assert!(validate_operator_type_compat(&CqlType::Int, RelationOp::Contains).is_err());
     }
 
     #[test]
     fn contains_key_requires_map() {
-        assert!(validate_operator_type_compat(
-            &CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
-            RelationOp::ContainsKey
-        )
-        .is_ok());
+        assert!(
+            validate_operator_type_compat(
+                &CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
+                RelationOp::ContainsKey
+            )
+            .is_ok()
+        );
 
-        assert!(validate_operator_type_compat(
-            &CqlType::List(Box::new(CqlType::Int), false),
-            RelationOp::ContainsKey
-        )
-        .is_err());
+        assert!(
+            validate_operator_type_compat(
+                &CqlType::List(Box::new(CqlType::Int), false),
+                RelationOp::ContainsKey
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn like_requires_text() {
+        assert!(validate_operator_type_compat(&CqlType::Varchar, RelationOp::Like).is_ok());
+        assert!(validate_operator_type_compat(&CqlType::Ascii, RelationOp::Like).is_ok());
+        assert!(validate_operator_type_compat(&CqlType::Int, RelationOp::Like).is_err());
     }
 
     #[test]
@@ -146,10 +168,12 @@ mod tests {
         assert!(validate_operator_type_compat(&CqlType::Varchar, RelationOp::Lt).is_ok());
 
         // Collections are not comparable
-        assert!(validate_operator_type_compat(
-            &CqlType::List(Box::new(CqlType::Int), false),
-            RelationOp::Gt
-        )
-        .is_err());
+        assert!(
+            validate_operator_type_compat(
+                &CqlType::List(Box::new(CqlType::Int), false),
+                RelationOp::Gt
+            )
+            .is_err()
+        );
     }
 }

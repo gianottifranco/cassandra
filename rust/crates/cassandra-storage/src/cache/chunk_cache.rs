@@ -10,8 +10,8 @@
 //! the chunk cache enforces a **byte budget** — evicting LRU entries
 //! until the total cached bytes fit within `max_size_bytes`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 use parking_lot::Mutex;

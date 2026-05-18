@@ -49,7 +49,9 @@ impl CommandStore {
 
     /// Transition a command to Accepted status.
     pub fn accept(&self, txn_id: TxnId, execute_at: Timestamp) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status != CommandStatus::PreAccepted {
@@ -65,12 +67,56 @@ impl CommandStore {
         Ok(())
     }
 
+    /// Resolve conflicts against overlapping in-flight commands, then accept.
+    ///
+    /// A conflicting transaction must execute strictly after the highest
+    /// timestamp already accepted or committed for the same key set.
+    pub fn accept_resolving_conflicts(
+        &self,
+        txn_id: TxnId,
+        proposed_execute_at: Timestamp,
+    ) -> AccordResult<Timestamp> {
+        let current = self
+            .commands
+            .get(&txn_id)
+            .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?
+            .clone();
+        if current.status != CommandStatus::PreAccepted {
+            return Err(AccordError::InvalidTransition {
+                from: current.status,
+                to: CommandStatus::Accepted,
+            });
+        }
+
+        let mut resolved = proposed_execute_at;
+        for other in self.commands.iter() {
+            if *other.key() == txn_id || !current.txn.keys.intersects(&other.txn.keys) {
+                continue;
+            }
+            if matches!(
+                other.status,
+                CommandStatus::PreAccepted | CommandStatus::Accepted | CommandStatus::Committed
+            ) && other.execute_at >= resolved
+            {
+                resolved = Timestamp(other.execute_at.0 + 1);
+            }
+        }
+
+        self.accept(txn_id, resolved)?;
+        Ok(resolved)
+    }
+
     /// Transition a command to Committed status.
     pub fn commit(&self, txn_id: TxnId, execute_at: Timestamp) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
-        if !matches!(entry.status, CommandStatus::PreAccepted | CommandStatus::Accepted) {
+        if !matches!(
+            entry.status,
+            CommandStatus::PreAccepted | CommandStatus::Accepted
+        ) {
             return Err(AccordError::InvalidTransition {
                 from: entry.status,
                 to: CommandStatus::Committed,
@@ -85,7 +131,9 @@ impl CommandStore {
 
     /// Transition a command to Applied status.
     pub fn apply(&self, txn_id: TxnId) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status != CommandStatus::Committed {
@@ -102,7 +150,9 @@ impl CommandStore {
 
     /// Invalidate a transaction.
     pub fn invalidate(&self, txn_id: TxnId) -> AccordResult<()> {
-        let mut entry = self.commands.get_mut(&txn_id)
+        let mut entry = self
+            .commands
+            .get_mut(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status.is_terminal() {
@@ -229,7 +279,48 @@ mod tests {
     fn len_tracks_commands() {
         let store = CommandStore::new();
         assert!(store.is_empty());
-        store.pre_accept(test_txn_id(), test_txn(), Timestamp(100)).unwrap();
+        store
+            .pre_accept(test_txn_id(), test_txn(), Timestamp(100))
+            .unwrap();
         assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn accept_resolving_conflicts_bumps_timestamp_for_overlapping_keys() {
+        let store = CommandStore::new();
+        let first = TxnId::with_timestamp(100, uuid::Uuid::nil(), 0);
+        let second = TxnId::with_timestamp(101, uuid::Uuid::nil(), 0);
+
+        store.pre_accept(first, test_txn(), Timestamp(100)).unwrap();
+        store.accept(first, Timestamp(150)).unwrap();
+        store
+            .pre_accept(second, test_txn(), Timestamp(101))
+            .unwrap();
+
+        let resolved = store
+            .accept_resolving_conflicts(second, Timestamp(120))
+            .unwrap();
+
+        assert_eq!(resolved, Timestamp(151));
+        assert_eq!(store.get(&second).unwrap().execute_at, Timestamp(151));
+    }
+
+    #[test]
+    fn accept_resolving_conflicts_preserves_timestamp_for_disjoint_keys() {
+        let store = CommandStore::new();
+        let first = TxnId::with_timestamp(100, uuid::Uuid::nil(), 0);
+        let second = TxnId::with_timestamp(101, uuid::Uuid::nil(), 0);
+        let mut other = test_txn();
+        other.keys = Keys::single(b"key2".to_vec());
+
+        store.pre_accept(first, test_txn(), Timestamp(100)).unwrap();
+        store.accept(first, Timestamp(150)).unwrap();
+        store.pre_accept(second, other, Timestamp(101)).unwrap();
+
+        let resolved = store
+            .accept_resolving_conflicts(second, Timestamp(120))
+            .unwrap();
+
+        assert_eq!(resolved, Timestamp(120));
     }
 }

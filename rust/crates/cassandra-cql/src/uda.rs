@@ -27,6 +27,8 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use cassandra_schema::canonical_cql_type_name;
+
 use crate::udf::{UdfExecutor, UdfValue};
 
 /// Metadata for a registered UDA.
@@ -36,6 +38,7 @@ pub struct UdaMetadata {
     pub name: String,
     pub arg_types: Vec<String>,
     pub state_type: String,
+    pub return_type: String,
     pub sfunc_name: String,
     pub finalfunc_name: Option<String>,
     pub initcond: Option<String>,
@@ -95,7 +98,11 @@ impl UdaRegistry {
     }
 
     fn make_key(keyspace: &str, name: &str, arg_types: &[String]) -> String {
-        format!("{}.{}({})", keyspace, name, arg_types.join(","))
+        let args_sig = arg_types
+            .iter()
+            .map(|arg_type| canonical_cql_type_name(arg_type))
+            .collect::<Vec<_>>();
+        format!("{}.{}({})", keyspace, name, args_sig.join(","))
     }
 
     pub fn register(&self, metadata: UdaMetadata) -> Result<(), String> {
@@ -141,6 +148,7 @@ mod tests {
             name: "my_sum".into(),
             arg_types: vec!["int".into()],
             state_type: "int".into(),
+            return_type: "int".into(),
             sfunc_name: "plus".into(),
             finalfunc_name: None,
             initcond: Some("0".into()),
@@ -177,6 +185,7 @@ mod tests {
             name: "my_sum".into(),
             arg_types: vec!["int".into()],
             state_type: "int".into(),
+            return_type: "int".into(),
             sfunc_name: "plus".into(),
             finalfunc_name: None,
             initcond: Some("0".into()),

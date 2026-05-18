@@ -116,7 +116,10 @@ mod tests {
     #[test]
     fn serde_round_trip_custom() {
         let mut opts = HashMap::new();
-        opts.insert("class_name".into(), "org.apache.cassandra.index.sai.StorageAttachedIndex".into());
+        opts.insert(
+            "class_name".into(),
+            "org.apache.cassandra.index.sai.StorageAttachedIndex".into(),
+        );
         opts.insert("target".into(), "col1".into());
         let idx = IndexMetadata::new("id3".into(), "sai_idx".into(), IndexKind::Custom, opts);
         let json = serde_json::to_string(&idx).unwrap();

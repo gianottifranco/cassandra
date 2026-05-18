@@ -41,6 +41,7 @@ pub mod audit;
 pub mod audit_filter;
 pub mod auth;
 pub mod auth_service;
+pub mod auth_store;
 pub mod authz;
 pub mod cache;
 pub mod cidr;
@@ -48,6 +49,7 @@ pub mod credentials_cache;
 pub mod crypto;
 pub mod encryption_at_rest;
 pub mod encryption_context;
+pub mod external_auth;
 pub mod fql;
 pub mod identity_mapping;
 pub mod internode_auth;
@@ -69,18 +71,28 @@ pub use audit_filter::{AuditCategory, AuditFilter, AuditLogContext};
 pub use auth::{
     AllowAllAuthenticator, AuthenticatedUser, Authenticator, Credentials, PasswordAuthenticator,
 };
-pub use authz::{AllowAllAuthorizer, Authorizer, CassandraAuthorizer, Permission, Resource};
 pub use auth_service::AuthManager;
+pub use auth_store::{
+    PermissionGrant, PersistentAuthStore, PersistentAuthorizer, PersistentCidrGroupsManager,
+    PersistentIdentityRoleMapper, PersistentNetworkAuthorizer, PersistentRoleManager,
+};
+pub use authz::{AllowAllAuthorizer, Authorizer, CassandraAuthorizer, Permission, Resource};
 pub use cache::{AuthCache, AuthCacheConfig};
 pub use cidr::{CidrAuthorizer, CidrGroup, CidrGroupsManager, InMemoryCidrGroupsManager};
 pub use credentials_cache::CredentialsCache;
+pub use external_auth::{
+    ExternalIdentity, InMemoryLdapDirectory, KerberosAuthenticator, KerberosPrincipal,
+    KerberosTicketValidator, LdapAuthenticator, LdapDirectory, StaticKerberosValidator,
+};
 pub use fql::{FqlLogger, FqlOptions, FqlReader, FqlRecord};
 pub use identity_mapping::{IdentityRoleMapper, InMemoryIdentityRoleMapper};
 pub use internode_auth::{
     AllowAllInternodeAuthenticator, InternodeAuthenticator, MutualTlsInternodeAuthenticator,
 };
 pub use masking::{MaskingFunction, MaskingRegistry};
-pub use mtls::{CertificateValidator, MutualTlsAuthenticator, SpiffeCertificateValidator, SubjectCnValidator};
+pub use mtls::{
+    CertificateValidator, MutualTlsAuthenticator, SpiffeCertificateValidator, SubjectCnValidator,
+};
 pub use network_auth::{
     AllowAllNetworkAuthorizer, CassandraNetworkAuthorizer, DCPermissions, NetworkAuthorizer,
 };
@@ -90,9 +102,11 @@ pub use roles_cache::RolesCache;
 pub use tls::{ReloadableTlsAcceptor, TlsConfig, TlsVersion};
 
 // Encryption-at-rest
-pub use crypto::{AesCbcProvider, CryptoProvider, FileKeyProvider, KeyProvider, NoOpCryptoProvider};
+pub use crypto::{
+    AesCbcProvider, CryptoProvider, FileKeyProvider, KeyProvider, NoOpCryptoProvider,
+};
 pub use encryption_at_rest::{
-    create_encryptor, NoOpStorageEncryptor, StorageEncryptor, TdeStorageEncryptor,
+    NoOpStorageEncryptor, StorageEncryptor, TdeStorageEncryptor, create_encryptor,
 };
 pub use encryption_context::{EncryptionContext, EncryptionHeader};
 pub use tde::{KeyProviderConfig, TransparentDataEncryptionOptions};

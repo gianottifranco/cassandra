@@ -36,7 +36,7 @@ pub mod twcs;
 pub mod ucs;
 pub mod validation;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::memtable::partition::{PartitionData, Row};
@@ -51,8 +51,21 @@ pub enum CompactionStrategyType {
     SizeTiered,
     Leveled,
     TimeWindow,
-    #[cfg(feature = "ucs")]
     Unified,
+}
+
+impl CompactionStrategyType {
+    /// Parse the Java compaction strategy class name stored in table metadata.
+    pub fn from_java_class(class_name: &str) -> Result<Self, String> {
+        let simple_name = class_name.rsplit('.').next().unwrap_or(class_name);
+        match simple_name {
+            "SizeTieredCompactionStrategy" => Ok(Self::SizeTiered),
+            "LeveledCompactionStrategy" => Ok(Self::Leveled),
+            "TimeWindowCompactionStrategy" => Ok(Self::TimeWindow),
+            "UnifiedCompactionStrategy" => Ok(Self::Unified),
+            other => Err(format!("unsupported compaction strategy class {other}")),
+        }
+    }
 }
 
 /// Create a compaction strategy from the type enum.
@@ -63,9 +76,42 @@ pub fn create_strategy(strategy_type: CompactionStrategyType) -> Box<dyn Compact
         CompactionStrategyType::TimeWindow => {
             Box::new(twcs::TimeWindowCompactionStrategy::default())
         }
-        #[cfg(feature = "ucs")]
         CompactionStrategyType::Unified => Box::new(ucs::UnifiedCompactionStrategy::default()),
     }
+}
+
+/// Create a specific compaction strategy from Java table metadata options.
+pub fn create_strategy_with_options(
+    strategy_type: CompactionStrategyType,
+    options: &HashMap<String, String>,
+) -> Result<Box<dyn CompactionStrategy>, String> {
+    match strategy_type {
+        CompactionStrategyType::SizeTiered => Ok(Box::new(
+            SizeTieredCompactionStrategy::from_options(options)?,
+        )),
+        CompactionStrategyType::Leveled => Ok(Box::new(
+            lcs::LeveledCompactionStrategy::from_options(options)?,
+        )),
+        CompactionStrategyType::TimeWindow => Ok(Box::new(
+            twcs::TimeWindowCompactionStrategy::from_options(options)?,
+        )),
+        CompactionStrategyType::Unified => Ok(Box::new(
+            ucs::UnifiedCompactionStrategy::from_options(options)?,
+        )),
+    }
+}
+
+/// Create a compaction strategy from Java table metadata options.
+pub fn create_strategy_from_options(
+    options: &HashMap<String, String>,
+) -> Result<Box<dyn CompactionStrategy>, String> {
+    let strategy_type = options
+        .get("class")
+        .map(|class_name| CompactionStrategyType::from_java_class(class_name))
+        .transpose()?
+        .unwrap_or_default();
+
+    create_strategy_with_options(strategy_type, options)
 }
 
 // ─── Compaction Strategy trait ─────────────────────────────────────────────
@@ -99,6 +145,8 @@ pub struct SizeTieredCompactionStrategy {
     /// are grouped together.
     pub bucket_low: f64,
     pub bucket_high: f64,
+    /// Java `min_sstable_size`, retained for option parity.
+    pub min_sstable_size: u64,
 }
 
 impl Default for SizeTieredCompactionStrategy {
@@ -108,7 +156,36 @@ impl Default for SizeTieredCompactionStrategy {
             max_threshold: 32,
             bucket_low: 0.5,
             bucket_high: 1.5,
+            min_sstable_size: 50 * 1024 * 1024,
         }
+    }
+}
+
+impl SizeTieredCompactionStrategy {
+    pub fn from_options(options: &HashMap<String, String>) -> Result<Self, String> {
+        let mut strategy = Self::default();
+        if let Some(value) = options.get("min_threshold") {
+            strategy.min_threshold = parse_positive_usize(value, "min_threshold")?;
+        }
+        if let Some(value) = options.get("max_threshold") {
+            strategy.max_threshold = parse_positive_usize(value, "max_threshold")?;
+        }
+        if strategy.max_threshold < strategy.min_threshold {
+            return Err("max_threshold must be greater than or equal to min_threshold".to_string());
+        }
+        if let Some(value) = options.get("bucket_low") {
+            strategy.bucket_low = parse_positive_f64(value, "bucket_low")?;
+        }
+        if let Some(value) = options.get("bucket_high") {
+            strategy.bucket_high = parse_positive_f64(value, "bucket_high")?;
+        }
+        if strategy.bucket_high <= strategy.bucket_low {
+            return Err("bucket_high must be greater than bucket_low".to_string());
+        }
+        if let Some(value) = options.get("min_sstable_size") {
+            strategy.min_sstable_size = parse_nonnegative_u64(value, "min_sstable_size")?;
+        }
+        Ok(strategy)
     }
 }
 
@@ -151,6 +228,58 @@ impl CompactionStrategy for SizeTieredCompactionStrategy {
     }
 }
 
+pub(crate) fn parse_bool(value: &str, option: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" => Ok(true),
+        "false" => Ok(false),
+        _ => Err(format!(
+            "{option} should either be true or false, not {value}"
+        )),
+    }
+}
+
+pub(crate) fn parse_i64(value: &str, option: &str) -> Result<i64, String> {
+    value
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| format!("{value} is not a parsable integer for {option}"))
+}
+
+pub(crate) fn parse_positive_usize(value: &str, option: &str) -> Result<usize, String> {
+    let parsed = parse_i64(value, option)?;
+    if parsed <= 0 {
+        return Err(format!("{option} must be positive: {parsed}"));
+    }
+    Ok(parsed as usize)
+}
+
+pub(crate) fn parse_positive_u32(value: &str, option: &str) -> Result<u32, String> {
+    let parsed = parse_positive_usize(value, option)?;
+    if parsed > u32::MAX as usize {
+        return Err(format!("{option} is out of range: {parsed}"));
+    }
+    Ok(parsed as u32)
+}
+
+pub(crate) fn parse_nonnegative_u64(value: &str, option: &str) -> Result<u64, String> {
+    let parsed = parse_i64(value, option)?;
+    if parsed < 0 {
+        return Err(format!("{option} must be non-negative: {parsed}"));
+    }
+    Ok(parsed as u64)
+}
+
+pub(crate) fn parse_positive_f64(value: &str, option: &str) -> Result<f64, String> {
+    let parsed = value
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("{value} is not a parsable float for {option}"))?;
+    if !parsed.is_finite() || parsed <= 0.0 {
+        return Err(format!("{option} must be positive: {value}"));
+    }
+    Ok(parsed)
+}
+
 // ─── Expired SSTable Detection ─────────────────────────────────────────────
 
 /// Check if an SSTable can be dropped entirely because all its data
@@ -176,6 +305,65 @@ pub fn find_fully_expired(
 
 /// Type alias for a collection of partitions with their keys.
 pub type PartitionVec = Vec<(Vec<u8>, PartitionData)>;
+
+/// Estimate a compacted partition's serialized size for output splitting.
+///
+/// This mirrors the SSTable rewriter accounting closely enough for deciding
+/// when a Java-style size-capped compaction writer should rotate outputs.
+pub fn estimate_compaction_output_size(key: &[u8], data: &PartitionData) -> u64 {
+    let mut size = key.len() as u64 + 4;
+    for row in data.rows.values() {
+        size += row.clustering_key.len() as u64 + 10;
+        for cell in &row.cells {
+            size += cell.column.len() as u64 + 16;
+            if let Some(ref value) = cell.value {
+                size += value.len() as u64 + 4;
+            }
+            if cell.local_deletion_time.is_some() {
+                size += 4;
+            }
+        }
+        if row.local_deletion_time.is_some() {
+            size += 4;
+        }
+    }
+    size + 1
+}
+
+/// Split compacted partitions into output SSTable batches.
+pub fn split_compaction_output(
+    partitions: &[(Vec<u8>, PartitionData)],
+    max_sstable_size: Option<u64>,
+) -> Vec<PartitionVec> {
+    let Some(max_size) = max_sstable_size.filter(|size| *size > 0) else {
+        return if partitions.is_empty() {
+            Vec::new()
+        } else {
+            vec![partitions.to_vec()]
+        };
+    };
+
+    let mut batches = Vec::new();
+    let mut current = Vec::new();
+    let mut current_size = 0_u64;
+
+    for (key, data) in partitions {
+        let partition_size = estimate_compaction_output_size(key, data);
+        if !current.is_empty() && current_size + partition_size > max_size {
+            batches.push(current);
+            current = Vec::new();
+            current_size = 0;
+        }
+        current_size += partition_size;
+        current.push((key.clone(), data.clone()));
+    }
+
+    if !current.is_empty() {
+        batches.push(current);
+    }
+
+    batches
+}
 
 /// Token-range based split for anticompaction (repair).
 /// Splits a set of partitions into two groups based on a range predicate.
@@ -493,6 +681,31 @@ mod tests {
     }
 
     #[test]
+    fn compaction_output_split_preserves_order() {
+        let partitions = vec![
+            (
+                b"a".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"1111", 1)])]),
+            ),
+            (
+                b"b".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"2222", 1)])]),
+            ),
+            (
+                b"c".to_vec(),
+                make_partition(vec![make_row(b"ck", vec![make_cell("x", b"3333", 1)])]),
+            ),
+        ];
+        let first_size = estimate_compaction_output_size(&partitions[0].0, &partitions[0].1);
+        let batches = split_compaction_output(&partitions, Some(first_size + 1));
+
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0][0].0, b"a");
+        assert_eq!(batches[1][0].0, b"b");
+        assert_eq!(batches[2][0].0, b"c");
+    }
+
+    #[test]
     fn strategy_factory() {
         let stcs = create_strategy(CompactionStrategyType::SizeTiered);
         let lcs = create_strategy(CompactionStrategyType::Leveled);
@@ -502,6 +715,99 @@ mod tests {
         assert!(stcs.pick_compaction(&[]).is_empty());
         assert!(lcs.pick_compaction(&[]).is_empty());
         assert!(twcs.pick_compaction(&[]).is_empty());
+    }
+
+    #[test]
+    fn parses_java_strategy_class_names() {
+        assert_eq!(
+            CompactionStrategyType::from_java_class("SizeTieredCompactionStrategy").unwrap(),
+            CompactionStrategyType::SizeTiered
+        );
+        assert_eq!(
+            CompactionStrategyType::from_java_class(
+                "org.apache.cassandra.db.compaction.LeveledCompactionStrategy"
+            )
+            .unwrap(),
+            CompactionStrategyType::Leveled
+        );
+        assert_eq!(
+            CompactionStrategyType::from_java_class("TimeWindowCompactionStrategy").unwrap(),
+            CompactionStrategyType::TimeWindow
+        );
+        assert_eq!(
+            CompactionStrategyType::from_java_class(
+                "org.apache.cassandra.db.compaction.UnifiedCompactionStrategy"
+            )
+            .unwrap(),
+            CompactionStrategyType::Unified
+        );
+        assert!(CompactionStrategyType::from_java_class("UnknownStrategy").is_err());
+    }
+
+    #[test]
+    fn parses_stcs_java_options() {
+        let options = HashMap::from([
+            ("min_threshold".to_string(), "2".to_string()),
+            ("max_threshold".to_string(), "9".to_string()),
+            ("bucket_low".to_string(), "0.4".to_string()),
+            ("bucket_high".to_string(), "1.7".to_string()),
+            ("min_sstable_size".to_string(), "1048576".to_string()),
+        ]);
+        let stcs = SizeTieredCompactionStrategy::from_options(&options).unwrap();
+        assert_eq!(stcs.min_threshold, 2);
+        assert_eq!(stcs.max_threshold, 9);
+        assert!((stcs.bucket_low - 0.4).abs() < 0.001);
+        assert!((stcs.bucket_high - 1.7).abs() < 0.001);
+        assert_eq!(stcs.min_sstable_size, 1_048_576);
+    }
+
+    #[test]
+    fn strategy_factory_accepts_java_options() {
+        let options = HashMap::from([
+            (
+                "class".to_string(),
+                "org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy".to_string(),
+            ),
+            ("min_threshold".to_string(), "2".to_string()),
+        ]);
+        let strategy = create_strategy_from_options(&options).unwrap();
+
+        let sstables: Vec<SSTableMetadata> = (1..=2)
+            .map(|id| SSTableMetadata {
+                id,
+                data_size: 100,
+                partition_count: 10,
+                min_timestamp: 0,
+                max_timestamp: 100,
+            })
+            .collect();
+        assert_eq!(strategy.pick_compaction(&sstables), vec![vec![1, 2]]);
+    }
+
+    #[test]
+    fn strategy_factory_accepts_unified_java_options_without_feature_gate() {
+        let options = HashMap::from([
+            (
+                "class".to_string(),
+                "org.apache.cassandra.db.compaction.UnifiedCompactionStrategy".to_string(),
+            ),
+            ("scaling_parameters".to_string(), "T4, L10".to_string()),
+            ("target_sstable_size".to_string(), "128MiB".to_string()),
+            ("min_threshold".to_string(), "2".to_string()),
+            ("max_threshold".to_string(), "4".to_string()),
+        ]);
+        let strategy = create_strategy_from_options(&options).unwrap();
+
+        let sstables: Vec<SSTableMetadata> = (1..=4)
+            .map(|id| SSTableMetadata {
+                id,
+                data_size: 128 * 1024 * 1024,
+                partition_count: 1024,
+                min_timestamp: 0,
+                max_timestamp: 100,
+            })
+            .collect();
+        assert_eq!(strategy.pick_compaction(&sstables), vec![vec![1, 2, 3, 4]]);
     }
 
     #[test]

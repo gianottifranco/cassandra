@@ -21,7 +21,9 @@ use serde::{Deserialize, Serialize};
 
 use cassandra_cluster_metadata::Endpoint;
 use cassandra_common::Token;
-use cassandra_streaming::{StreamOperation, StreamPlan};
+use std::sync::Arc;
+
+use cassandra_streaming::{StreamCoordinator, StreamOperation, StreamPlan, StreamTransport};
 
 /// Result of a successful sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,10 +91,11 @@ impl LocalSyncTask {
         }
     }
 
-    /// Execute the sync task (constructs plan, returns result descriptor).
+    /// Execute the sync task in planning mode.
     ///
-    /// Actual I/O is delegated to the streaming subsystem; this method
-    /// only produces the plan and result metadata.
+    /// This constructs the repair stream plan and returns the ranges that
+    /// would be synchronized. Use `execute_with_streaming` when a live stream
+    /// coordinator and transport are available.
     pub fn execute(&self) -> Result<SyncResult, SyncError> {
         let start = Instant::now();
         let plan = self.build_stream_plan();
@@ -105,14 +108,22 @@ impl LocalSyncTask {
             });
         }
 
-        // In a real implementation, this would call
-        // StreamCoordinator::execute_plan(). For now we return a
-        // descriptor of what *would* be streamed.
         Ok(SyncResult {
             bytes_streamed: 0,
             ranges_synced: self.ranges.len(),
             duration: start.elapsed(),
         })
+    }
+
+    /// Execute the sync task through the streaming subsystem.
+    pub async fn execute_with_streaming(
+        &self,
+        coordinator: &StreamCoordinator,
+        transport: Arc<StreamTransport>,
+    ) -> Result<SyncResult, SyncError> {
+        let start = Instant::now();
+        let plan = self.build_stream_plan();
+        execute_stream_plan(plan, coordinator, transport, self.ranges.len(), start).await
     }
 }
 
@@ -174,13 +185,61 @@ impl StreamingRepairTask {
     /// Execute the streaming repair task.
     pub fn execute(&self) -> Result<SyncResult, SyncError> {
         let start = Instant::now();
-        // Delegates to StreamCoordinator in a real implementation.
         Ok(SyncResult {
             bytes_streamed: 0,
             ranges_synced: self.plan.peer_count(),
             duration: start.elapsed(),
         })
     }
+
+    /// Execute the streaming repair task through `StreamCoordinator`.
+    pub async fn execute_with_streaming(
+        &self,
+        coordinator: &StreamCoordinator,
+        transport: Arc<StreamTransport>,
+    ) -> Result<SyncResult, SyncError> {
+        let start = Instant::now();
+        let expected_ranges = self.plan.peer_count();
+        execute_stream_plan(
+            self.plan.clone(),
+            coordinator,
+            transport,
+            expected_ranges,
+            start,
+        )
+        .await
+    }
+}
+
+async fn execute_stream_plan(
+    plan: StreamPlan,
+    coordinator: &StreamCoordinator,
+    transport: Arc<StreamTransport>,
+    expected_ranges: usize,
+    start: Instant,
+) -> Result<SyncResult, SyncError> {
+    if plan.is_empty() {
+        return Ok(SyncResult {
+            bytes_streamed: 0,
+            ranges_synced: 0,
+            duration: start.elapsed(),
+        });
+    }
+
+    let mut futures = coordinator
+        .execute_plan(plan, transport)
+        .await
+        .map_err(|e| SyncError::StreamingFailed(e.to_string()))?;
+    let result = StreamCoordinator::await_all(&mut futures).await;
+    if result.sessions_failed > 0 {
+        return Err(SyncError::StreamingFailed(result.errors.join("; ")));
+    }
+
+    Ok(SyncResult {
+        bytes_streamed: result.bytes_transferred,
+        ranges_synced: expected_ranges,
+        duration: result.duration,
+    })
 }
 
 #[cfg(test)]

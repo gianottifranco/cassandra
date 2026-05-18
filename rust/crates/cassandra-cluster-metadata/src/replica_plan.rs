@@ -235,12 +235,8 @@ mod tests {
             Replica::full(ep(7002)),
             Replica::full(ep(7003)),
         ]);
-        let plan = ReplicaPlanForRead::new(
-            Token::from_raw(42),
-            replicas,
-            vec![ep(7001), ep(7002)],
-            2,
-        );
+        let plan =
+            ReplicaPlanForRead::new(Token::from_raw(42), replicas, vec![ep(7001), ep(7002)], 2);
         assert!(plan.is_sufficient());
         assert_eq!(plan.shortfall(), 0);
     }
@@ -248,18 +244,15 @@ mod tests {
     #[test]
     fn read_plan_insufficient() {
         let replicas = EndpointsForToken::new(vec![Replica::full(ep(7001))]);
-        let plan =
-            ReplicaPlanForRead::new(Token::from_raw(42), replicas, vec![ep(7001)], 2);
+        let plan = ReplicaPlanForRead::new(Token::from_raw(42), replicas, vec![ep(7001)], 2);
         assert!(!plan.is_sufficient());
         assert_eq!(plan.shortfall(), 1);
     }
 
     #[test]
     fn write_plan_all_endpoints() {
-        let replicas = EndpointsForToken::new(vec![
-            Replica::full(ep(7001)),
-            Replica::full(ep(7002)),
-        ]);
+        let replicas =
+            EndpointsForToken::new(vec![Replica::full(ep(7001)), Replica::full(ep(7002))]);
         let plan = ReplicaPlanForWrite::new(
             Token::from_raw(42),
             replicas,

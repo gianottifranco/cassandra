@@ -20,10 +20,18 @@
 //! per-mutation `cdc_enabled` flag.
 
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use tracing::{debug, info};
+
+use crate::commitlog::{
+    CommitLogError, Mutation, Result as CommitLogResult,
+    segment::{CorruptionPolicy, Segment},
+};
+
+const CDC_INDEX_SUFFIX: &str = "_cdc.idx";
+const CDC_COMPLETED_MARKER: &str = "COMPLETED";
 
 /// Status of the CDC subsystem.
 #[derive(Debug, Clone)]
@@ -55,6 +63,17 @@ impl CdcStatus {
     }
 }
 
+/// Java-style metadata for a CDC raw segment and its `_cdc.idx` sidecar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CdcSegmentInfo {
+    pub id: u64,
+    pub path: PathBuf,
+    pub index_path: PathBuf,
+    pub size_bytes: u64,
+    pub durable_offset: Option<u64>,
+    pub completed: bool,
+}
+
 /// List CDC segment files in the raw directory.
 pub fn list_cdc_segments(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
@@ -67,9 +86,39 @@ pub fn list_cdc_segments(dir: &Path) -> io::Result<Vec<PathBuf>> {
                 files.push(entry.path());
             }
         }
-        files.sort();
+        files.sort_by_key(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(parse_cdc_segment_id)
+                .unwrap_or(u64::MAX)
+        });
     }
     Ok(files)
+}
+
+/// List CDC segment files with their Java-compatible `_cdc.idx` sidecar state.
+pub fn list_cdc_segment_infos(dir: &Path) -> io::Result<Vec<CdcSegmentInfo>> {
+    let mut infos = Vec::new();
+    for path in list_cdc_segments(dir)? {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(id) = parse_cdc_segment_id(name) else {
+            continue;
+        };
+        let index_path = cdc_index_path(&path);
+        let (durable_offset, completed) = read_cdc_index(&index_path)?;
+        infos.push(CdcSegmentInfo {
+            id,
+            size_bytes: fs::metadata(&path)?.len(),
+            path,
+            index_path,
+            durable_offset,
+            completed,
+        });
+    }
+    infos.sort_by_key(|info| info.id);
+    Ok(infos)
 }
 
 /// Get CDC subsystem status.
@@ -89,6 +138,58 @@ pub fn cdc_status(dir: &Path, limit: u64) -> io::Result<CdcStatus> {
     })
 }
 
+/// Write the Java-compatible `_cdc.idx` sidecar for a raw CDC segment.
+pub fn write_cdc_index(
+    segment_path: &Path,
+    durable_offset: u64,
+    completed: bool,
+) -> io::Result<PathBuf> {
+    let index_path = cdc_index_path(segment_path);
+    let mut file = fs::File::create(&index_path)?;
+    writeln!(file, "{durable_offset}")?;
+    if completed {
+        writeln!(file, "{CDC_COMPLETED_MARKER}")?;
+    }
+    file.sync_all()?;
+    Ok(index_path)
+}
+
+/// Decode all mutations from a CDC raw segment.
+pub fn read_cdc_segment_mutations(
+    path: &Path,
+    policy: CorruptionPolicy,
+) -> CommitLogResult<Vec<Mutation>> {
+    let segment = Segment::open_for_read(path)?;
+    let mut mutations = Vec::new();
+    for entry in segment.read_entries_with_policy(policy) {
+        let payload = match entry {
+            Ok(payload) => payload,
+            Err(err) => match policy {
+                CorruptionPolicy::StopOnCorrupt => return Err(err),
+                CorruptionPolicy::SkipAndContinue => continue,
+            },
+        };
+        let mutation = serde_json::from_slice::<Mutation>(&payload)
+            .map_err(|err| CommitLogError::Serialization(err.to_string()))?;
+        mutations.push(mutation);
+    }
+    Ok(mutations)
+}
+
+/// Decode mutations only from CDC segments whose sidecar contains `COMPLETED`.
+pub fn read_completed_cdc_mutations(
+    dir: &Path,
+    policy: CorruptionPolicy,
+) -> CommitLogResult<Vec<Mutation>> {
+    let mut mutations = Vec::new();
+    for info in list_cdc_segment_infos(dir)? {
+        if info.completed {
+            mutations.extend(read_cdc_segment_mutations(&info.path, policy)?);
+        }
+    }
+    Ok(mutations)
+}
+
 /// Discard CDC segments that have been consumed (by ID threshold).
 pub fn discard_consumed_segments(dir: &Path, up_to_id: u64) -> io::Result<u64> {
     let segments = list_cdc_segments(dir)?;
@@ -98,7 +199,11 @@ pub fn discard_consumed_segments(dir: &Path, up_to_id: u64) -> io::Result<u64> {
         if let Some(id) = parse_cdc_segment_id(&name) {
             if id <= up_to_id {
                 debug!(segment = %name, "Discarding consumed CDC segment");
+                let index_path = cdc_index_path(&path);
                 fs::remove_file(&path)?;
+                if index_path.exists() {
+                    fs::remove_file(index_path)?;
+                }
                 discarded += 1;
             }
         }
@@ -107,6 +212,35 @@ pub fn discard_consumed_segments(dir: &Path, up_to_id: u64) -> io::Result<u64> {
         info!(discarded, "Discarded consumed CDC segments");
     }
     Ok(discarded)
+}
+
+fn cdc_index_path(segment_path: &Path) -> PathBuf {
+    let file_name = segment_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
+    segment_path.with_file_name(format!("{file_name}{CDC_INDEX_SUFFIX}"))
+}
+
+fn read_cdc_index(path: &Path) -> io::Result<(Option<u64>, bool)> {
+    if !path.exists() {
+        return Ok((None, false));
+    }
+    let contents = fs::read_to_string(path)?;
+    let mut durable_offset = None;
+    let mut completed = false;
+    for line in contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if line == CDC_COMPLETED_MARKER {
+            completed = true;
+        } else if durable_offset.is_none() {
+            durable_offset = line.parse::<u64>().ok();
+        }
+    }
+    Ok((durable_offset, completed))
 }
 
 fn parse_cdc_segment_id(name: &str) -> Option<u64> {
@@ -141,14 +275,34 @@ mod tests {
     }
 
     #[test]
+    fn list_cdc_segments_sorts_by_numeric_id() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("CommitLog-10.log"), "ten").unwrap();
+        fs::write(dir.path().join("CommitLog-2.log"), "two").unwrap();
+        fs::write(dir.path().join("CommitLog-1.log"), "one").unwrap();
+
+        let segments = list_cdc_segments(dir.path()).unwrap();
+        let names = segments
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec!["CommitLog-1.log", "CommitLog-2.log", "CommitLog-10.log"]
+        );
+    }
+
+    #[test]
     fn discard_cdc_segments() {
         let dir = TempDir::new().unwrap();
         fs::write(dir.path().join("CommitLog-1.log"), "data1").unwrap();
         fs::write(dir.path().join("CommitLog-2.log"), "data2").unwrap();
         fs::write(dir.path().join("CommitLog-3.log"), "data3").unwrap();
+        write_cdc_index(&dir.path().join("CommitLog-2.log"), 128, true).unwrap();
 
         let discarded = discard_consumed_segments(dir.path(), 2).unwrap();
         assert_eq!(discarded, 2);
+        assert!(!dir.path().join("CommitLog-2.log_cdc.idx").exists());
 
         let remaining = list_cdc_segments(dir.path()).unwrap();
         assert_eq!(remaining.len(), 1);
@@ -164,5 +318,23 @@ mod tests {
             segment_count: 1,
         };
         assert!((status.usage_percent() - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn cdc_segment_infos_read_sidecar_state() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("CommitLog-10.log"), b"ten").unwrap();
+        fs::write(dir.path().join("CommitLog-2.log"), b"two").unwrap();
+        write_cdc_index(&dir.path().join("CommitLog-10.log"), 512, true).unwrap();
+
+        let infos = list_cdc_segment_infos(dir.path()).unwrap();
+        assert_eq!(
+            infos.iter().map(|info| info.id).collect::<Vec<_>>(),
+            vec![2, 10]
+        );
+        assert_eq!(infos[0].durable_offset, None);
+        assert!(!infos[0].completed);
+        assert_eq!(infos[1].durable_offset, Some(512));
+        assert!(infos[1].completed);
     }
 }

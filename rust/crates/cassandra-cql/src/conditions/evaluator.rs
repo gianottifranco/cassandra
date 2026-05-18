@@ -60,7 +60,7 @@ impl ConditionEvaluator {
                 return ConditionResult {
                     applied: false,
                     current_values: None,
-                }
+                };
             }
         };
 
@@ -71,20 +71,18 @@ impl ConditionEvaluator {
                     return ConditionResult {
                         applied: false,
                         current_values: Some(row.to_vec()),
-                    }
+                    };
                 }
             };
 
             let current_value = row.get(col_idx).and_then(|v| v.as_deref());
             let cql_type = column_types.get(&condition.column);
-            let expected = term_to_bytes(&condition.value);
-
-            let matches = eval_single_condition(
-                condition.op,
-                current_value,
-                expected.as_deref(),
-                cql_type,
-            );
+            let matches = if condition.op == RelationOp::In {
+                eval_in_condition(current_value, &condition.value)
+            } else {
+                let expected = term_to_bytes(&condition.value);
+                eval_single_condition(condition.op, current_value, expected.as_deref(), cql_type)
+            };
 
             if !matches {
                 return ConditionResult {
@@ -139,15 +137,30 @@ fn eval_single_condition(
                 _ => false,
             }
         }
-        RelationOp::In => {
-            // For IN, the expected value should be a list of values.
-            // Simplified: just do equality check for now.
-            match (current, expected) {
-                (Some(a), Some(b)) => a == b,
-                _ => false,
-            }
-        }
+        RelationOp::In => match (current, expected) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        },
         _ => false, // Contains, ContainsKey not used in IF conditions
+    }
+}
+
+fn eval_in_condition(current: Option<&[u8]>, term: &Term) -> bool {
+    let Some(current) = current else {
+        return false;
+    };
+    term_to_byte_list(term)
+        .into_iter()
+        .flatten()
+        .any(|candidate| candidate.as_slice() == current)
+}
+
+fn term_to_byte_list(term: &Term) -> Vec<Option<Vec<u8>>> {
+    match term {
+        Term::CollectionLiteral(values) | Term::TupleLiteral(values) => {
+            values.iter().map(term_to_bytes).collect()
+        }
+        _ => vec![term_to_bytes(term)],
     }
 }
 
@@ -213,8 +226,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(30)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -232,8 +244,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(25)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(!result.applied);
         assert!(result.current_values.is_some());
     }
@@ -252,8 +263,7 @@ mod tests {
             value: Term::Literal(Literal::Integer(25)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -271,9 +281,51 @@ mod tests {
             value: Term::Literal(Literal::Integer(25)),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
+    }
+
+    #[test]
+    fn condition_in_collection_matches_member() {
+        let mut columns = HashMap::new();
+        columns.insert("age".to_string(), 0);
+        let mut types = HashMap::new();
+        types.insert("age".to_string(), CqlType::Bigint);
+
+        let row = vec![Some(int_bytes(30))];
+        let conditions = vec![Relation {
+            column: "age".to_string(),
+            op: RelationOp::In,
+            value: Term::CollectionLiteral(vec![
+                Term::Literal(Literal::Integer(25)),
+                Term::Literal(Literal::Integer(30)),
+                Term::Literal(Literal::Integer(35)),
+            ]),
+        }];
+
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        assert!(result.applied);
+    }
+
+    #[test]
+    fn condition_in_collection_rejects_missing_member() {
+        let mut columns = HashMap::new();
+        columns.insert("age".to_string(), 0);
+        let mut types = HashMap::new();
+        types.insert("age".to_string(), CqlType::Bigint);
+
+        let row = vec![Some(int_bytes(30))];
+        let conditions = vec![Relation {
+            column: "age".to_string(),
+            op: RelationOp::In,
+            value: Term::CollectionLiteral(vec![
+                Term::Literal(Literal::Integer(10)),
+                Term::Literal(Literal::Integer(20)),
+            ]),
+        }];
+
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        assert!(!result.applied);
     }
 
     #[test]
@@ -305,8 +357,7 @@ mod tests {
             value: Term::Literal(Literal::Null),
         }];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(result.applied);
     }
 
@@ -333,8 +384,7 @@ mod tests {
             },
         ];
 
-        let result =
-            ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(!result.applied);
     }
 }

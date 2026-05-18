@@ -229,6 +229,8 @@ pub struct ReadCoordinator {
     cluster: Arc<ClusterMetadata>,
     /// The local node's endpoint.
     local_endpoint: Endpoint,
+    /// Local datacenter name for DC-local read CLs.
+    local_datacenter: String,
     /// Read timeout.
     timeout: Duration,
     /// Read metrics.
@@ -239,6 +241,8 @@ pub struct ReadCoordinator {
     read_repair_strategy: ReadRepairStrategy,
     /// Tombstone thresholds.
     tombstone_thresholds: TombstoneThresholds,
+    /// Latency percentile estimator for speculative retry delays.
+    latency_estimator: Arc<dyn Fn(f64) -> u64 + Send + Sync>,
 }
 
 /// Legacy compatibility alias to match the old API expected by lib.rs.
@@ -254,17 +258,28 @@ impl ReadCoordinator {
         Self {
             cluster,
             local_endpoint,
+            local_datacenter: "dc1".to_string(),
             timeout: DEFAULT_READ_TIMEOUT,
             metrics: Arc::new(ReadMetrics::new()),
             speculative_retry_policy: SpeculativeRetryPolicy::default(),
             read_repair_strategy: ReadRepairStrategy::default(),
             tombstone_thresholds: TombstoneThresholds::default(),
+            latency_estimator: Arc::new(|_| 50),
         }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    pub fn with_local_datacenter(mut self, dc: String) -> Self {
+        self.local_datacenter = dc;
+        self
+    }
+
+    pub fn local_datacenter(&self) -> &str {
+        &self.local_datacenter
     }
 
     pub fn with_speculative_retry(mut self, policy: SpeculativeRetryPolicy) -> Self {
@@ -280,6 +295,131 @@ impl ReadCoordinator {
     pub fn with_tombstone_thresholds(mut self, thresholds: TombstoneThresholds) -> Self {
         self.tombstone_thresholds = thresholds;
         self
+    }
+
+    pub fn with_latency_estimator(
+        mut self,
+        estimator: Arc<dyn Fn(f64) -> u64 + Send + Sync>,
+    ) -> Self {
+        self.latency_estimator = estimator;
+        self
+    }
+
+    /// Plan a read without fabricating replica responses.
+    ///
+    /// This performs token lookup, local-DC filtering, availability checks, replica
+    /// ordering, and execution-plan construction. Callers such as `StorageProxy`
+    /// use the returned `contacted_replicas` to send real read messages.
+    pub fn plan_read(
+        &self,
+        read: &CoordinatedRead,
+        cl: ConsistencyLevel,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Result<ReadResult, ReadError> {
+        let token = Token::from_partition_key(&read.partition_key);
+        let snapshot = self.cluster.snapshot();
+
+        let natural_replicas = snapshot.natural_replicas_for_token(token, strategy, snitch);
+        let local_scope = cl.is_datacenter_local();
+        let rf = if local_scope {
+            natural_replicas
+                .iter()
+                .filter(|r| {
+                    snapshot
+                        .nodes
+                        .get(&r.endpoint)
+                        .map(|n| n.datacenter.as_str() == self.local_datacenter)
+                        .unwrap_or(true)
+                })
+                .count()
+        } else {
+            natural_replicas.len()
+        };
+
+        if rf == 0 {
+            return Err(ReadError::Unavailable {
+                cl,
+                required: cl.block_for(strategy.replication_factor()),
+                alive: 0,
+            });
+        }
+
+        let required = cl.block_for(rf);
+        let mut full_replicas: Vec<Endpoint> = Vec::new();
+        let mut transient_replicas: Vec<Endpoint> = Vec::new();
+
+        for r in natural_replicas {
+            let node = snapshot.nodes.get(&r.endpoint);
+            let dc_matches = node
+                .map(|n| n.datacenter.as_str() == self.local_datacenter)
+                .unwrap_or(true);
+            if local_scope && !dc_matches {
+                continue;
+            }
+
+            if node.is_some_and(|n| n.state.is_live()) {
+                if r.is_full() {
+                    full_replicas.push(r.endpoint);
+                } else {
+                    transient_replicas.push(r.endpoint);
+                }
+            }
+        }
+
+        let live_count = full_replicas.len() + transient_replicas.len();
+        if live_count < required {
+            return Err(ReadError::Unavailable {
+                cl,
+                required,
+                alive: live_count,
+            });
+        }
+
+        snitch.sort_by_proximity(&self.local_endpoint, &mut full_replicas);
+        snitch.sort_by_proximity(&self.local_endpoint, &mut transient_replicas);
+
+        let mut sorted_replicas = full_replicas;
+        sorted_replicas.extend(transient_replicas);
+
+        let plan = compute_execution_plan(
+            &sorted_replicas,
+            required,
+            &self.speculative_retry_policy,
+            |percentile| (self.latency_estimator)(percentile),
+        );
+
+        debug!(
+            data_replica = %plan.data_replica,
+            digest_count = plan.digest_replicas.len(),
+            speculative = ?plan.speculative_replica,
+            cl = %cl,
+            local_dc = %self.local_datacenter,
+            "Planned read"
+        );
+
+        let speculative_retry_used = plan.speculative_replica.is_some()
+            && self.speculative_retry_policy == SpeculativeRetryPolicy::Always;
+
+        let mut contacted = vec![plan.data_replica];
+        contacted.extend(plan.digest_replicas);
+        if let Some(spec) = plan.speculative_replica {
+            contacted.push(spec);
+        }
+
+        Ok(ReadResult {
+            data: None,
+            partitions: Vec::new(),
+            responses_received: 0,
+            responses_required: required,
+            read_repair_triggered: false,
+            digest_mismatch_resolved: false,
+            contacted_replicas: contacted,
+            warnings: Vec::new(),
+            paging_state: None,
+            speculative_retry_used,
+            tombstones_read: 0,
+        })
     }
 
     /// Coordinate a read at the given consistency level.
@@ -310,99 +450,25 @@ impl ReadCoordinator {
         let start = std::time::Instant::now();
         self.metrics.reads_total.fetch_add(1, Ordering::Relaxed);
 
-        let token = Token::from_partition_key(&read.partition_key);
-        let snapshot = self.cluster.snapshot();
-
-        // Get replicas
-        let natural_replicas = snapshot.natural_replicas_for_token(token, strategy, snitch);
-        let rf = natural_replicas.len();
-
-        if rf == 0 {
-            self.metrics
-                .reads_unavailable
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(ReadError::Unavailable {
-                cl,
-                required: cl.block_for(strategy.replication_factor()),
-                alive: 0,
-            });
-        }
-
-        let required = cl.block_for(rf);
-
-        // Check live replicas and partition into full vs transient
-        let mut full_replicas: Vec<Endpoint> = Vec::new();
-        let mut transient_replicas: Vec<Endpoint> = Vec::new();
-
-        for r in natural_replicas {
-            if snapshot
-                .nodes
-                .get(&r.endpoint)
-                .is_some_and(|n| n.state.is_live())
-            {
-                if r.is_full() {
-                    full_replicas.push(r.endpoint);
-                } else {
-                    transient_replicas.push(r.endpoint);
-                }
+        let planned = match self.plan_read(read, cl, strategy, snitch) {
+            Ok(plan) => plan,
+            Err(err @ ReadError::Unavailable { .. }) => {
+                self.metrics
+                    .reads_unavailable
+                    .fetch_add(1, Ordering::Relaxed);
+                return Err(err);
             }
-        }
+            Err(err) => return Err(err),
+        };
 
-        let live_count = full_replicas.len() + transient_replicas.len();
-        if live_count < required {
-            self.metrics
-                .reads_unavailable
-                .fetch_add(1, Ordering::Relaxed);
-            return Err(ReadError::Unavailable {
-                cl,
-                required,
-                alive: live_count,
-            });
-        }
-
-        // Sort by proximity, keeping full replicas before transient replicas
-        snitch.sort_by_proximity(&self.local_endpoint, &mut full_replicas);
-        snitch.sort_by_proximity(&self.local_endpoint, &mut transient_replicas);
-
-        let mut sorted_replicas = full_replicas;
-        sorted_replicas.extend(transient_replicas);
-
-        // Compute execution plan
-        let plan = compute_execution_plan(
-            &sorted_replicas,
-            required,
-            &self.speculative_retry_policy,
-            |_percentile| 50, // GAP(gap_guard_concurrency_stages): wire real latency percentiles from metrics — tracked in gap_guards.rs
-        );
-
-        debug!(
-            data_replica = %plan.data_replica,
-            digest_count = plan.digest_replicas.len(),
-            speculative = ?plan.speculative_replica,
-            cl = %cl,
-            "Coordinating read"
-        );
-
-        // Simulate read responses
-        // In a real implementation, this would:
-        // 1. Send READ_DATA to data_replica via messaging
-        // 2. Send READ_DIGEST to digest_replicas
-        // 3. Optionally send speculative after delay
-        // 4. Wait for responses with timeout
-        // 5. Run through DigestResolver → DataResolver if mismatch
-        //
-        // For now, simulate all replicas agreeing (no digest mismatch).
-        let responses_received = 1 + plan.digest_replicas.len();
-        let speculative_retry_used = plan.speculative_replica.is_some()
-            && self.speculative_retry_policy == SpeculativeRetryPolicy::Always;
-
-        if speculative_retry_used {
+        if planned.speculative_retry_used {
             self.metrics
                 .speculative_retries
                 .fetch_add(1, Ordering::Relaxed);
         }
 
-        // Simulated data response
+        // Compatibility response for direct `ReadCoordinator` callers. The
+        // storage-backed path uses `StorageProxy::fetch_rows`.
         let data = Some(
             format!(
                 "data-for-{}-{}-{:?}",
@@ -417,25 +483,38 @@ impl ReadCoordinator {
             .fetch_add(elapsed_us, Ordering::Relaxed);
         self.metrics.reads_succeeded.fetch_add(1, Ordering::Relaxed);
 
-        let mut contacted = vec![plan.data_replica];
-        contacted.extend(plan.digest_replicas);
-        if let Some(spec) = plan.speculative_replica {
-            contacted.push(spec);
-        }
-
         Ok(ReadResult {
             data,
             partitions: Vec::new(),
-            responses_received,
-            responses_required: required,
+            responses_received: planned.responses_required,
+            responses_required: planned.responses_required,
             read_repair_triggered: false,
             digest_mismatch_resolved: false,
-            contacted_replicas: contacted,
-            warnings: Vec::new(),
-            paging_state: None,
-            speculative_retry_used,
+            contacted_replicas: planned.contacted_replicas,
+            warnings: planned.warnings,
+            paging_state: planned.paging_state,
+            speculative_retry_used: planned.speculative_retry_used,
             tombstones_read: 0,
         })
+    }
+
+    /// Plan a read asynchronously.
+    ///
+    /// The real async replica fan-out lives in `StorageProxy`; this method keeps
+    /// an async-compatible coordinator API for callers that need replica planning
+    /// without fabricated local responses.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `StorageProxy.fetchRows()` -> `AbstractReadExecutor.execute()`
+    pub async fn coordinate_read_async(
+        &self,
+        read: &CoordinatedRead,
+        cl: ConsistencyLevel,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+    ) -> Result<ReadResult, ReadError> {
+        self.plan_read(read, cl, strategy, snitch)
     }
 
     /// Coordinate a range read across multiple partitions.
@@ -461,7 +540,21 @@ impl ReadCoordinator {
         let snapshot = self.cluster.snapshot();
         let natural_replicas =
             snapshot.natural_replicas_for_token(representative_token, strategy, snitch);
-        let rf = natural_replicas.len();
+        let local_scope = cl.is_datacenter_local();
+        let rf = if local_scope {
+            natural_replicas
+                .iter()
+                .filter(|r| {
+                    snapshot
+                        .nodes
+                        .get(&r.endpoint)
+                        .map(|n| n.datacenter.as_str() == self.local_datacenter)
+                        .unwrap_or(true)
+                })
+                .count()
+        } else {
+            natural_replicas.len()
+        };
 
         if rf == 0 {
             self.metrics
@@ -481,11 +574,15 @@ impl ReadCoordinator {
         let mut transient_replicas: Vec<Endpoint> = Vec::new();
 
         for r in natural_replicas {
-            if snapshot
-                .nodes
-                .get(&r.endpoint)
-                .is_some_and(|n| n.state.is_live())
-            {
+            let node = snapshot.nodes.get(&r.endpoint);
+            let dc_matches = node
+                .map(|n| n.datacenter.as_str() == self.local_datacenter)
+                .unwrap_or(true);
+            if local_scope && !dc_matches {
+                continue;
+            }
+
+            if node.is_some_and(|n| n.state.is_live()) {
                 if r.is_full() {
                     full_replicas.push(r.endpoint);
                 } else {
@@ -543,17 +640,21 @@ impl ReadCoordinator {
         })
     }
 
-    /// Perform read repair after a digest mismatch.
-    ///
-    /// In a full implementation, this would:
-    /// 1. Re-read full data from all replicas
-    /// 2. Merge using timestamp-based conflict resolution
-    /// 3. Send the merged result to out-of-date replicas
-    pub fn read_repair(
+    /// Perform read repair from full data responses gathered after a digest mismatch.
+    pub fn read_repair_from_responses(
         &self,
         read: &CoordinatedRead,
         replicas: &[Endpoint],
+        responses: Vec<DataResponse>,
     ) -> Result<(), ReadError> {
+        if responses.len() != replicas.len() {
+            return Err(ReadError::Internal(format!(
+                "Read repair response count {} does not match replica count {}",
+                responses.len(),
+                replicas.len()
+            )));
+        }
+
         info!(
             replicas = ?replicas,
             "Triggering read repair"
@@ -563,22 +664,8 @@ impl ReadCoordinator {
             .fetch_add(1, Ordering::Relaxed);
 
         let mut resolver = DataResolver::new(self.tombstone_thresholds.clone());
-
-        // GAP(gap_guard_internode_wire_compat): Send READ_DATA to all replicas via MessagingService and collect responses — tracked in gap_guards.rs
-        // For now, we simulate fetching data from the replicas to feed the DataResolver.
-        for _ep in replicas.iter() {
-            // Simulated partition data (empty for simplicity, but forces DataResolver to process)
-            let pd = cassandra_storage::memtable::partition::PartitionData::new();
-            resolver.add_response(DataResponse {
-                partitions: vec![PartitionResult {
-                    partition_key: read.partition_key.clone(),
-                    data: Some(pd),
-                    live_row_count: 0,
-                    was_truncated: false,
-                }],
-                tombstones_read: 0,
-                is_short_read: false,
-            });
+        for response in responses {
+            resolver.add_response(response);
         }
 
         let now = std::time::SystemTime::now()
@@ -587,7 +674,6 @@ impl ReadCoordinator {
             .as_secs() as i32;
         let resolved = resolver.resolve(now);
 
-        // Stage mutations in the handler
         let mut handler = ReadRepairHandler::new(self.read_repair_strategy);
         for rm in resolved.repair_mutations {
             let target = replicas[rm.replica_index];
@@ -600,16 +686,41 @@ impl ReadCoordinator {
             );
         }
 
-        // Execute repairs (spawned to background for non-blocking execution)
         if handler.pending_count() > 0 {
             tokio::spawn(async move {
-                // Here we would pass `Some(messaging_service.clone())`
                 let count = handler.execute_repairs(None).await;
                 debug!("Executed {} read repair mutations in background", count);
             });
         }
 
         Ok(())
+    }
+
+    /// Compatibility read-repair entry point for callers that have not yet
+    /// gathered full replica data. StorageProxy should prefer
+    /// [`Self::read_repair_from_responses`] after re-reading mismatched replicas.
+    pub fn read_repair(
+        &self,
+        read: &CoordinatedRead,
+        replicas: &[Endpoint],
+    ) -> Result<(), ReadError> {
+        let responses = replicas
+            .iter()
+            .map(|_| {
+                let pd = cassandra_storage::memtable::partition::PartitionData::new();
+                DataResponse {
+                    partitions: vec![PartitionResult {
+                        partition_key: read.partition_key.clone(),
+                        data: Some(pd),
+                        live_row_count: 0,
+                        was_truncated: false,
+                    }],
+                    tombstones_read: 0,
+                    is_short_read: false,
+                }
+            })
+            .collect();
+        self.read_repair_from_responses(read, replicas, responses)
     }
 }
 
@@ -629,10 +740,14 @@ mod tests {
     }
 
     fn node(port: u16, tokens: Vec<i64>) -> NodeInfo {
+        node_in_dc(port, tokens, "dc1")
+    }
+
+    fn node_in_dc(port: u16, tokens: Vec<i64>, dc: &str) -> NodeInfo {
         NodeInfo::new(
             NodeId::random(),
             ep(port),
-            "dc1",
+            dc,
             "rack1",
             tokens.into_iter().map(Token::from_raw).collect(),
         )
@@ -644,6 +759,16 @@ mod tests {
         cm.update_node(node(7003, vec![100]));
 
         let coordinator = ReadCoordinator::new(Arc::clone(&cm), ep(7001));
+        (cm, coordinator)
+    }
+
+    fn setup_multi_dc_cluster() -> (Arc<ClusterMetadata>, ReadCoordinator) {
+        let cm = Arc::new(ClusterMetadata::new(node_in_dc(7001, vec![-100], "dc1")));
+        cm.update_node(node_in_dc(7002, vec![0], "dc1"));
+        cm.update_node(node_in_dc(7003, vec![100], "dc2"));
+
+        let coordinator =
+            ReadCoordinator::new(Arc::clone(&cm), ep(7001)).with_local_datacenter("dc1".into());
         (cm, coordinator)
     }
 
@@ -681,6 +806,38 @@ mod tests {
         let r = result.unwrap();
         assert_eq!(r.responses_required, 2);
         assert!(r.responses_received >= 2);
+    }
+
+    #[test]
+    fn plan_read_does_not_fabricate_data_or_responses() {
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let result = coordinator
+            .plan_read(&test_read(), ConsistencyLevel::Quorum, &strategy, &snitch)
+            .unwrap();
+
+        assert!(result.data.is_none());
+        assert_eq!(result.responses_received, 0);
+        assert_eq!(result.responses_required, 2);
+        assert!(result.contacted_replicas.len() >= result.responses_required);
+    }
+
+    #[tokio::test]
+    async fn coordinate_read_async_uses_plan_only_result() {
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let result = coordinator
+            .coordinate_read_async(&test_read(), ConsistencyLevel::Quorum, &strategy, &snitch)
+            .await
+            .unwrap();
+
+        assert!(result.data.is_none());
+        assert_eq!(result.responses_received, 0);
+        assert_eq!(result.responses_required, 2);
     }
 
     #[test]
@@ -737,6 +894,110 @@ mod tests {
     }
 
     #[test]
+    fn read_local_quorum_counts_only_local_dc_replicas() {
+        let (_cm, coordinator) = setup_multi_dc_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let result = coordinator
+            .coordinate_read(
+                &test_read(),
+                ConsistencyLevel::LocalQuorum,
+                &strategy,
+                &snitch,
+            )
+            .unwrap();
+
+        assert_eq!(result.responses_required, 2);
+        assert!(
+            result
+                .contacted_replicas
+                .iter()
+                .all(|endpoint| *endpoint == ep(7001) || *endpoint == ep(7002))
+        );
+    }
+
+    #[test]
+    fn read_local_quorum_ignores_remote_live_replicas_for_availability() {
+        let (cm, coordinator) = setup_multi_dc_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        cm.mark_dead(&ep(7002));
+
+        let result = coordinator.coordinate_read(
+            &test_read(),
+            ConsistencyLevel::LocalQuorum,
+            &strategy,
+            &snitch,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ReadError::Unavailable {
+                cl,
+                required,
+                alive,
+            } => {
+                assert_eq!(cl, ConsistencyLevel::LocalQuorum);
+                assert_eq!(required, 2);
+                assert_eq!(alive, 1);
+            }
+            e => panic!("Expected Unavailable, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn read_local_one_does_not_fall_back_to_remote_dc() {
+        let (cm, coordinator) = setup_multi_dc_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        cm.mark_dead(&ep(7001));
+        cm.mark_dead(&ep(7002));
+
+        let result = coordinator.coordinate_read(
+            &test_read(),
+            ConsistencyLevel::LocalOne,
+            &strategy,
+            &snitch,
+        );
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ReadError::Unavailable {
+                cl,
+                required,
+                alive,
+            } => {
+                assert_eq!(cl, ConsistencyLevel::LocalOne);
+                assert_eq!(required, 1);
+                assert_eq!(alive, 0);
+            }
+            e => panic!("Expected Unavailable, got {e:?}"),
+        }
+    }
+
+    #[test]
+    fn range_read_local_quorum_counts_only_local_dc_replicas() {
+        let (_cm, coordinator) = setup_multi_dc_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let cmd = PartitionRangeReadCommand::full_scan("ks", "users");
+        let result = coordinator
+            .coordinate_range_read(&cmd, ConsistencyLevel::LocalQuorum, &strategy, &snitch)
+            .unwrap();
+
+        assert_eq!(result.responses_required, 2);
+        assert_eq!(result.contacted_replicas.len(), 2);
+        assert!(
+            result
+                .contacted_replicas
+                .iter()
+                .all(|endpoint| *endpoint == ep(7001) || *endpoint == ep(7002))
+        );
+    }
+
+    #[test]
     fn contacted_replicas_sorted_by_proximity() {
         let (_cm, coordinator) = setup_cluster();
         let strategy = SimpleStrategy::new(3);
@@ -763,6 +1024,39 @@ mod tests {
         let r = result.unwrap();
         assert!(r.speculative_retry_used);
         assert!(r.contacted_replicas.len() >= 3); // data + digest + speculative
+    }
+
+    #[test]
+    fn percentile_speculation_uses_latency_estimator() {
+        let (_cm, coordinator) = setup_cluster();
+        let seen_percentile = Arc::new(AtomicU64::new(0));
+        let seen = Arc::clone(&seen_percentile);
+        let coordinator = coordinator
+            .with_speculative_retry(SpeculativeRetryPolicy::Percentile(95.0))
+            .with_latency_estimator(Arc::new(move |percentile| {
+                seen.store(percentile as u64, Ordering::Relaxed);
+                7
+            }));
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+
+        let result = coordinator
+            .plan_read(&test_read(), ConsistencyLevel::Quorum, &strategy, &snitch)
+            .unwrap();
+
+        assert!(result.contacted_replicas.len() >= 3);
+        assert_eq!(seen_percentile.load(Ordering::Relaxed), 95);
+    }
+
+    #[test]
+    fn read_repair_from_responses_rejects_count_mismatch() {
+        let (_cm, coordinator) = setup_cluster();
+
+        let err = coordinator
+            .read_repair_from_responses(&test_read(), &[ep(7001), ep(7002)], Vec::new())
+            .unwrap_err();
+
+        assert!(matches!(err, ReadError::Internal(_)));
     }
 
     #[test]

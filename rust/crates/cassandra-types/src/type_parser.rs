@@ -28,6 +28,7 @@
 //! - Composite: `CompositeType(UTF8Type,Int32Type)`
 //! - Tuple: `TupleType(Int32Type,UTF8Type)`
 //! - UDT: `UserType(keyspace,name,field1hex,type1,...)`
+//! - Vector: `VectorType(FloatType,3)`
 //!
 //! ## Java Oracle
 //! - `org.apache.cassandra.db.marshal.TypeParser`
@@ -72,6 +73,13 @@ pub fn parse_type(s: &str) -> Result<CqlType, ParseError> {
     }
     let mut parser = Parser::new(s);
     let ty = parser.parse_type()?;
+    parser.skip_ws();
+    if !parser.remaining().is_empty() {
+        return Err(ParseError::Malformed(format!(
+            "trailing characters at position {} in '{}'",
+            parser.pos, parser.input
+        )));
+    }
     Ok(ty)
 }
 
@@ -97,6 +105,15 @@ impl<'a> Parser<'a> {
 
     fn advance_by(&mut self, n: usize) {
         self.pos += n;
+    }
+
+    fn skip_ws(&mut self) {
+        while let Some(ch) = self.peek() {
+            if !ch.is_whitespace() {
+                break;
+            }
+            self.advance_by(ch.len_utf8());
+        }
     }
 
     fn consume_char(&mut self, c: char) -> Result<(), ParseError> {
@@ -132,17 +149,12 @@ impl<'a> Parser<'a> {
         self.consume_char('(')?;
         let mut types = Vec::new();
         loop {
-            // skip whitespace
-            while self.peek() == Some(' ') {
-                self.advance_by(1);
-            }
+            self.skip_ws();
             if self.peek() == Some(')') {
                 break;
             }
             types.push(self.parse_type()?);
-            while self.peek() == Some(' ') {
-                self.advance_by(1);
-            }
+            self.skip_ws();
             match self.peek() {
                 Some(',') => {
                     self.advance_by(1);
@@ -222,6 +234,9 @@ impl<'a> Parser<'a> {
                     let params = self.parse_type_params()?;
                     return Ok(CqlType::Tuple(params));
                 }
+                "VectorType" => {
+                    return self.parse_vector_type();
+                }
                 "CompositeType" => {
                     // Composite is treated as a tuple for CQL purposes
                     let params = self.parse_type_params()?;
@@ -240,6 +255,30 @@ impl<'a> Parser<'a> {
 
         // Simple (non-parameterized) type
         map_simple_name(short)
+    }
+
+    fn parse_vector_type(&mut self) -> Result<CqlType, ParseError> {
+        self.consume_char('(')?;
+        self.skip_ws();
+        let inner = self.parse_type()?;
+        self.skip_ws();
+        self.consume_char(',')?;
+        self.skip_ws();
+        let dims_text = self.read_raw_token()?.trim().to_string();
+        let dims = dims_text.parse::<u32>().map_err(|_| {
+            ParseError::Malformed(format!(
+                "VectorType dimension must be a positive integer, got '{}'",
+                dims_text
+            ))
+        })?;
+        if dims == 0 {
+            return Err(ParseError::Malformed(
+                "VectorType dimension must be greater than zero".into(),
+            ));
+        }
+        self.skip_ws();
+        self.consume_char(')')?;
+        Ok(CqlType::Vector(Box::new(inner), dims))
     }
 
     /// Parse UserType(ks,name,field1hex,type1,...)
@@ -371,9 +410,7 @@ fn hex_decode_str(hex: &str) -> Result<String, ()> {
                 .and_then(|s| u8::from_str_radix(s, 16).ok())
         })
         .collect();
-    bytes
-        .and_then(|b| String::from_utf8(b).ok())
-        .ok_or(())
+    bytes.and_then(|b| String::from_utf8(b).ok()).ok_or(())
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -438,6 +475,24 @@ mod tests {
     }
 
     #[test]
+    fn vector_type() {
+        let ty = parse_type("org.apache.cassandra.db.marshal.VectorType(FloatType, 3)").unwrap();
+        assert_eq!(ty, CqlType::Vector(Box::new(CqlType::Float), 3));
+    }
+
+    #[test]
+    fn vector_type_rejects_bad_dimension() {
+        assert!(matches!(
+            parse_type("VectorType(FloatType,0)"),
+            Err(ParseError::Malformed(_))
+        ));
+        assert!(matches!(
+            parse_type("VectorType(FloatType,abc)"),
+            Err(ParseError::Malformed(_))
+        ));
+    }
+
+    #[test]
     fn reversed_type() {
         let ty = parse_type("ReversedType(LongType)").unwrap();
         assert_eq!(ty, CqlType::Reversed(Box::new(CqlType::Bigint)));
@@ -446,10 +501,8 @@ mod tests {
     #[test]
     fn nested_collection() {
         // FrozenType(MapType(UTF8Type,FrozenType(ListType(Int32Type))))
-        let ty = parse_type(
-            "FrozenType(MapType(UTF8Type,FrozenType(ListType(Int32Type))))",
-        )
-        .unwrap();
+        let ty =
+            parse_type("FrozenType(MapType(UTF8Type,FrozenType(ListType(Int32Type))))").unwrap();
         assert!(matches!(ty, CqlType::Map(_, _, true)));
     }
 
@@ -458,6 +511,14 @@ mod tests {
         assert!(matches!(
             parse_type("UnknownCoolType"),
             Err(ParseError::UnknownType(_))
+        ));
+    }
+
+    #[test]
+    fn trailing_characters_error() {
+        assert!(matches!(
+            parse_type("Int32Type trailing"),
+            Err(ParseError::Malformed(_))
         ));
     }
 

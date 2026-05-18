@@ -28,16 +28,24 @@ verifying Rust output against the Java oracle.
 """
 
 [dependencies]
+cassandra-accord = { path = "../cassandra-accord" }
+cassandra-admin = { path = "../cassandra-admin" }
 cassandra-common = { path = "../cassandra-common" }
 cassandra-cql = { path = "../cassandra-cql" }
+cassandra-io = { path = "../cassandra-io" }
+cassandra-messaging = { path = "../cassandra-messaging" }
 cassandra-native-protocol = { path = "../cassandra-native-protocol" }
+cassandra-repair = { path = "../cassandra-repair" }
+cassandra-security = { path = "../cassandra-security" }
 cassandra-storage = { path = "../cassandra-storage" }
+cassandra-streaming = { path = "../cassandra-streaming" }
 cassandra-types = { path = "../cassandra-types" }
 
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+uuid = { workspace = true }
 hex = "0.4"
 proptest = { workspace = true }
 
@@ -46,6 +54,8 @@ tempfile = { workspace = true }
 criterion = { workspace = true }
 cassandra-coordinator = { path = "../cassandra-coordinator" }
 cassandra-cluster-metadata = { path = "../cassandra-cluster-metadata" }
+cassandra-schema = { path = "../cassandra-schema" }
+tokio = { workspace = true }
 
 [[bench]]
 name = "p0_gap_benchmarks"

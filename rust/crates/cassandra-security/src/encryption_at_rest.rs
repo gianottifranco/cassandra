@@ -8,8 +8,8 @@
 //! Defines the `StorageEncryptor` trait with hook points for commitlog
 //! and SSTable write paths. Default implementation is `NoOpStorageEncryptor`.
 
-use crate::encryption_context::EncryptionContext;
 use crate::SecurityError;
+use crate::encryption_context::EncryptionContext;
 use std::sync::Arc;
 
 /// Trait for storage-level encryption hooks.
@@ -60,12 +60,8 @@ impl StorageEncryptor for TdeStorageEncryptor {
         self.context.encrypt_chunked(data)
     }
 
-    fn decrypt_segment(&self, _data: &[u8]) -> Result<Vec<u8>, SecurityError> {
-        // Full chunked decrypt requires parsing headers from the stream.
-        // This is a placeholder — real implementation will parse header+ciphertext pairs.
-        Err(SecurityError::ConfigError(
-            "chunked decrypt not yet implemented; use EncryptionContext::decrypt_chunk with headers".to_string(),
-        ))
+    fn decrypt_segment(&self, data: &[u8]) -> Result<Vec<u8>, SecurityError> {
+        self.context.decrypt_chunked(data)
     }
 
     fn is_enabled(&self) -> bool {
@@ -131,5 +127,6 @@ mod tests {
         let data = b"some commitlog data to encrypt";
         let encrypted = enc.encrypt_segment(data).unwrap();
         assert_ne!(encrypted, data);
+        assert_eq!(enc.decrypt_segment(&encrypted).unwrap(), data);
     }
 }

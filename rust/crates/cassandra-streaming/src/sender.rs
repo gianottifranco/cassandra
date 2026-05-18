@@ -170,9 +170,7 @@ impl StreamSender {
         for transfer_id in transfer_ids {
             let transfer = session.outgoing.get(&transfer_id).unwrap();
             let descriptor = SSTableDescriptor::new(
-                &data_dir
-                    .join(&transfer.keyspace)
-                    .join(&transfer.table),
+                &data_dir.join(&transfer.keyspace).join(&transfer.table),
                 &transfer.keyspace,
                 &transfer.table,
                 1,
@@ -219,8 +217,7 @@ mod tests {
             local_deletion_time: None,
         });
 
-        let partitions: Vec<(Vec<u8>, PartitionData)> =
-            vec![(b"pk1".to_vec(), pd)];
+        let partitions: Vec<(Vec<u8>, PartitionData)> = vec![(b"pk1".to_vec(), pd)];
         let wire = WirePartitions::from_partitions(&partitions);
         let serialized = serde_json::to_vec(&wire).unwrap();
         let deserialized: WirePartitions = serde_json::from_slice(&serialized).unwrap();
@@ -232,11 +229,7 @@ mod tests {
     #[test]
     fn chunked_send_progress_tracking() {
         let data = vec![0u8; 200];
-        let mut transfer = StreamTransfer::new(
-            "ks".into(),
-            "tbl".into(),
-            vec![],
-        );
+        let mut transfer = StreamTransfer::new("ks".into(), "tbl".into(), vec![]);
         transfer.chunk_size = 64;
         transfer.total_bytes = data.len() as u64;
 

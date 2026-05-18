@@ -41,6 +41,7 @@ pub mod forwarding;
 pub mod frame;
 pub mod frame_codec;
 pub mod handshake;
+pub mod java_wire;
 pub mod metrics;
 pub mod outbound_connection;
 pub mod outbound_connections;
@@ -52,6 +53,10 @@ pub mod verb;
 pub use frame::{
     CURRENT_MESSAGING_VERSION, MIN_MESSAGING_VERSION, Message, MessageCodec, MessageHeader,
     VersionNegotiation,
+};
+pub use java_wire::{
+    JavaMessage, JavaMessageCodec, JavaMessageHeader, JavaMessageParam, JavaWireError,
+    java_verb_id, rust_verb_from_java_id,
 };
 pub use metrics::{MessagingMetrics, VerbMetrics, VerbMetricsSnapshot};
 pub use service::{

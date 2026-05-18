@@ -12,6 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use thiserror::Error;
 
 // ─── Validation Configuration ─────────────────────────────────────────────
 
@@ -51,6 +52,31 @@ pub struct SampleQuery {
     pub name: String,
     pub cql: String,
     pub expected_columns: Vec<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum ValidationDataError {
+    #[error("failed to collect row count for {table}: {reason}")]
+    RowCount { table: String, reason: String },
+    #[error("failed to collect checksums for {table}: {reason}")]
+    Checksum { table: String, reason: String },
+    #[error("failed to execute sample query {query}: {reason}")]
+    Query { query: String, reason: String },
+}
+
+/// Data source used to collect validation input from a cluster or snapshot.
+pub trait ValidationDataSource {
+    fn cluster_name(&self) -> &str;
+
+    fn row_count(&self, table: &str) -> Result<u64, String>;
+
+    fn partition_checksums(
+        &self,
+        table: &str,
+        max_partitions: usize,
+    ) -> Result<BTreeMap<String, u64>, String>;
+
+    fn query_results(&self, query: &SampleQuery) -> Result<Vec<String>, String>;
 }
 
 // ─── Validation Report ────────────────────────────────────────────────────
@@ -140,9 +166,6 @@ pub struct ValidationSummary {
 // ─── Validation Engine ────────────────────────────────────────────────────
 
 /// Run a full validation against provided data snapshots.
-///
-/// In a real deployment, this would connect to both Java and Rust clusters
-/// via CQL. For now it accepts pre-collected data for offline validation.
 pub fn validate_migration(
     source_data: &MigrationData,
     target_data: &MigrationData,
@@ -268,6 +291,49 @@ pub fn validate_migration(
     }
 }
 
+/// Collect validation data from a source before running comparison.
+pub fn collect_migration_data<S: ValidationDataSource>(
+    source: &S,
+    config: &ValidationConfig,
+) -> Result<MigrationData, ValidationDataError> {
+    let mut data = MigrationData::new(source.cluster_name());
+
+    for table in &config.tables {
+        if config.validate_row_counts {
+            let count =
+                source
+                    .row_count(table)
+                    .map_err(|reason| ValidationDataError::RowCount {
+                        table: table.clone(),
+                        reason,
+                    })?;
+            data.row_counts.insert(table.clone(), count);
+        }
+
+        if config.validate_checksums {
+            let checksums = source
+                .partition_checksums(table, config.max_partitions_per_table)
+                .map_err(|reason| ValidationDataError::Checksum {
+                    table: table.clone(),
+                    reason,
+                })?;
+            data.partition_checksums.insert(table.clone(), checksums);
+        }
+    }
+
+    for query in &config.sample_queries {
+        let rows = source
+            .query_results(query)
+            .map_err(|reason| ValidationDataError::Query {
+                query: query.name.clone(),
+                reason,
+            })?;
+        data.query_results.insert(query.name.clone(), rows);
+    }
+
+    Ok(data)
+}
+
 fn compare_checksums(
     table: &str,
     source: &BTreeMap<String, u64>,
@@ -335,6 +401,42 @@ impl MigrationData {
             partition_checksums: BTreeMap::new(),
             query_results: BTreeMap::new(),
         }
+    }
+}
+
+impl ValidationDataSource for MigrationData {
+    fn cluster_name(&self) -> &str {
+        &self.cluster
+    }
+
+    fn row_count(&self, table: &str) -> Result<u64, String> {
+        self.row_counts
+            .get(table)
+            .copied()
+            .ok_or_else(|| format!("missing row count for {table}"))
+    }
+
+    fn partition_checksums(
+        &self,
+        table: &str,
+        max_partitions: usize,
+    ) -> Result<BTreeMap<String, u64>, String> {
+        let mut checksums = self
+            .partition_checksums
+            .get(table)
+            .cloned()
+            .ok_or_else(|| format!("missing checksums for {table}"))?;
+        if checksums.len() > max_partitions {
+            checksums = checksums.into_iter().take(max_partitions).collect();
+        }
+        Ok(checksums)
+    }
+
+    fn query_results(&self, query: &SampleQuery) -> Result<Vec<String>, String> {
+        self.query_results
+            .get(&query.name)
+            .cloned()
+            .ok_or_else(|| format!("missing result for {}", query.name))
     }
 }
 
@@ -459,6 +561,37 @@ mod tests {
 
         let report = validate_migration(&src, &tgt, &config);
         assert!(report.query_checks[0].passed);
+    }
+
+    #[test]
+    fn collect_migration_data_from_snapshot_source() {
+        let mut source = MigrationData::new("java");
+        source.row_counts.insert("ks.t1".into(), 2);
+        source
+            .partition_checksums
+            .insert("ks.t1".into(), BTreeMap::from([("pk1".into(), 10)]));
+        source
+            .query_results
+            .insert("sample".into(), vec!["{\"id\":1}".into()]);
+
+        let config = ValidationConfig {
+            tables: vec!["ks.t1".into()],
+            sample_queries: vec![SampleQuery {
+                name: "sample".into(),
+                cql: "SELECT * FROM ks.t1".into(),
+                expected_columns: vec!["id".into()],
+            }],
+            validate_row_counts: true,
+            validate_checksums: true,
+            ..Default::default()
+        };
+
+        let collected = collect_migration_data(&source, &config).unwrap();
+
+        assert_eq!(collected.cluster, "java");
+        assert_eq!(collected.row_counts["ks.t1"], 2);
+        assert_eq!(collected.partition_checksums["ks.t1"]["pk1"], 10);
+        assert_eq!(collected.query_results["sample"].len(), 1);
     }
 
     #[test]

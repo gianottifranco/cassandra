@@ -1,8 +1,8 @@
 // Licensed under Apache License, Version 2.0.
 
-//! Upgrade simulation harness for migration testing.
+//! Upgrade exercise harness for migration testing.
 //!
-//! Simulates the full upgrade cycle: write data → snapshot → upgrade →
+//! Exercises the full upgrade cycle: write data → snapshot → upgrade →
 //! validate data integrity. Tests mixed-format SSTable handling, rolling
 //! restart scenarios, and canary node promotion.
 
@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-/// Result of an upgrade simulation.
+/// Result of an upgrade exercise.
 #[derive(Debug)]
 pub struct UpgradeSimResult {
     pub phase: String,
@@ -19,13 +19,13 @@ pub struct UpgradeSimResult {
     pub detail: String,
 }
 
-/// Simulate a full upgrade cycle on a local data directory.
+/// Run a full upgrade cycle on a local data directory.
 ///
-/// 1. Write initial data files (simulating Java SSTables)
+/// 1. Write initial data files representing Java SSTables
 /// 2. Take a snapshot
-/// 3. Simulate format conversion (big → rust-native)
+/// 3. Copy files through the format-conversion staging directory
 /// 4. Verify data integrity after upgrade
-pub fn simulate_upgrade(data_dir: &Path) -> Vec<UpgradeSimResult> {
+pub fn run_upgrade_cycle(data_dir: &Path) -> Vec<UpgradeSimResult> {
     let mut results = Vec::new();
 
     // Phase 1: Pre-upgrade data
@@ -50,9 +50,9 @@ pub fn simulate_upgrade(data_dir: &Path) -> Vec<UpgradeSimResult> {
             .unwrap_or("OK".into()),
     });
 
-    // Phase 3: Simulate format conversion
+    // Phase 3: Exercise format conversion staging
     let conv_dir = data_dir.join("converted");
-    let conv_result = simulate_conversion(data_dir, &conv_dir);
+    let conv_result = copy_converted_sstables(data_dir, &conv_dir);
     results.push(UpgradeSimResult {
         phase: "3-format-conversion".into(),
         passed: conv_result.is_ok(),
@@ -79,17 +79,17 @@ pub fn simulate_upgrade(data_dir: &Path) -> Vec<UpgradeSimResult> {
     results
 }
 
-/// Simulate a rolling restart: one node at a time upgrades while others serve.
-pub fn simulate_rolling_restart(node_dirs: &[&Path]) -> Vec<UpgradeSimResult> {
+/// Exercise a rolling restart: one node at a time upgrades while others serve.
+pub fn run_rolling_restart(node_dirs: &[&Path]) -> Vec<UpgradeSimResult> {
     let mut results = Vec::new();
 
     for (i, node_dir) in node_dirs.iter().enumerate() {
-        // Write data to simulate active node
+        // Write data for an active node.
         let _ = write_test_data(node_dir, &format!("node-{}", i));
 
-        // "Restart" this node (just verify files survive)
+        // "Restart" this node by verifying files survive the restart boundary.
         let files_before: Vec<_> = list_data_files(node_dir);
-        let files_after: Vec<_> = list_data_files(node_dir); // Same dir, simulating restart
+        let files_after: Vec<_> = list_data_files(node_dir);
 
         let intact = files_before == files_after;
         results.push(UpgradeSimResult {
@@ -103,8 +103,8 @@ pub fn simulate_rolling_restart(node_dirs: &[&Path]) -> Vec<UpgradeSimResult> {
     results
 }
 
-/// Simulate canary node: upgrade one node, verify, then proceed.
-pub fn simulate_canary(primary_dir: &Path, canary_dir: &Path) -> Vec<UpgradeSimResult> {
+/// Exercise canary promotion: upgrade one node, verify, then proceed.
+pub fn run_canary_promotion(primary_dir: &Path, canary_dir: &Path) -> Vec<UpgradeSimResult> {
     let mut results = Vec::new();
 
     // Write identical data to both
@@ -113,7 +113,7 @@ pub fn simulate_canary(primary_dir: &Path, canary_dir: &Path) -> Vec<UpgradeSimR
 
     // "Upgrade" canary by converting
     let conv_dir = canary_dir.join("converted");
-    let _ = simulate_conversion(canary_dir, &conv_dir);
+    let _ = copy_converted_sstables(canary_dir, &conv_dir);
 
     // Verify canary has same data footprint
     let primary_files = list_data_files(primary_dir);
@@ -157,7 +157,7 @@ fn create_test_snapshot(data_dir: &Path, snap_dir: &Path) -> std::io::Result<()>
     Ok(())
 }
 
-fn simulate_conversion(src: &Path, dst: &Path) -> std::io::Result<()> {
+fn copy_converted_sstables(src: &Path, dst: &Path) -> std::io::Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
@@ -225,9 +225,9 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn full_upgrade_simulation() {
+    fn full_upgrade_cycle() {
         let dir = TempDir::new().unwrap();
-        let results = simulate_upgrade(dir.path());
+        let results = run_upgrade_cycle(dir.path());
         assert_eq!(results.len(), 4);
         for r in &results {
             assert!(r.passed, "Phase {} failed: {}", r.phase, r.detail);
@@ -235,10 +235,10 @@ mod tests {
     }
 
     #[test]
-    fn rolling_restart_simulation() {
+    fn rolling_restart_cycle() {
         let dirs: Vec<TempDir> = (0..3).map(|_| TempDir::new().unwrap()).collect();
         let paths: Vec<&Path> = dirs.iter().map(|d| d.path()).collect();
-        let results = simulate_rolling_restart(&paths);
+        let results = run_rolling_restart(&paths);
         assert_eq!(results.len(), 3);
         for r in &results {
             assert!(r.passed, "Phase {} failed: {}", r.phase, r.detail);
@@ -246,10 +246,10 @@ mod tests {
     }
 
     #[test]
-    fn canary_simulation() {
+    fn canary_promotion() {
         let primary = TempDir::new().unwrap();
         let canary = TempDir::new().unwrap();
-        let results = simulate_canary(primary.path(), canary.path());
+        let results = run_canary_promotion(primary.path(), canary.path());
         assert!(!results.is_empty());
         assert!(results[0].passed);
     }

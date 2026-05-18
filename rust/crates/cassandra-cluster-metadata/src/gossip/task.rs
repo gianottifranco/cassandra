@@ -28,6 +28,7 @@ use cassandra_messaging::{Message, MessagingService};
 use tracing::{debug, warn};
 
 use crate::gossip::Gossiper;
+use crate::gossip::messages::JavaGossipCodec;
 
 /// Configuration for the periodic gossip task.
 pub struct GossipTaskConfig {
@@ -97,7 +98,7 @@ impl GossipTask {
         if let Some(target) = self.gossiper.pick_gossip_target() {
             // Step 3: Build and send SYN
             let syn = self.gossiper.make_gossip_digest_syn();
-            let syn_payload = match serde_json::to_vec(&syn) {
+            let syn_payload = match JavaGossipCodec::encode_syn(&syn) {
                 Ok(p) => p,
                 Err(e) => {
                     warn!(error = %e, "Failed to serialize SYN");
@@ -116,11 +117,11 @@ impl GossipTask {
             {
                 Ok(ack_msg) => {
                     // Step 5: Process ACK → produce ACK2
-                    if let Ok(ack) = serde_json::from_slice(&ack_msg.payload) {
+                    if let Ok(ack) = JavaGossipCodec::decode_ack(&ack_msg.payload) {
                         let ack2 = self.gossiper.handle_ack(&ack);
 
                         // Step 6: Send ACK2 (fire-and-forget)
-                        if let Ok(ack2_payload) = serde_json::to_vec(&ack2) {
+                        if let Ok(ack2_payload) = JavaGossipCodec::encode_ack2(&ack2) {
                             let ack2_msg = Message::request(
                                 Verb::GossipDigestAck2,
                                 self.messaging.next_id(),
@@ -149,13 +150,10 @@ impl GossipTask {
         // Step 9: Maybe probe dead endpoints
         if let Some(dead_target) = self.gossiper.maybe_probe_dead_endpoints() {
             let syn = self.gossiper.make_gossip_digest_syn();
-            if let Ok(syn_payload) = serde_json::to_vec(&syn) {
+            if let Ok(syn_payload) = JavaGossipCodec::encode_syn(&syn) {
                 let msg_id = self.messaging.next_id();
                 let syn_msg = Message::request(Verb::GossipDigestSyn, msg_id, syn_payload);
-                let _ = self
-                    .messaging
-                    .send(dead_target.addr(), syn_msg)
-                    .await;
+                let _ = self.messaging.send(dead_target.addr(), syn_msg).await;
             }
         }
     }

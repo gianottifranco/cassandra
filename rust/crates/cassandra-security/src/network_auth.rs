@@ -9,11 +9,12 @@
 use std::collections::HashSet;
 
 use dashmap::DashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::SecurityError;
 
 /// DC-level permissions for a role.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DCPermissions {
     /// If true, the role can access all DCs.
     pub all_access: bool,

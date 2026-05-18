@@ -23,6 +23,7 @@ pub enum RestrictionKind {
     Range { op: RelationOp },
     Contains,
     ContainsKey,
+    Like,
     IsNotNull,
     TokenBased,
 }
@@ -72,3 +73,18 @@ impl fmt::Display for RestrictionError {
 }
 
 impl std::error::Error for RestrictionError {}
+
+pub(crate) fn tuple_columns(column: &str) -> Option<Vec<String>> {
+    let trimmed = column.trim();
+    let inner = trimmed.strip_prefix('(')?.strip_suffix(')')?;
+    let columns: Vec<String> = inner
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if columns.len() > 1 {
+        Some(columns)
+    } else {
+        None
+    }
+}

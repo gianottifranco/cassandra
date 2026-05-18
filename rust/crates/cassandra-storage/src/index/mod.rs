@@ -32,6 +32,7 @@
 //! - [`legacy`] — legacy key-based secondary index
 //! - [`sai`] — Storage Attached Indexing (deep storage integration)
 
+pub mod differential;
 pub mod legacy;
 pub mod lifecycle;
 pub mod metrics;
@@ -92,10 +93,7 @@ impl IndexDefinition {
         keyspace: &str,
         table: &str,
     ) -> Self {
-        let column = meta
-            .target_column()
-            .cloned()
-            .unwrap_or_default();
+        let column = meta.target_column().cloned().unwrap_or_default();
 
         let index_type = match meta.kind {
             cassandra_schema::index::IndexKind::Keys
@@ -104,6 +102,8 @@ impl IndexDefinition {
                 if let Some(class) = meta.index_class_name() {
                     if class.contains("StorageAttachedIndex") {
                         IndexType::Sai
+                    } else if class.contains("SASIIndex") {
+                        IndexType::Sasi
                     } else {
                         IndexType::Legacy
                     }
@@ -315,6 +315,15 @@ impl IndexManager {
             {
                 idx.add_sai_segment(segment.clone())?;
             }
+        }
+        Ok(())
+    }
+
+    /// Truncate every registered index for this column family.
+    pub fn truncate_all(&self) -> Result<(), IndexError> {
+        let indexes = self.indexes.read();
+        for idx in indexes.iter() {
+            idx.truncate()?;
         }
         Ok(())
     }
@@ -569,8 +578,7 @@ mod tests {
         use cassandra_schema::index::{IndexKind, IndexMetadata};
         let mut opts = HashMap::new();
         opts.insert("target".into(), "col1".into());
-        let meta =
-            IndexMetadata::new("id2".into(), "comp_idx".into(), IndexKind::Composites, opts);
+        let meta = IndexMetadata::new("id2".into(), "comp_idx".into(), IndexKind::Composites, opts);
         let def = IndexDefinition::from_metadata(&meta, "ks", "tbl");
         assert_eq!(def.index_type, IndexType::Legacy);
     }
@@ -590,13 +598,26 @@ mod tests {
     }
 
     #[test]
+    fn from_metadata_custom_sasi() {
+        use cassandra_schema::index::{IndexKind, IndexMetadata};
+        let mut opts = HashMap::new();
+        opts.insert("target".into(), "col1".into());
+        opts.insert(
+            "class_name".into(),
+            "org.apache.cassandra.index.sasi.SASIIndex".into(),
+        );
+        let meta = IndexMetadata::new("id4".into(), "sasi_idx".into(), IndexKind::Custom, opts);
+        let def = IndexDefinition::from_metadata(&meta, "ks", "tbl");
+        assert_eq!(def.index_type, IndexType::Sasi);
+    }
+
+    #[test]
     fn from_metadata_custom_non_sai() {
         use cassandra_schema::index::{IndexKind, IndexMetadata};
         let mut opts = HashMap::new();
         opts.insert("target".into(), "col1".into());
         opts.insert("class_name".into(), "com.example.MyCustomIndex".into());
-        let meta =
-            IndexMetadata::new("id4".into(), "custom_idx".into(), IndexKind::Custom, opts);
+        let meta = IndexMetadata::new("id5".into(), "custom_idx".into(), IndexKind::Custom, opts);
         let def = IndexDefinition::from_metadata(&meta, "ks", "tbl");
         assert_eq!(def.index_type, IndexType::Legacy);
     }
@@ -672,10 +693,7 @@ mod tests {
         assert_eq!(def.column, "col1");
         assert!(mgr.get_definition("nonexistent").is_none());
 
-        assert_eq!(
-            mgr.get_index_for_column("col1"),
-            Some("idx1".to_string())
-        );
+        assert_eq!(mgr.get_index_for_column("col1"), Some("idx1".to_string()));
         assert!(mgr.get_index_for_column("col2").is_none());
 
         // Unregister

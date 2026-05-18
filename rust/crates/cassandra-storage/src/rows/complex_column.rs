@@ -158,7 +158,8 @@ mod tests {
 
     #[test]
     fn merge_complex_deletion() {
-        let mut a = ComplexColumnData::with_deletion("tags".to_string(), DeletionTime::new(100, 100));
+        let mut a =
+            ComplexColumnData::with_deletion("tags".to_string(), DeletionTime::new(100, 100));
         let b = ComplexColumnData::with_deletion("tags".to_string(), DeletionTime::new(200, 200));
         a.merge_with(&b);
         assert_eq!(a.complex_deletion.marked_for_delete_at, 200);

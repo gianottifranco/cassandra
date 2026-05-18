@@ -1,6 +1,6 @@
 // Licensed under Apache License, Version 2.0.
 
-//! CDC continuity tests across simulated migration boundary.
+//! CDC continuity tests across a migration boundary.
 
 #[cfg(test)]
 mod tests {
@@ -27,7 +27,7 @@ mod tests {
         // Java side: segments 1-5
         make_cdc_segments(java_dir.path(), &[1, 2, 3, 4, 5]);
 
-        // Simulate migration: copy segments to rust side, add new ones
+        // Migration handoff: copy segments to Rust side, add new ones.
         make_cdc_segments(rust_dir.path(), &[1, 2, 3, 4, 5, 6, 7]);
 
         // Verify all Java segments present in Rust

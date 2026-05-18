@@ -43,15 +43,15 @@ pub trait CryptoProvider: Send + Sync {
 
 /// AES-CBC with PKCS7 padding (maps Java's AES/CBC/PKCS5Padding).
 ///
-/// Supports 128-bit and 256-bit keys.
+/// Supports 128-bit, 192-bit, and 256-bit keys.
 pub struct AesCbcProvider;
 
 impl CryptoProvider for AesCbcProvider {
     fn encrypt(&self, key: &[u8], iv: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SecurityError> {
-        use aes::Aes128;
-        use cbc::cipher::block_padding::Pkcs7;
+        use aes::{Aes128, Aes192, Aes256};
         use cbc::cipher::BlockEncryptMut;
         use cbc::cipher::KeyIvInit;
+        use cbc::cipher::block_padding::Pkcs7;
 
         match key.len() {
             16 => {
@@ -60,24 +60,30 @@ impl CryptoProvider for AesCbcProvider {
                     .map_err(|e| SecurityError::ConfigError(format!("AES init: {e}")))?;
                 Ok(encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext))
             }
+            24 => {
+                type Aes192CbcEnc = cbc::Encryptor<Aes192>;
+                let encryptor = Aes192CbcEnc::new_from_slices(key, iv)
+                    .map_err(|e| SecurityError::ConfigError(format!("AES init: {e}")))?;
+                Ok(encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext))
+            }
             32 => {
-                type Aes256CbcEnc = cbc::Encryptor<aes::Aes256>;
+                type Aes256CbcEnc = cbc::Encryptor<Aes256>;
                 let encryptor = Aes256CbcEnc::new_from_slices(key, iv)
                     .map_err(|e| SecurityError::ConfigError(format!("AES init: {e}")))?;
                 Ok(encryptor.encrypt_padded_vec_mut::<Pkcs7>(plaintext))
             }
             other => Err(SecurityError::ConfigError(format!(
-                "unsupported AES key length: {} bytes (need 16 or 32)",
+                "unsupported AES key length: {} bytes (need 16, 24, or 32)",
                 other
             ))),
         }
     }
 
     fn decrypt(&self, key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, SecurityError> {
-        use aes::Aes128;
-        use cbc::cipher::block_padding::Pkcs7;
+        use aes::{Aes128, Aes192, Aes256};
         use cbc::cipher::BlockDecryptMut;
         use cbc::cipher::KeyIvInit;
+        use cbc::cipher::block_padding::Pkcs7;
 
         match key.len() {
             16 => {
@@ -88,8 +94,16 @@ impl CryptoProvider for AesCbcProvider {
                     .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
                     .map_err(|e| SecurityError::ConfigError(format!("AES decrypt: {e}")))
             }
+            24 => {
+                type Aes192CbcDec = cbc::Decryptor<Aes192>;
+                let decryptor = Aes192CbcDec::new_from_slices(key, iv)
+                    .map_err(|e| SecurityError::ConfigError(format!("AES init: {e}")))?;
+                decryptor
+                    .decrypt_padded_vec_mut::<Pkcs7>(ciphertext)
+                    .map_err(|e| SecurityError::ConfigError(format!("AES decrypt: {e}")))
+            }
             32 => {
-                type Aes256CbcDec = cbc::Decryptor<aes::Aes256>;
+                type Aes256CbcDec = cbc::Decryptor<Aes256>;
                 let decryptor = Aes256CbcDec::new_from_slices(key, iv)
                     .map_err(|e| SecurityError::ConfigError(format!("AES init: {e}")))?;
                 decryptor
@@ -129,7 +143,12 @@ impl CryptoProvider for NoOpCryptoProvider {
         Ok(plaintext.to_vec())
     }
 
-    fn decrypt(&self, _key: &[u8], _iv: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, SecurityError> {
+    fn decrypt(
+        &self,
+        _key: &[u8],
+        _iv: &[u8],
+        ciphertext: &[u8],
+    ) -> Result<Vec<u8>, SecurityError> {
         Ok(ciphertext.to_vec())
     }
 
@@ -178,8 +197,9 @@ impl KeyProvider for FileKeyProvider {
         if hex_path.exists() {
             let hex_str = std::fs::read_to_string(&hex_path)
                 .map_err(|e| SecurityError::ConfigError(format!("read key '{}': {}", alias, e)))?;
-            let decoded = hex_decode(hex_str.trim())
-                .map_err(|e| SecurityError::ConfigError(format!("hex decode '{}': {}", alias, e)))?;
+            let decoded = hex_decode(hex_str.trim()).map_err(|e| {
+                SecurityError::ConfigError(format!("hex decode '{}': {}", alias, e))
+            })?;
             return Ok(decoded);
         }
 
@@ -248,9 +268,21 @@ mod tests {
     }
 
     #[test]
+    fn aes192_cbc_roundtrip() {
+        let provider = AesCbcProvider;
+        let key = [0x42u8; 24]; // 192-bit key
+        let iv = provider.generate_iv();
+        let plaintext = b"Encryption at rest test data 192";
+
+        let ciphertext = provider.encrypt(&key, &iv, plaintext).unwrap();
+        let decrypted = provider.decrypt(&key, &iv, &ciphertext).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
     fn aes_bad_key_length() {
         let provider = AesCbcProvider;
-        let key = [0u8; 24]; // 192-bit — not supported by our impl
+        let key = [0u8; 20];
         let iv = vec![0u8; 16];
         assert!(provider.encrypt(&key, &iv, b"test").is_err());
     }
@@ -279,7 +311,11 @@ mod tests {
     #[test]
     fn file_key_provider_hex() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("mykey.hex"), "0102030405060708090a0b0c0d0e0f10").unwrap();
+        std::fs::write(
+            dir.path().join("mykey.hex"),
+            "0102030405060708090a0b0c0d0e0f10",
+        )
+        .unwrap();
 
         let provider = FileKeyProvider::new(dir.path());
         let key = provider.get_key("mykey").unwrap();

@@ -37,7 +37,10 @@ impl std::fmt::Display for ServiceState {
 #[derive(Debug, Error)]
 pub enum ServiceError {
     #[error("Invalid state transition from {from} to {to}")]
-    InvalidTransition { from: ServiceState, to: ServiceState },
+    InvalidTransition {
+        from: ServiceState,
+        to: ServiceState,
+    },
     #[error("Service error: {0}")]
     Other(String),
 }
@@ -74,7 +77,8 @@ impl NativeTransportConfig {
             listen_address,
             port: cfg.native_transport_port,
             max_concurrent_connections: cfg.native_transport_max_concurrent_connections,
-            max_concurrent_connections_per_ip: cfg.native_transport_max_concurrent_connections_per_ip,
+            max_concurrent_connections_per_ip: cfg
+                .native_transport_max_concurrent_connections_per_ip,
             max_frame_size: cfg.native_transport_max_frame_size,
             max_request_data_in_flight: cfg.native_transport_max_request_data_in_flight,
             rate_limiting_enabled: cfg.native_transport_rate_limiting_enabled,
@@ -151,11 +155,7 @@ impl NativeTransportService {
         self.finish_stop()
     }
 
-    fn transition(
-        &self,
-        expected: ServiceState,
-        target: ServiceState,
-    ) -> Result<(), ServiceError> {
+    fn transition(&self, expected: ServiceState, target: ServiceState) -> Result<(), ServiceError> {
         let mut state = self.state.lock();
         if *state != expected {
             return Err(ServiceError::InvalidTransition {

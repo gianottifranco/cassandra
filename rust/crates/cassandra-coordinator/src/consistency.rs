@@ -21,6 +21,7 @@
 //! - `org.apache.cassandra.db.ConsistencyLevel`
 //! - `org.apache.cassandra.service.AbstractWriteResponseHandler`
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -59,21 +60,20 @@ impl ConsistencyLevel {
     /// Calculate the number of responses needed to satisfy this CL.
     ///
     /// `rf` is the total replication factor for the keyspace.
-    /// For `LocalQuorum` and `LocalOne`, `rf` should be the local-DC RF.
+    /// For `LocalQuorum`, `LocalOne`, and `LocalSerial`, `rf` should be the local-DC RF.
+    ///
+    /// `EachQuorum` only has a single scalar result when `rf` represents one
+    /// datacenter. Use [`Self::block_for_replicated_dcs`] when per-DC RFs are
+    /// available.
     pub fn block_for(&self, rf: usize) -> usize {
         match self {
             Self::One | Self::LocalOne => 1,
             Self::Two => 2.min(rf),
             Self::Three => 3.min(rf),
-            Self::Quorum | Self::LocalQuorum => rf / 2 + 1,
+            Self::Quorum | Self::LocalQuorum | Self::Serial | Self::LocalSerial => rf / 2 + 1,
             Self::All => rf,
-            Self::Any => 1,                 // hints count
-            Self::EachQuorum => rf / 2 + 1, // per-DC
-            Self::Serial | Self::LocalSerial => {
-                // Serial CLs are used for LWT; they don't map to block_for
-                // in the same way. For now, treat like QUORUM.
-                rf / 2 + 1
-            }
+            Self::Any => 1, // hints count
+            Self::EachQuorum => rf / 2 + 1,
         }
     }
 
@@ -107,14 +107,71 @@ impl ConsistencyLevel {
 
     /// Compute `block_for` for EACH_QUORUM across multiple DCs.
     ///
-    /// Takes a map of datacenter name → RF for that DC.
+    /// Takes a map of datacenter name -> RF for that DC.
     /// Returns the total number of acks required (quorum per DC, summed).
     ///
     /// ## Java Oracle
     ///
     /// `ConsistencyLevel.blockForEachQuorum()`
-    pub fn block_for_each_quorum(dc_rf_map: &std::collections::HashMap<String, usize>) -> usize {
+    pub fn block_for_each_quorum(dc_rf_map: &HashMap<String, usize>) -> usize {
         dc_rf_map.values().map(|rf| rf / 2 + 1).sum()
+    }
+
+    /// Compute `block_for` using per-datacenter replication factors.
+    ///
+    /// This is the topology-aware counterpart to [`Self::block_for`]. For
+    /// aggregate CLs it sums the RFs; for local CLs it uses the RF from
+    /// `local_dc`; for `EACH_QUORUM` it sums each datacenter quorum.
+    pub fn block_for_replicated_dcs(
+        &self,
+        dc_rf_map: &HashMap<String, usize>,
+        local_dc: Option<&str>,
+    ) -> usize {
+        match self {
+            Self::EachQuorum => Self::block_for_each_quorum(dc_rf_map),
+            Self::LocalOne | Self::LocalQuorum | Self::LocalSerial => {
+                let rf = local_dc
+                    .and_then(|dc| dc_rf_map.get(dc))
+                    .copied()
+                    .unwrap_or(0);
+                self.block_for(rf)
+            }
+            _ => self.block_for(dc_rf_map.values().sum()),
+        }
+    }
+
+    /// Returns `true` if per-datacenter responses satisfy this CL.
+    ///
+    /// `received_by_dc` contains successful responses by datacenter and
+    /// `dc_rf_map` contains the natural replica count by datacenter.
+    pub fn is_satisfied_by_datacenter(
+        &self,
+        received_by_dc: &HashMap<String, usize>,
+        dc_rf_map: &HashMap<String, usize>,
+        local_dc: Option<&str>,
+    ) -> bool {
+        match self {
+            Self::EachQuorum => {
+                !dc_rf_map.is_empty()
+                    && dc_rf_map.iter().all(|(dc, rf)| {
+                        let required = rf / 2 + 1;
+                        received_by_dc.get(dc).copied().unwrap_or(0) >= required
+                    })
+            }
+            Self::LocalOne | Self::LocalQuorum | Self::LocalSerial => {
+                let Some(local_dc) = local_dc else {
+                    return false;
+                };
+                let rf = dc_rf_map.get(local_dc).copied().unwrap_or(0);
+                let received = received_by_dc.get(local_dc).copied().unwrap_or(0);
+                received >= self.block_for(rf)
+            }
+            _ => {
+                let rf = dc_rf_map.values().sum();
+                let received = received_by_dc.values().sum();
+                self.is_satisfied(received, rf)
+            }
+        }
     }
 
     /// Returns the CQL protocol encoding for this consistency level.
@@ -259,7 +316,6 @@ mod tests {
 
     #[test]
     fn block_for_each_quorum_multi_dc() {
-        use std::collections::HashMap;
         let mut dc_map = HashMap::new();
         dc_map.insert("dc1".to_string(), 3);
         dc_map.insert("dc2".to_string(), 3);
@@ -270,5 +326,72 @@ mod tests {
         single.insert("dc1".to_string(), 5);
         // quorum(5) = 3
         assert_eq!(ConsistencyLevel::block_for_each_quorum(&single), 3);
+    }
+
+    #[test]
+    fn topology_aware_block_for_each_quorum_does_not_use_global_quorum() {
+        let mut dc_map = HashMap::new();
+        dc_map.insert("dc1".to_string(), 3);
+        dc_map.insert("dc2".to_string(), 2);
+
+        assert_eq!(
+            ConsistencyLevel::EachQuorum.block_for_replicated_dcs(&dc_map, Some("dc1")),
+            4
+        );
+        assert_eq!(
+            ConsistencyLevel::Quorum.block_for_replicated_dcs(&dc_map, None),
+            3
+        );
+        assert_eq!(
+            ConsistencyLevel::LocalQuorum.block_for_replicated_dcs(&dc_map, Some("dc2")),
+            2
+        );
+    }
+
+    #[test]
+    fn each_quorum_requires_quorum_in_every_datacenter() {
+        let mut dc_rf = HashMap::new();
+        dc_rf.insert("dc1".to_string(), 3);
+        dc_rf.insert("dc2".to_string(), 2);
+
+        let mut all_acks_one_dc = HashMap::new();
+        all_acks_one_dc.insert("dc1".to_string(), 3);
+        assert!(!ConsistencyLevel::EachQuorum.is_satisfied_by_datacenter(
+            &all_acks_one_dc,
+            &dc_rf,
+            Some("dc1")
+        ));
+
+        let mut per_dc_quorums = HashMap::new();
+        per_dc_quorums.insert("dc1".to_string(), 2);
+        per_dc_quorums.insert("dc2".to_string(), 2);
+        assert!(ConsistencyLevel::EachQuorum.is_satisfied_by_datacenter(
+            &per_dc_quorums,
+            &dc_rf,
+            Some("dc1")
+        ));
+    }
+
+    #[test]
+    fn local_quorum_uses_only_local_datacenter_responses() {
+        let mut dc_rf = HashMap::new();
+        dc_rf.insert("dc1".to_string(), 3);
+        dc_rf.insert("dc2".to_string(), 3);
+
+        let mut remote_only = HashMap::new();
+        remote_only.insert("dc2".to_string(), 3);
+        assert!(!ConsistencyLevel::LocalQuorum.is_satisfied_by_datacenter(
+            &remote_only,
+            &dc_rf,
+            Some("dc1")
+        ));
+
+        let mut local_quorum = HashMap::new();
+        local_quorum.insert("dc1".to_string(), 2);
+        assert!(ConsistencyLevel::LocalQuorum.is_satisfied_by_datacenter(
+            &local_quorum,
+            &dc_rf,
+            Some("dc1")
+        ));
     }
 }

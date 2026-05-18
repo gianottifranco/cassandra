@@ -52,7 +52,10 @@ pub mod topology;
 // Re-exports for ergonomic usage.
 pub use cluster::{ClusterMetadata, ClusterSnapshot};
 pub use gossip::failure_detector::FailureDetector;
-pub use gossip::messages::{GossipDigest, GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
+pub use gossip::messages::{
+    GossipDigest, GossipDigestAck, GossipDigestAck2, GossipDigestSyn, GossipWireError,
+    JavaGossipCodec,
+};
 pub use gossip::metrics::{GossipMetrics, GossipMetricsSnapshot};
 pub use gossip::service::{GossipService, GossipServiceConfig};
 pub use gossip::subscribers::{EndpointStateChangeSubscriber, GossipEvent, SubscriberRegistry};
@@ -73,14 +76,14 @@ pub use ring::TokenRing;
 pub use snitch::{
     AlibabaCloudSnitch, AzureSnitch, CloudstackSnitch, DynamicEndpointSnitch, Ec2Snitch,
     GossipingPropertyFileSnitch, PropertyFileSnitch, RackInferringSnitch, SimpleSnitch, Snitch,
-    create_snitch,
+    SnitchFactoryConfig, SnitchFactoryError, create_snitch, create_snitch_with_config,
 };
-pub use token_allocator::{TokenAllocator, create_token_allocator};
 pub use tcm::bridge::{ControlPlaneBridge, ControlPlaneMode};
 pub use tcm::{
     Epoch, LockedRanges, MetadataLog, NodeDirectory, Placement, TcmError, TcmMetadata,
     Transformation,
 };
+pub use token_allocator::{TokenAllocator, create_token_allocator};
 pub use topology::{
     StreamPlanDescriptor, StreamRangeRequest, TopologyCoordinator, TopologyError,
     TopologyOperation, TopologyState,

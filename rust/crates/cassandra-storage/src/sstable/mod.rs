@@ -28,6 +28,7 @@
 
 pub mod bloom;
 pub mod bti;
+pub mod column_index;
 pub mod compat;
 pub mod filtered_scanner;
 pub mod format;

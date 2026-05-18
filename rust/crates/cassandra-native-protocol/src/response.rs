@@ -114,6 +114,10 @@ fn encode_rows_metadata(meta: &RowsMetadata, buf: &mut BytesMut) {
         types::write_bytes_opt(buf, meta.paging_state.as_deref());
     }
 
+    if meta.flags & rows_flags::METADATA_CHANGED != 0 {
+        types::write_short_bytes(buf, meta.new_metadata_id.as_deref().unwrap_or_default());
+    }
+
     if meta.flags & rows_flags::NO_METADATA != 0 {
         return;
     }
@@ -470,6 +474,43 @@ mod tests {
         let mut body: &[u8] = &frame.body;
         let kind = types::read_int(&mut body).unwrap();
         assert_eq!(kind, 0x0002);
+    }
+
+    #[test]
+    fn encode_rows_result_with_metadata_changed_id() {
+        let metadata_id = vec![0xA5; 16];
+        let metadata = RowsMetadata {
+            flags: rows_flags::METADATA_CHANGED,
+            columns_count: 1,
+            paging_state: None,
+            new_metadata_id: Some(metadata_id.clone()),
+            global_table_spec: None,
+            col_specs: vec![ColumnSpec {
+                ksname: Some("ks".to_string()),
+                tablename: Some("users".to_string()),
+                name: "id".to_string(),
+                col_type: ColumnType::Uuid,
+            }],
+        };
+
+        let frame = encode_response(
+            &Message::Result(ResultMessage::Rows(RowsResult {
+                metadata,
+                rows_count: 0,
+                rows: Vec::new(),
+            })),
+            0x04,
+            0,
+        );
+
+        let mut body: &[u8] = &frame.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x0002);
+        assert_eq!(
+            types::read_int(&mut body).unwrap(),
+            rows_flags::METADATA_CHANGED
+        );
+        assert_eq!(types::read_int(&mut body).unwrap(), 1);
+        assert_eq!(types::read_short_bytes(&mut body).unwrap(), metadata_id);
     }
 
     #[test]

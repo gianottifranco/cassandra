@@ -7,8 +7,8 @@
 //! - `org.apache.cassandra.db.compaction.CompactionInfo`
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use parking_lot::RwLock;
 use uuid::Uuid;

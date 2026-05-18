@@ -48,6 +48,7 @@ impl AdminClient {
     }
 
     /// GET raw text from `{base_url}{path}`.
+    #[allow(dead_code)]
     pub fn get_text(&self, path: &str) -> Result<String> {
         let url = format!("{}{}", self.base_url, path);
         let resp = self

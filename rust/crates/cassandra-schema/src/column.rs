@@ -49,6 +49,37 @@ pub enum ClusteringOrder {
     None,
 }
 
+/// Column-level CQL constraint metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColumnConstraintMetadata {
+    Scalar {
+        column: String,
+        op: ConstraintRelationOp,
+        term: String,
+    },
+    Function {
+        name: String,
+        args: Vec<String>,
+        op: ConstraintRelationOp,
+        term: String,
+    },
+    UnaryFunction {
+        name: String,
+        args: Vec<String>,
+    },
+    NotNull,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConstraintRelationOp {
+    Eq,
+    NotEq,
+    Lt,
+    Lte,
+    Gt,
+    Gte,
+}
+
 /// Metadata for a single column in a table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnMetadata {
@@ -69,6 +100,9 @@ pub struct ColumnMetadata {
     /// Dynamic Data Masking configuration (function_name, args)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub masked_with: Option<(String, Vec<String>)>,
+    /// Column-level CHECK constraints.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<ColumnConstraintMetadata>,
 }
 
 impl ColumnMetadata {
@@ -88,6 +122,7 @@ impl ColumnMetadata {
             column_type,
             clustering_order,
             masked_with,
+            constraints: Vec::new(),
         }
     }
 
@@ -147,6 +182,12 @@ impl ColumnMetadata {
     /// Add masking configuration to this column.
     pub fn masked_with(mut self, function_name: String, args: Vec<String>) -> Self {
         self.masked_with = Some((function_name, args));
+        self
+    }
+
+    /// Add column-level CHECK constraints.
+    pub fn with_constraints(mut self, constraints: Vec<ColumnConstraintMetadata>) -> Self {
+        self.constraints = constraints;
         self
     }
 

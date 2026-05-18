@@ -67,8 +67,7 @@ impl QueryProcessor {
             .map_err(|e| CassandraError::SyntaxError(e.to_string()))?;
 
         let schema = self.catalog.read().snapshot();
-        let plan = planner::plan(&stmt, &schema, keyspace)
-            .map_err(plan_error_to_cassandra)?;
+        let plan = planner::plan(&stmt, &schema, keyspace).map_err(plan_error_to_cassandra)?;
 
         let result = self
             .executor
@@ -192,8 +191,9 @@ impl QueryProcessor {
                 // Discard metadata change info for batch; only the final result matters.
                 let _exec = self.process_execute(&query.query_or_id, &params, user, keyspace)?;
             } else {
-                let cql = String::from_utf8(query.query_or_id.clone())
-                    .map_err(|_| CassandraError::InvalidQuery("Invalid UTF-8 in batch query".into()))?;
+                let cql = String::from_utf8(query.query_or_id.clone()).map_err(|_| {
+                    CassandraError::InvalidQuery("Invalid UTF-8 in batch query".into())
+                })?;
                 let params = QueryParams::default();
                 self.process_query(&cql, &params, user, keyspace)?;
             }
@@ -202,10 +202,7 @@ impl QueryProcessor {
     }
 
     /// Execute an internal CQL query (no auth, system context).
-    pub fn execute_internal(
-        &self,
-        cql: &str,
-    ) -> Result<QueryResult, CassandraError> {
+    pub fn execute_internal(&self, cql: &str) -> Result<QueryResult, CassandraError> {
         self.process_query(cql, &QueryParams::default(), Some("system"), None)
     }
 
@@ -332,10 +329,7 @@ fn plan_error_to_cassandra(err: PlanError) -> CassandraError {
     match err {
         PlanError::InvalidQuery(msg) => CassandraError::InvalidQuery(msg),
         PlanError::SyntaxError(msg) => CassandraError::SyntaxError(msg),
-        PlanError::AlreadyExists { ks, name } => CassandraError::AlreadyExists {
-            ks,
-            table: name,
-        },
+        PlanError::AlreadyExists { ks, name } => CassandraError::AlreadyExists { ks, table: name },
     }
 }
 

@@ -23,8 +23,8 @@
 //!
 //! ## Gap Documentation
 //!
-//! - **Partial**: Full MV builder (backfill) is TODO
-//! - **Partial**: View read-repair integration is TODO
+//! - **Active**: MV builder backfills from table-scoped storage scans
+//! - **Active**: View read-repair mutations flow through the write path
 //! - **Active**: Write-path fanout is implemented
 //! - Upstream has deprecated MVs. This implementation preserves baseline behavior.
 
@@ -267,11 +267,7 @@ impl ViewManager {
         }
 
         // Compute view partition key from view_pk_columns if specified
-        let view_pk = compute_view_pk(
-            &view_def.view_pk_columns,
-            columns,
-            partition_key,
-        );
+        let view_pk = compute_view_pk(&view_def.view_pk_columns, columns, partition_key);
 
         Ok(Some(ViewMutation {
             keyspace: view_def.keyspace.clone(),
@@ -341,16 +337,10 @@ impl ViewManager {
                         }
                     } else {
                         // Update: check if view-relevant columns changed
-                        let old_pk = compute_view_pk(
-                            &view_def.view_pk_columns,
-                            old_row,
-                            partition_key,
-                        );
-                        let new_pk = compute_view_pk(
-                            &view_def.view_pk_columns,
-                            columns,
-                            partition_key,
-                        );
+                        let old_pk =
+                            compute_view_pk(&view_def.view_pk_columns, old_row, partition_key);
+                        let new_pk =
+                            compute_view_pk(&view_def.view_pk_columns, columns, partition_key);
 
                         // If PK changed, delete old row and insert new one
                         if old_pk != new_pk {
@@ -717,11 +707,7 @@ mod tests {
 
     #[test]
     fn view_pk_fallback_to_base() {
-        let pk = compute_view_pk(
-            &["missing_col".to_string()],
-            &HashMap::new(),
-            b"base_pk",
-        );
+        let pk = compute_view_pk(&["missing_col".to_string()], &HashMap::new(), b"base_pk");
         assert_eq!(pk, b"base_pk");
     }
 
@@ -736,11 +722,7 @@ mod tests {
         let mut cols = HashMap::new();
         cols.insert("a".to_string(), Some(b"X".to_vec()));
         cols.insert("b".to_string(), Some(b"Y".to_vec()));
-        let pk = compute_view_pk(
-            &["a".to_string(), "b".to_string()],
-            &cols,
-            b"base",
-        );
+        let pk = compute_view_pk(&["a".to_string(), "b".to_string()], &cols, b"base");
         assert_eq!(pk, b"XY");
     }
 
@@ -792,7 +774,13 @@ mod tests {
 
         let columns = HashMap::new();
         let result = mgr.generate_view_updates_with_existing(
-            "ks", "users", b"user1", &columns, 1000, true, Some(existing),
+            "ks",
+            "users",
+            b"user1",
+            &columns,
+            1000,
+            true,
+            Some(existing),
         );
         assert!(!result.had_errors);
         assert_eq!(result.mutations.len(), 1);
@@ -817,7 +805,13 @@ mod tests {
         columns.insert("name".to_string(), Some(b"Alice".to_vec()));
 
         let result = mgr.generate_view_updates_with_existing(
-            "ks", "users", b"user1", &columns, 1000, false, Some(existing),
+            "ks",
+            "users",
+            b"user1",
+            &columns,
+            1000,
+            false,
+            Some(existing),
         );
         assert!(!result.had_errors);
         // Should produce 2 mutations: delete old PK row + insert new PK row
@@ -844,7 +838,13 @@ mod tests {
         columns.insert("name".to_string(), Some(b"NewName".to_vec()));
 
         let result = mgr.generate_view_updates_with_existing(
-            "ks", "users", b"user1", &columns, 1000, false, Some(existing),
+            "ks",
+            "users",
+            b"user1",
+            &columns,
+            1000,
+            false,
+            Some(existing),
         );
         assert!(!result.had_errors);
         // Same PK: only 1 mutation (the update/insert)

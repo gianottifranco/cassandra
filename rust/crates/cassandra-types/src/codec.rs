@@ -20,6 +20,7 @@
 //! - `org.apache.cassandra.serializers.*`
 
 use crate::native::CqlType;
+use crate::vector::VectorValue;
 use crate::vint::{decode_vint, encode_vint};
 use byteorder::{BigEndian, ByteOrder};
 use serde::{Deserialize, Serialize};
@@ -63,6 +64,7 @@ pub enum CqlValue {
     Map(Vec<(CqlValue, CqlValue)>),
     Tuple(Vec<Option<CqlValue>>),
     Udt(Vec<(String, Option<CqlValue>)>),
+    Vector(VectorValue),
 }
 
 impl CqlValue {
@@ -166,6 +168,7 @@ impl CqlValue {
                 }
                 b
             }
+            CqlValue::Vector(vector) => vector.serialize(),
         }
     }
 
@@ -267,11 +270,10 @@ impl CqlValue {
                     minimum: 1,
                     got: data.len(),
                 })?;
-                let (days, n2) =
-                    decode_vint(&data[n1..]).map_err(|_| CodecError::TooShort {
-                        minimum: 1,
-                        got: data.len().saturating_sub(n1),
-                    })?;
+                let (days, n2) = decode_vint(&data[n1..]).map_err(|_| CodecError::TooShort {
+                    minimum: 1,
+                    got: data.len().saturating_sub(n1),
+                })?;
                 let (nanoseconds, _) =
                     decode_vint(&data[n1 + n2..]).map_err(|_| CodecError::TooShort {
                         minimum: 1,
@@ -287,7 +289,10 @@ impl CqlValue {
             // Java oracle: ListType / SetType / MapType serializers.
             CqlType::List(inner, _) | CqlType::Set(inner, _) => {
                 if data.len() < 4 {
-                    return Err(CodecError::TooShort { minimum: 4, got: data.len() });
+                    return Err(CodecError::TooShort {
+                        minimum: 4,
+                        got: data.len(),
+                    });
                 }
                 let count = BigEndian::read_i32(&data[0..4]) as usize;
                 let mut pos = 4;
@@ -305,7 +310,10 @@ impl CqlValue {
             }
             CqlType::Map(key_type, value_type, _) => {
                 if data.len() < 4 {
-                    return Err(CodecError::TooShort { minimum: 4, got: data.len() });
+                    return Err(CodecError::TooShort {
+                        minimum: 4,
+                        got: data.len(),
+                    });
                 }
                 let count = BigEndian::read_i32(&data[0..4]) as usize;
                 let mut pos = 4;
@@ -338,7 +346,11 @@ impl CqlValue {
             }
             // UDT: same wire format as Tuple (length-prefixed optional fields).
             // Java oracle: UserType serializer.
-            CqlType::Udt { field_names, field_types, .. } => {
+            CqlType::Udt {
+                field_names,
+                field_types,
+                ..
+            } => {
                 let mut pos = 0;
                 let mut fields = Vec::with_capacity(field_names.len());
                 for (name, field_type) in field_names.iter().zip(field_types.iter()) {
@@ -351,7 +363,17 @@ impl CqlValue {
                 }
                 Ok(CqlValue::Udt(fields))
             }
-            _ => Err(CodecError::UnsupportedType(cql_type.cql_name())),
+            CqlType::Vector(inner, dimensions) => {
+                if !matches!(inner.as_ref(), CqlType::Float) {
+                    return Err(CodecError::UnsupportedType(cql_type.cql_name()));
+                }
+                let vector = VectorValue::deserialize(data, *dimensions)
+                    .map_err(|err| CodecError::InvalidVector(err.to_string()))?;
+                vector
+                    .validate()
+                    .map_err(|err| CodecError::InvalidVector(err.to_string()))?;
+                Ok(CqlValue::Vector(vector))
+            }
         }
     }
 }
@@ -361,7 +383,10 @@ impl CqlValue {
 /// Negative length is treated as an empty slice.
 fn read_length_prefixed(data: &[u8], pos: usize) -> Result<(&[u8], usize), CodecError> {
     if pos + 4 > data.len() {
-        return Err(CodecError::TooShort { minimum: pos + 4, got: data.len() });
+        return Err(CodecError::TooShort {
+            minimum: pos + 4,
+            got: data.len(),
+        });
     }
     let len = BigEndian::read_i32(&data[pos..]);
     if len < 0 {
@@ -369,7 +394,10 @@ fn read_length_prefixed(data: &[u8], pos: usize) -> Result<(&[u8], usize), Codec
     }
     let len = len as usize;
     if pos + 4 + len > data.len() {
-        return Err(CodecError::TooShort { minimum: pos + 4 + len, got: data.len() });
+        return Err(CodecError::TooShort {
+            minimum: pos + 4 + len,
+            got: data.len(),
+        });
     }
     Ok((&data[pos + 4..pos + 4 + len], 4 + len))
 }
@@ -438,6 +466,7 @@ pub enum CodecError {
     TooShort { minimum: usize, got: usize },
     InvalidUtf8,
     UnsupportedType(String),
+    InvalidVector(String),
 }
 impl fmt::Display for CodecError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -448,6 +477,7 @@ impl fmt::Display for CodecError {
             Self::TooShort { minimum, got } => write!(f, "need >= {} bytes, got {}", minimum, got),
             Self::InvalidUtf8 => write!(f, "invalid UTF-8"),
             Self::UnsupportedType(n) => write!(f, "unsupported type: {}", n),
+            Self::InvalidVector(msg) => write!(f, "invalid vector: {}", msg),
         }
     }
 }
@@ -486,6 +516,13 @@ mod tests {
     #[test]
     fn rt_float() {
         rt(&CqlType::Float, CqlValue::Float(2.71));
+    }
+    #[test]
+    fn rt_vector() {
+        rt(
+            &CqlType::Vector(Box::new(CqlType::Float), 3),
+            CqlValue::Vector(VectorValue::new(vec![1.0, -2.5, 3.25])),
+        );
     }
     #[test]
     fn rt_varchar() {
@@ -528,5 +565,20 @@ mod tests {
     #[test]
     fn wrong_len() {
         assert!(CqlValue::deserialize_value(&CqlType::Int, &[0u8; 3]).is_err());
+    }
+    #[test]
+    fn vector_wrong_len() {
+        assert!(matches!(
+            CqlValue::deserialize_value(&CqlType::Vector(Box::new(CqlType::Float), 3), &[0u8; 8]),
+            Err(CodecError::InvalidVector(_))
+        ));
+    }
+    #[test]
+    fn vector_rejects_non_finite() {
+        let bytes = CqlValue::Vector(VectorValue::new(vec![1.0, f32::NAN])).serialize_value();
+        assert!(matches!(
+            CqlValue::deserialize_value(&CqlType::Vector(Box::new(CqlType::Float), 2), &bytes),
+            Err(CodecError::InvalidVector(_))
+        ));
     }
 }

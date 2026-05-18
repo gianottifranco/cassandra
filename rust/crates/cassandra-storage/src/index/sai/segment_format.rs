@@ -97,6 +97,7 @@ pub fn read_segment_from<R: Read>(r: &mut R) -> io::Result<SaiSegment> {
 
     let term_count = read_u32(r)?;
     let row_count = read_u64(r)?;
+    let mut decoded_row_count = 0u64;
 
     // Entries
     let mut terms = BTreeMap::new();
@@ -119,8 +120,28 @@ pub fn read_segment_from<R: Read>(r: &mut R) -> io::Result<SaiSegment> {
 
             pl.add(pk, ck);
         }
+        decoded_row_count = decoded_row_count
+            .checked_add(posting_count as u64)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "SAI segment row count overflow")
+            })?;
 
-        terms.insert(term, pl);
+        if terms.insert(term.clone(), pl).is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate SAI segment term: {:?}", term),
+            ));
+        }
+    }
+
+    if decoded_row_count != row_count {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "SAI segment row count mismatch: header={}, decoded={}",
+                row_count, decoded_row_count
+            ),
+        ));
     }
 
     Ok(SaiSegment {
@@ -146,8 +167,8 @@ fn read_u64<R: Read>(r: &mut R) -> io::Result<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::builder::SaiSegmentBuilder;
+    use super::*;
 
     #[test]
     fn round_trip_in_memory() {
@@ -191,6 +212,40 @@ mod tests {
         let mut cursor = std::io::Cursor::new(&bad_data[..]);
         let result = read_segment_from(&mut cursor);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn row_count_mismatch_rejected() {
+        let mut builder = SaiSegmentBuilder::new(42, "idx_age", "age");
+        builder.add(b"term1".to_vec(), b"pk1".to_vec(), b"ck1".to_vec());
+        let segment = builder.build();
+
+        let mut buf = Vec::new();
+        write_segment_to(&mut buf, &segment).unwrap();
+        let row_count_offset = 4 + 4 + 4;
+        buf[row_count_offset..row_count_offset + 8].copy_from_slice(&2u64.to_be_bytes());
+
+        let err = read_segment_from(&mut std::io::Cursor::new(&buf)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("row count mismatch"));
+    }
+
+    #[test]
+    fn duplicate_terms_rejected() {
+        let mut builder = SaiSegmentBuilder::new(42, "idx_age", "age");
+        builder.add(b"term1".to_vec(), b"pk1".to_vec(), b"ck1".to_vec());
+        let segment = builder.build();
+
+        let mut buf = Vec::new();
+        write_segment_to(&mut buf, &segment).unwrap();
+        let mut duplicate = buf.clone();
+        duplicate[8..12].copy_from_slice(&2u32.to_be_bytes());
+        duplicate[12..20].copy_from_slice(&2u64.to_be_bytes());
+        duplicate.extend_from_slice(&buf[20..]);
+
+        let err = read_segment_from(&mut std::io::Cursor::new(&duplicate)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("duplicate SAI segment term"));
     }
 
     #[test]

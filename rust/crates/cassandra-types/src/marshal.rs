@@ -31,10 +31,7 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MarshalError {
     /// The bytes are not valid for this type.
-    InvalidData {
-        type_name: String,
-        reason: String,
-    },
+    InvalidData { type_name: String, reason: String },
     /// The actual type does not match the expected type.
     TypeMismatch { expected: String, actual: String },
     /// The byte buffer has the wrong size for this type.
@@ -52,10 +49,7 @@ pub enum MarshalError {
         max: usize,
     },
     /// A negative collection size was encountered during deserialization.
-    NegativeCollectionSize {
-        type_name: String,
-        size: i32,
-    },
+    NegativeCollectionSize { type_name: String, size: i32 },
     /// Duration type does not support comparison operations in certain contexts.
     DurationNotComparable,
 }
@@ -67,7 +61,11 @@ impl fmt::Display for MarshalError {
                 write!(f, "invalid data for type '{}': {}", type_name, reason)
             }
             Self::TypeMismatch { expected, actual } => {
-                write!(f, "type mismatch: expected '{}', got '{}'", expected, actual)
+                write!(
+                    f,
+                    "type mismatch: expected '{}', got '{}'",
+                    expected, actual
+                )
             }
             Self::InvalidSize { expected, actual } => {
                 write!(
@@ -136,9 +134,18 @@ mod tests {
     #[test]
     fn display_all_variants() {
         let variants: &[MarshalError] = &[
-            MarshalError::InvalidData { type_name: "t".into(), reason: "r".into() },
-            MarshalError::TypeMismatch { expected: "e".into(), actual: "a".into() },
-            MarshalError::InvalidSize { expected: 4, actual: 2 },
+            MarshalError::InvalidData {
+                type_name: "t".into(),
+                reason: "r".into(),
+            },
+            MarshalError::TypeMismatch {
+                expected: "e".into(),
+                actual: "a".into(),
+            },
+            MarshalError::InvalidSize {
+                expected: 4,
+                actual: 2,
+            },
             MarshalError::Utf8Error,
             MarshalError::Overflow,
             MarshalError::UnsupportedType("vector".into()),

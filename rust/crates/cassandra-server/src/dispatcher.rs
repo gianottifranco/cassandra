@@ -6,10 +6,10 @@
 //! - `org.apache.cassandra.transport.Dispatcher`
 //! - `org.apache.cassandra.transport.CQLMessageHandler`
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::{mpsc, oneshot, Semaphore};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 use tracing::{debug, error};
 
 use crate::executor::{QueryExecutor, QueryResult};

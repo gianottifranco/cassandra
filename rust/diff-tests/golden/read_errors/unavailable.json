@@ -1,0 +1,12 @@
+{
+  "error_code": "0x1000",
+  "error_name": "UNAVAILABLE",
+  "description": "Not enough replicas alive to satisfy consistency level",
+  "fields": {
+    "cl": "QUORUM",
+    "required": 2,
+    "alive": 1
+  },
+  "java_class": "org.apache.cassandra.exceptions.UnavailableException",
+  "protocol_version": 4
+}

@@ -332,11 +332,10 @@ mod tests {
     #[test]
     fn lifecycle_startup_with_auth() {
         let mut ctx = ConnectionContext::new();
+        let auth = PasswordAuthenticator::default();
         let body = startup_body();
         let frame = make_frame(Opcode::Startup, &body);
-        let resp = ctx
-            .process_lifecycle(&frame, &PasswordAuthenticator)
-            .unwrap();
+        let resp = ctx.process_lifecycle(&frame, &auth).unwrap();
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Authenticate);
         assert_eq!(ctx.state, ConnectionState::Authenticating);
@@ -345,9 +344,7 @@ mod tests {
         let mut auth_body = BytesMut::new();
         types::write_bytes_opt(&mut auth_body, Some(b"\0cassandra\0cassandra"));
         let auth_frame = make_frame(Opcode::AuthResponse, &auth_body);
-        let resp2 = ctx
-            .process_lifecycle(&auth_frame, &PasswordAuthenticator)
-            .unwrap();
+        let resp2 = ctx.process_lifecycle(&auth_frame, &auth).unwrap();
         assert!(resp2.is_some());
         assert_eq!(resp2.unwrap().header.opcode, Opcode::AuthSuccess);
         assert_eq!(ctx.state, ConnectionState::Ready);
@@ -476,7 +473,11 @@ mod tests {
         let mut resp_body: &[u8] = &resp_frame.body;
         let _code = types::read_int(&mut resp_body).unwrap();
         let msg = types::read_string(&mut resp_body).unwrap();
-        assert!(msg.contains("USE_BETA"), "error message should mention USE_BETA: {}", msg);
+        assert!(
+            msg.contains("USE_BETA"),
+            "error message should mention USE_BETA: {}",
+            msg
+        );
     }
 
     #[test]

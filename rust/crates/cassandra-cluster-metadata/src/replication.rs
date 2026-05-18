@@ -220,7 +220,7 @@ impl ReplicationStrategy for NetworkTopologyStrategy {
 
             // Accept if: new rack, or we've used all available racks
             if racks_used.contains(&rack) && dc_reps.len() + dc_nodes_in_ring > dc_rf {
-                // There are still other racks available, skip for now
+                // There are still other racks available, so defer this endpoint.
                 // But we need to be careful: this endpoint will be revisited
                 continue;
             }
@@ -358,9 +358,10 @@ pub fn create_strategy(
                     continue;
                 }
                 if let Some((total_str, trans_str)) = v.split_once('/') {
-                    if let (Ok(total), Ok(trans)) =
-                        (total_str.trim().parse::<usize>(), trans_str.trim().parse::<usize>())
-                    {
+                    if let (Ok(total), Ok(trans)) = (
+                        total_str.trim().parse::<usize>(),
+                        trans_str.trim().parse::<usize>(),
+                    ) {
                         dc_replication.insert(k.clone(), total);
                         if trans > 0 {
                             dc_transient.insert(k.clone(), trans);
@@ -370,7 +371,10 @@ pub fn create_strategy(
                     dc_replication.insert(k.clone(), rf);
                 }
             }
-            Box::new(TransientReplicationStrategy::new(dc_replication, dc_transient))
+            Box::new(TransientReplicationStrategy::new(
+                dc_replication,
+                dc_transient,
+            ))
         } else {
             let dc_replication: BTreeMap<String, usize> = options
                 .iter()
@@ -466,18 +470,14 @@ impl ReplicationStrategy for EverywhereStrategy {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TransientReplicationStrategy (stub)
+// TransientReplicationStrategy
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// TransientReplicationStrategy: experimental support for transient replicas.
 ///
-/// **Feature-flagged / stub** — transient replication is an experimental
-/// feature in the Java baseline. This struct tracks the configuration
-/// but currently delegates to NTS for placement.
-///
-/// GAP(gap_guard_gossip_wire_compat): Full implementation of transient replica — tracked in gap_guards.rs
-/// placement, read routing (only full replicas serve reads), and
-/// anti-compaction awareness.
+/// Uses NetworkTopologyStrategy for endpoint placement, then marks the last
+/// configured replicas in each datacenter as transient. Full replicas serve
+/// reads; both full and transient replicas receive writes.
 ///
 /// ## Java Oracle
 ///
@@ -528,6 +528,48 @@ impl TransientReplicationStrategy {
             .map(|r| r.endpoint)
             .collect()
     }
+
+    /// Calculate write endpoints: full and transient replicas both receive
+    /// writes so they can preserve durability across hinted handoff, repair,
+    /// and replacement flows.
+    pub fn calculate_write_endpoints(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        snitch: &dyn Snitch,
+    ) -> Vec<Endpoint> {
+        self.calculate_natural_replicas(token, ring, snitch)
+            .into_iter()
+            .map(|r| r.endpoint)
+            .collect()
+    }
+
+    /// Calculate full replicas for callers that need anti-compaction or read
+    /// repair participation without transient holders.
+    pub fn calculate_full_replicas(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        snitch: &dyn Snitch,
+    ) -> Vec<Replica> {
+        self.calculate_natural_replicas(token, ring, snitch)
+            .into_iter()
+            .filter(|r| r.is_full())
+            .collect()
+    }
+
+    /// Calculate transient-only replicas for repair and streaming planning.
+    pub fn calculate_transient_replicas(
+        &self,
+        token: Token,
+        ring: &TokenRing,
+        snitch: &dyn Snitch,
+    ) -> Vec<Replica> {
+        self.calculate_natural_replicas(token, ring, snitch)
+            .into_iter()
+            .filter(|r| r.is_transient)
+            .collect()
+    }
 }
 
 impl ReplicationStrategy for TransientReplicationStrategy {
@@ -564,7 +606,12 @@ impl ReplicationStrategy for TransientReplicationStrategy {
             *seen += 1;
 
             let total = *dc_totals.get(&dc).unwrap();
-            let transient_count = self.dc_transient.get(&dc).copied().unwrap_or(0);
+            let transient_count = self
+                .dc_transient
+                .get(&dc)
+                .copied()
+                .unwrap_or(0)
+                .min(total.saturating_sub(1));
 
             // The last `transient_count` replicas for a DC are transient.
             let remaining = total - *seen + 1;
@@ -771,8 +818,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_replicas(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_replicas(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 3);
 
         // Full replicas should come before transient
@@ -801,10 +847,79 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let read_eps =
-            strategy.calculate_read_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let read_eps = strategy.calculate_read_endpoints(Token::from_raw(-50), &ring, &snitch);
         // Only full replicas serve reads
         assert_eq!(read_eps.len(), 2);
+    }
+
+    #[test]
+    fn transient_replication_splits_read_and_write_endpoints_per_dc() {
+        let mut dc_rf = BTreeMap::new();
+        dc_rf.insert("dc1".to_string(), 3);
+        dc_rf.insert("dc2".to_string(), 2);
+        let mut dc_trans = BTreeMap::new();
+        dc_trans.insert("dc1".to_string(), 1);
+        dc_trans.insert("dc2".to_string(), 1);
+
+        let strategy = TransientReplicationStrategy::new(dc_rf, dc_trans);
+        let mut topology = HashMap::new();
+        topology.insert(ep(7001), ("dc1".to_string(), "rack1".to_string()));
+        topology.insert(ep(7002), ("dc1".to_string(), "rack2".to_string()));
+        topology.insert(ep(7003), ("dc1".to_string(), "rack3".to_string()));
+        topology.insert(ep(7004), ("dc2".to_string(), "rack1".to_string()));
+        topology.insert(ep(7005), ("dc2".to_string(), "rack2".to_string()));
+        let snitch = PropertyFileSnitch::new(topology, "dc1", "rack1");
+
+        let mut ring = TokenRing::new();
+        ring.add_token(Token::from_raw(-200), ep(7001));
+        ring.add_token(Token::from_raw(-100), ep(7002));
+        ring.add_token(Token::from_raw(0), ep(7003));
+        ring.add_token(Token::from_raw(100), ep(7004));
+        ring.add_token(Token::from_raw(200), ep(7005));
+
+        let replicas = strategy.calculate_natural_replicas(Token::from_raw(-150), &ring, &snitch);
+        assert_eq!(replicas.len(), 5);
+        assert_eq!(replicas.iter().filter(|r| r.is_full()).count(), 3);
+        assert_eq!(replicas.iter().filter(|r| r.is_transient).count(), 2);
+
+        let read_eps = strategy.calculate_read_endpoints(Token::from_raw(-150), &ring, &snitch);
+        let write_eps = strategy.calculate_write_endpoints(Token::from_raw(-150), &ring, &snitch);
+        let transient_replicas =
+            strategy.calculate_transient_replicas(Token::from_raw(-150), &ring, &snitch);
+
+        assert_eq!(read_eps.len(), 3);
+        assert_eq!(write_eps.len(), 5);
+        assert_eq!(transient_replicas.len(), 2);
+        assert!(
+            transient_replicas
+                .iter()
+                .all(|r| !read_eps.contains(&r.endpoint))
+        );
+        assert!(
+            transient_replicas
+                .iter()
+                .all(|r| write_eps.contains(&r.endpoint))
+        );
+    }
+
+    #[test]
+    fn transient_replication_keeps_one_full_replica_when_config_exceeds_ring() {
+        let mut dc_rf = BTreeMap::new();
+        dc_rf.insert("datacenter1".to_string(), 2);
+        let mut dc_trans = BTreeMap::new();
+        dc_trans.insert("datacenter1".to_string(), 2);
+
+        let strategy = TransientReplicationStrategy::new(dc_rf, dc_trans);
+        let snitch = SimpleSnitch;
+        let mut ring = TokenRing::new();
+        ring.add_token(Token::from_raw(0), ep(7001));
+        ring.add_token(Token::from_raw(100), ep(7002));
+
+        let full = strategy.calculate_full_replicas(Token::from_raw(-50), &ring, &snitch);
+        let transient = strategy.calculate_transient_replicas(Token::from_raw(-50), &ring, &snitch);
+
+        assert_eq!(full.len(), 1);
+        assert_eq!(transient.len(), 1);
     }
 
     #[test]
@@ -819,8 +934,7 @@ mod tests {
         ring.add_token(Token::from_raw(0), ep(7002));
         ring.add_token(Token::from_raw(100), ep(7003));
 
-        let replicas =
-            strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
+        let replicas = strategy.calculate_natural_endpoints(Token::from_raw(-50), &ring, &snitch);
         assert_eq!(replicas.len(), 2);
     }
 

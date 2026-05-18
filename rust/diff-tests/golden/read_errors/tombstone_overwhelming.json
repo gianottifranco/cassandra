@@ -1,0 +1,11 @@
+{
+  "error_code": "0x1300",
+  "error_name": "TOMBSTONE_OVERWHELMING",
+  "description": "Query aborted due to excessive tombstone scanning",
+  "fields": {
+    "count": 200000,
+    "threshold": 100000
+  },
+  "java_class": "org.apache.cassandra.exceptions.TombstoneOverwhelmingException",
+  "protocol_version": 4
+}

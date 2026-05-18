@@ -6,10 +6,10 @@
 use std::io::{Read, Seek, SeekFrom, Write};
 use tempfile::NamedTempFile;
 
-use cassandra_io::compress::metadata::CompressionParams;
 use cassandra_io::compress::compressed_reader::CompressedChunkReader;
 use cassandra_io::compress::compressed_writer::CompressedSequentialWriter;
 use cassandra_io::compress::metadata::CompressionMetadata;
+use cassandra_io::compress::metadata::CompressionParams;
 use cassandra_io::util::checksummed_rebufferer::ChecksummedRebufferer;
 use cassandra_io::util::chunk_reader::SimpleChunkReader;
 use cassandra_io::util::data_integrity::DataIntegrityMetadata;
@@ -51,7 +51,10 @@ fn test_checksummed_rebufferer_detects_corruption() {
 
     // Second chunk should fail
     let result = checked2.rebuffer(65536);
-    assert!(result.is_err(), "Expected checksum mismatch on corrupted chunk");
+    assert!(
+        result.is_err(),
+        "Expected checksum mismatch on corrupted chunk"
+    );
 }
 
 #[test]
@@ -61,8 +64,7 @@ fn test_compressed_reader_detects_crc_corruption() {
 
     // Write compressed data
     let params = CompressionParams::default();
-    let mut writer =
-        CompressedSequentialWriter::new(data_file.path(), &params).unwrap();
+    let mut writer = CompressedSequentialWriter::new(data_file.path(), &params).unwrap();
     let data = vec![0x42u8; 65536 + 100]; // slightly more than 1 chunk
     writer.write_all(&data).unwrap();
     writer.finish(meta_file.path()).unwrap();
@@ -95,5 +97,8 @@ fn test_compressed_reader_detects_crc_corruption() {
     let metadata2 = CompressionMetadata::read_from(&mut meta_reader2).unwrap();
     let reader2 = CompressedChunkReader::new(data_file.path(), metadata2).unwrap();
     let result = reader2.rebuffer(0);
-    assert!(result.is_err(), "Expected CRC mismatch on corrupted compressed data");
+    assert!(
+        result.is_err(),
+        "Expected CRC mismatch on corrupted compressed data"
+    );
 }

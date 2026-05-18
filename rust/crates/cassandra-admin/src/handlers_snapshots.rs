@@ -127,10 +127,7 @@ fn handle_clear_snapshot_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
 }
 
 /// Import SSTables from a given directory into a table.
-pub async fn handle_import(
-    req: Request<Incoming>,
-    state: &AdminState,
-) -> Response<Full<Bytes>> {
+pub async fn handle_import(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
     use http_body_util::BodyExt;
 
     let body_bytes = match req.into_body().collect().await {

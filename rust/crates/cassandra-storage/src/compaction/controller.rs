@@ -8,7 +8,12 @@
 //! - `org.apache.cassandra.db.compaction.AbstractCompactionTask`
 
 use crate::compaction::errors::{CompactionReason, CompactionType};
-use crate::compaction::{create_strategy, CompactionStrategy, CompactionStrategyType, SSTableMetadata};
+use std::collections::HashMap;
+
+use crate::compaction::{
+    CompactionStrategy, CompactionStrategyType, SSTableMetadata, create_strategy,
+    create_strategy_with_options,
+};
 use crate::sstable::format::SSTableId;
 
 // ─── TaskPriority ───────────────────────────────────────────────────────────
@@ -54,6 +59,17 @@ impl CompactionController {
             strategy: create_strategy(strategy_type),
             strategy_type,
         }
+    }
+
+    /// Create a controller for the given strategy type and Java option map.
+    pub fn with_options(
+        strategy_type: CompactionStrategyType,
+        options: &HashMap<String, String>,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            strategy: create_strategy_with_options(strategy_type, options)?,
+            strategy_type,
+        })
     }
 
     /// Ask the strategy for the next set of background compaction tasks.
@@ -118,8 +134,7 @@ mod tests {
         let ctrl = CompactionController::new(CompactionStrategyType::SizeTiered);
 
         // Create enough similarly-sized SSTables to trigger STCS (default min_threshold=4).
-        let sstables: Vec<SSTableMetadata> =
-            (1..=5).map(|id| make_meta(id, 100)).collect();
+        let sstables: Vec<SSTableMetadata> = (1..=5).map(|id| make_meta(id, 100)).collect();
 
         let tasks = ctrl.get_next_background_tasks(&sstables);
         assert!(!tasks.is_empty(), "STCS should produce at least one task");
@@ -156,6 +171,17 @@ mod tests {
         assert_eq!(task.sstable_ids, vec![10, 20, 30]);
     }
 
+    #[test]
+    fn option_aware_controller_uses_java_thresholds() {
+        let options = HashMap::from([("min_threshold".to_string(), "2".to_string())]);
+        let ctrl = CompactionController::with_options(CompactionStrategyType::SizeTiered, &options)
+            .unwrap();
+        let tasks = ctrl.get_next_background_tasks(&[make_meta(1, 100), make_meta(2, 110)]);
+
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].sstable_ids, vec![1, 2]);
+    }
+
     // ── LCS returns leveled tasks ───────────────────────────────────────
 
     #[test]
@@ -164,8 +190,7 @@ mod tests {
 
         // LCS via the trait interface treats everything as L0 and triggers when
         // count >= l0_threshold (default 4).
-        let sstables: Vec<SSTableMetadata> =
-            (1..=5).map(|id| make_meta(id, 100)).collect();
+        let sstables: Vec<SSTableMetadata> = (1..=5).map(|id| make_meta(id, 100)).collect();
 
         let tasks = ctrl.get_next_background_tasks(&sstables);
         assert!(!tasks.is_empty(), "LCS should produce at least one task");

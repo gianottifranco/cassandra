@@ -321,7 +321,7 @@ impl CqlType {
 }
 
 /// Parse a CQL-syntax type string like `frozen<list<int>>`, `map<text, int>`,
-/// or `tuple<int, text>`.
+/// `tuple<int, text>`, or `vector<float, 3>`.
 ///
 /// This handles the CQL3 form as opposed to the Java marshal class name form
 /// handled by [`crate::type_parser::parse_type`].
@@ -359,6 +359,16 @@ pub fn parse_cql_type(s: &str) -> Option<CqlType> {
         let parts = split_all_top_level_commas(inner);
         let types: Option<Vec<CqlType>> = parts.iter().map(|p| parse_cql_type(p.trim())).collect();
         return Some(CqlType::Tuple(types?));
+    }
+
+    if let Some(inner) = s.strip_prefix("vector<").and_then(|r| r.strip_suffix('>')) {
+        let split = split_top_level_comma(inner)?;
+        let element = parse_cql_type(split.0.trim())?;
+        let dimensions = split.1.trim().parse::<u32>().ok()?;
+        if dimensions == 0 {
+            return None;
+        }
+        return Some(CqlType::Vector(Box::new(element), dimensions));
     }
 
     // Simple scalar type
@@ -516,6 +526,10 @@ mod tests {
         assert_eq!(CqlType::Int.fixed_size(), Some(4));
         assert_eq!(CqlType::Bigint.fixed_size(), Some(8));
         assert_eq!(CqlType::Uuid.fixed_size(), Some(16));
+        assert_eq!(
+            CqlType::Vector(Box::new(CqlType::Float), 3).fixed_size(),
+            Some(12)
+        );
         assert_eq!(CqlType::Varchar.fixed_size(), None);
         assert_eq!(CqlType::Blob.fixed_size(), None);
     }
@@ -573,6 +587,16 @@ mod tests {
             parse_cql_type("tuple<int, text>"),
             Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar]))
         );
+    }
+
+    #[test]
+    fn parse_cql_type_vector() {
+        assert_eq!(
+            parse_cql_type("vector<float, 3>"),
+            Some(CqlType::Vector(Box::new(CqlType::Float), 3))
+        );
+        assert_eq!(parse_cql_type("vector<float, 0>"), None);
+        assert_eq!(parse_cql_type("vector<float, nope>"), None);
     }
 
     #[test]

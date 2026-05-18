@@ -8,9 +8,9 @@
 //! Provides chunked encrypt/decrypt, IV management, and header
 //! serialization for SSTable and commitlog encryption.
 
+use crate::SecurityError;
 use crate::crypto::{AesCbcProvider, CryptoProvider, KeyProvider, NoOpCryptoProvider};
 use crate::tde::TransparentDataEncryptionOptions;
-use crate::SecurityError;
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -59,39 +59,52 @@ impl EncryptionHeader {
         let cipher_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + cipher_len > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at cipher".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at cipher".to_string(),
+            ));
         }
         let cipher = String::from_utf8(data[pos..pos + cipher_len].to_vec())
             .map_err(|e| SecurityError::ConfigError(format!("invalid cipher string: {e}")))?;
         pos += cipher_len;
 
         if pos + 2 > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at iv_len".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at iv_len".to_string(),
+            ));
         }
         let iv_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + iv_len > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at iv".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at iv".to_string(),
+            ));
         }
         let iv = data[pos..pos + iv_len].to_vec();
         pos += iv_len;
 
         if pos + 2 > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at alias_len".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at alias_len".to_string(),
+            ));
         }
         let alias_len = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
         pos += 2;
         if pos + alias_len > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at alias".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at alias".to_string(),
+            ));
         }
         let key_alias = String::from_utf8(data[pos..pos + alias_len].to_vec())
             .map_err(|e| SecurityError::ConfigError(format!("invalid alias: {e}")))?;
         pos += alias_len;
 
         if pos + 4 > data.len() {
-            return Err(SecurityError::ConfigError("header truncated at key_length".to_string()));
+            return Err(SecurityError::ConfigError(
+                "header truncated at key_length".to_string(),
+            ));
         }
-        let key_length = u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
+        let key_length =
+            u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]);
         pos += 4;
 
         Ok((
@@ -138,10 +151,7 @@ impl EncryptionContext {
     }
 
     /// Create from an encryption header (for reading encrypted data).
-    pub fn from_header(
-        header: &EncryptionHeader,
-        key_provider: Arc<dyn KeyProvider>,
-    ) -> Self {
+    pub fn from_header(header: &EncryptionHeader, key_provider: Arc<dyn KeyProvider>) -> Self {
         let options = TransparentDataEncryptionOptions {
             enabled: true,
             cipher: header.cipher.clone(),
@@ -180,14 +190,13 @@ impl EncryptionContext {
     }
 
     /// Encrypt a chunk of data, returning (ciphertext, header).
-    pub fn encrypt_chunk(&self, plaintext: &[u8]) -> Result<(Vec<u8>, EncryptionHeader), SecurityError> {
+    pub fn encrypt_chunk(
+        &self,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, EncryptionHeader), SecurityError> {
         let provider = self.get_provider();
         let iv = provider.generate_iv();
-        let key_alias = self
-            .options
-            .key_alias
-            .as_deref()
-            .unwrap_or("default");
+        let key_alias = self.options.key_alias.as_deref().unwrap_or("default");
         let key = self.get_key(key_alias)?;
         let ciphertext = provider.encrypt(&key, &iv, plaintext)?;
 
@@ -228,6 +237,59 @@ impl EncryptionContext {
             output.extend_from_slice(&header_bytes);
             output.extend_from_slice(&(ciphertext.len() as u32).to_be_bytes());
             output.extend_from_slice(&ciphertext);
+        }
+
+        Ok(output)
+    }
+
+    /// Decrypt data produced by `encrypt_chunked`.
+    pub fn decrypt_chunked(&self, data: &[u8]) -> Result<Vec<u8>, SecurityError> {
+        if !self.is_enabled() {
+            return Ok(data.to_vec());
+        }
+
+        let mut pos = 0;
+        let mut output = Vec::new();
+        while pos < data.len() {
+            if pos + 4 > data.len() {
+                return Err(SecurityError::ConfigError(
+                    "encrypted stream truncated at header length".to_string(),
+                ));
+            }
+            let header_len =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + header_len > data.len() {
+                return Err(SecurityError::ConfigError(
+                    "encrypted stream truncated at header".to_string(),
+                ));
+            }
+            let (header, consumed) = EncryptionHeader::from_bytes(&data[pos..pos + header_len])?;
+            if consumed != header_len {
+                return Err(SecurityError::ConfigError(
+                    "encrypted stream header has trailing bytes".to_string(),
+                ));
+            }
+            pos += header_len;
+
+            if pos + 4 > data.len() {
+                return Err(SecurityError::ConfigError(
+                    "encrypted stream truncated at ciphertext length".to_string(),
+                ));
+            }
+            let ciphertext_len =
+                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+                    as usize;
+            pos += 4;
+            if pos + ciphertext_len > data.len() {
+                return Err(SecurityError::ConfigError(
+                    "encrypted stream truncated at ciphertext".to_string(),
+                ));
+            }
+            let plaintext = self.decrypt_chunk(&data[pos..pos + ciphertext_len], &header)?;
+            output.extend_from_slice(&plaintext);
+            pos += ciphertext_len;
         }
 
         Ok(output)
@@ -288,6 +350,7 @@ mod tests {
         let data = b"hello world";
         let result = ctx.encrypt_chunked(data).unwrap();
         assert_eq!(result, data);
+        assert_eq!(ctx.decrypt_chunked(data).unwrap(), data);
     }
 
     #[test]
@@ -313,11 +376,37 @@ mod tests {
         let ctx = make_test_context(dir.path());
         let (ciphertext, header) = ctx.encrypt_chunk(b"test data").unwrap();
 
-        // Reconstruct context from header (simulates reading from disk)
+        // Reconstruct context from a persisted encryption header.
         let kp = Arc::new(FileKeyProvider::new(dir.path()));
         let ctx2 = EncryptionContext::from_header(&header, kp);
         let decrypted = ctx2.decrypt_chunk(&ciphertext, &header).unwrap();
         assert_eq!(decrypted, b"test data");
+    }
+
+    #[test]
+    fn encrypt_decrypt_chunked_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("testkey"), [0x42u8; 16]).unwrap();
+
+        let ctx = make_test_context(dir.path());
+        let plaintext = vec![0x5au8; 4097];
+        let encrypted = ctx.encrypt_chunked(&plaintext).unwrap();
+        assert_ne!(encrypted, plaintext);
+        let decrypted = ctx.decrypt_chunked(&encrypted).unwrap();
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn decrypt_chunked_rejects_truncated_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("testkey"), [0x42u8; 16]).unwrap();
+
+        let ctx = make_test_context(dir.path());
+        let encrypted = ctx.encrypt_chunked(b"test data").unwrap();
+        assert!(
+            ctx.decrypt_chunked(&encrypted[..encrypted.len() - 1])
+                .is_err()
+        );
     }
 
     #[test]

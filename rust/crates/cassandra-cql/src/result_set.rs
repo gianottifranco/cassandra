@@ -7,7 +7,7 @@
 //! - `org.apache.cassandra.cql3.ResultSet.ResultMetadata`
 
 use cassandra_native_protocol::message::{
-    rows_flags, ColumnSpec, PreparedResult, RowsMetadata, RowsResult,
+    ColumnSpec, PreparedResult, RowsMetadata, RowsResult, rows_flags,
 };
 use md5::{Digest, Md5};
 
@@ -293,10 +293,8 @@ mod tests {
 
     #[test]
     fn to_prepared_result_basic() {
-        let bind = PreparedMetadata::new(
-            vec![make_spec("ks", "t", "id", ColumnType::Uuid)],
-            vec![0],
-        );
+        let bind =
+            PreparedMetadata::new(vec![make_spec("ks", "t", "id", ColumnType::Uuid)], vec![0]);
         let result = ResultMetadata::new(vec![
             make_spec("ks", "t", "id", ColumnType::Uuid),
             make_spec("ks", "t", "name", ColumnType::Varchar),

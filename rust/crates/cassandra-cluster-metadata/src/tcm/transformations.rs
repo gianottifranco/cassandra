@@ -30,7 +30,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use cassandra_common::token::Token;
+use cassandra_common::token::{Token, TokenRange};
 
 use crate::node::{Endpoint, NodeId, NodeState};
 use crate::tcm::{Epoch, Transformation};
@@ -157,6 +157,13 @@ pub enum ExtendedTransformation {
     AssignTokens { node_id: NodeId, tokens: Vec<Token> },
     /// Remove all token assignments from a node.
     UnassignTokens { node_id: NodeId },
+    /// Lock token ranges for an in-progress topology operation.
+    LockRanges {
+        operation_id: Uuid,
+        ranges: Vec<TokenRange>,
+    },
+    /// Unlock token ranges for a completed topology operation.
+    UnlockRanges { operation_id: Uuid },
 
     // ── Register / Unregister ────────────────────────────────────────────
     /// Register a new node in the directory.
@@ -210,9 +217,9 @@ impl ExtendedTransformation {
                 TransformationKind::CmsReconfig
             }
 
-            Self::AssignTokens { .. } | Self::UnassignTokens { .. } => {
-                TransformationKind::TokenOp
-            }
+            Self::AssignTokens { .. } | Self::UnassignTokens { .. } => TransformationKind::TokenOp,
+
+            Self::LockRanges { .. } | Self::UnlockRanges { .. } => TransformationKind::SequenceOp,
         }
     }
 
@@ -241,6 +248,18 @@ impl ExtendedTransformation {
             Self::AssignTokens { node_id, tokens } => Some(Transformation::AssignTokens {
                 node_id: *node_id,
                 tokens: tokens.clone(),
+            }),
+
+            Self::LockRanges {
+                operation_id,
+                ranges,
+            } => Some(Transformation::LockRanges {
+                operation_id: *operation_id,
+                ranges: ranges.clone(),
+            }),
+
+            Self::UnlockRanges { operation_id } => Some(Transformation::UnlockRanges {
+                operation_id: *operation_id,
             }),
 
             Self::UpdateNodeState { node_id, state } => Some(Transformation::UpdateNodeState {
@@ -302,16 +321,17 @@ impl ExtendedTransformation {
                 description: description.clone(),
             },
 
-            Transformation::LockRanges { .. } => {
-                // LockRanges has no direct extended equivalent; map to ForceSnapshot
-                // as a no-op placeholder. Callers should handle LockRanges separately.
-                Self::ForceSnapshot
-            }
+            Transformation::LockRanges {
+                operation_id,
+                ranges,
+            } => Self::LockRanges {
+                operation_id: *operation_id,
+                ranges: ranges.clone(),
+            },
 
-            Transformation::UnlockRanges { .. } => {
-                // Same reasoning as LockRanges.
-                Self::ForceSnapshot
-            }
+            Transformation::UnlockRanges { operation_id } => Self::UnlockRanges {
+                operation_id: *operation_id,
+            },
 
             Transformation::ForceSnapshot => Self::ForceSnapshot,
         }
@@ -402,9 +422,7 @@ mod tests {
             description: "create table".into(),
         };
         let _ = ExtendedTransformation::TakeSnapshot;
-        let _ = ExtendedTransformation::RestoreSnapshot {
-            epoch: Epoch(10),
-        };
+        let _ = ExtendedTransformation::RestoreSnapshot { epoch: Epoch(10) };
         let _ = ExtendedTransformation::AddCmsMember { node_id: nid(1) };
         let _ = ExtendedTransformation::RemoveCmsMember { node_id: nid(1) };
         let _ = ExtendedTransformation::AssignTokens {
@@ -412,6 +430,13 @@ mod tests {
             tokens: vec![Token::from_raw(0)],
         };
         let _ = ExtendedTransformation::UnassignTokens { node_id: nid(1) };
+        let _ = ExtendedTransformation::LockRanges {
+            operation_id: Uuid::nil(),
+            ranges: vec![TokenRange::new(Token::from_raw(0), Token::from_raw(100))],
+        };
+        let _ = ExtendedTransformation::UnlockRanges {
+            operation_id: Uuid::nil(),
+        };
         let _ = ExtendedTransformation::RegisterNode {
             node_id: nid(1),
             endpoint: ep(7001),
@@ -552,6 +577,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn kind_sequence_op() {
+        assert_eq!(
+            ExtendedTransformation::LockRanges {
+                operation_id: Uuid::nil(),
+                ranges: vec![],
+            }
+            .kind(),
+            TransformationKind::SequenceOp,
+        );
+        assert_eq!(
+            ExtendedTransformation::UnlockRanges {
+                operation_id: Uuid::nil()
+            }
+            .kind(),
+            TransformationKind::SequenceOp,
+        );
+    }
+
     // ── Base conversion round-trip ───────────────────────────────────────
 
     #[test]
@@ -581,6 +625,36 @@ mod tests {
         };
         let base = ext.to_base().unwrap();
         assert!(matches!(base, Transformation::AssignTokens { .. }));
+    }
+
+    #[test]
+    fn to_base_lock_ranges() {
+        let op = Uuid::new_v4();
+        let ext = ExtendedTransformation::LockRanges {
+            operation_id: op,
+            ranges: vec![TokenRange::new(Token::from_raw(10), Token::from_raw(20))],
+        };
+        let base = ext.to_base().unwrap();
+        match base {
+            Transformation::LockRanges {
+                operation_id,
+                ranges,
+            } => {
+                assert_eq!(operation_id, op);
+                assert_eq!(ranges.len(), 1);
+            }
+            _ => panic!("expected LockRanges"),
+        }
+    }
+
+    #[test]
+    fn to_base_unlock_ranges() {
+        let op = Uuid::new_v4();
+        let ext = ExtendedTransformation::UnlockRanges { operation_id: op };
+        assert!(matches!(
+            ext.to_base(),
+            Some(Transformation::UnlockRanges { operation_id }) if operation_id == op
+        ));
     }
 
     #[test]
@@ -673,10 +747,7 @@ mod tests {
     fn from_base_unregister() {
         let base = Transformation::Unregister { node_id: nid(1) };
         let ext = ExtendedTransformation::from_base(&base);
-        assert!(matches!(
-            ext,
-            ExtendedTransformation::UnregisterNode { .. }
-        ));
+        assert!(matches!(ext, ExtendedTransformation::UnregisterNode { .. }));
     }
 
     #[test]
@@ -731,22 +802,33 @@ mod tests {
 
     #[test]
     fn from_base_lock_ranges() {
+        let op = Uuid::new_v4();
         let base = Transformation::LockRanges {
-            operation_id: Uuid::new_v4(),
-            ranges: vec![],
+            operation_id: op,
+            ranges: vec![TokenRange::new(Token::from_raw(0), Token::from_raw(1))],
         };
-        // LockRanges has no direct extended equivalent; falls through to ForceSnapshot.
         let ext = ExtendedTransformation::from_base(&base);
-        assert!(matches!(ext, ExtendedTransformation::ForceSnapshot));
+        match ext {
+            ExtendedTransformation::LockRanges {
+                operation_id,
+                ranges,
+            } => {
+                assert_eq!(operation_id, op);
+                assert_eq!(ranges.len(), 1);
+            }
+            _ => panic!("expected LockRanges"),
+        }
     }
 
     #[test]
     fn from_base_unlock_ranges() {
-        let base = Transformation::UnlockRanges {
-            operation_id: Uuid::new_v4(),
-        };
+        let op = Uuid::new_v4();
+        let base = Transformation::UnlockRanges { operation_id: op };
         let ext = ExtendedTransformation::from_base(&base);
-        assert!(matches!(ext, ExtendedTransformation::ForceSnapshot));
+        assert!(matches!(
+            ext,
+            ExtendedTransformation::UnlockRanges { operation_id } if operation_id == op
+        ));
     }
 
     // ── Round-trip: from_base(to_base(x)) == x for convertible variants ─
@@ -798,11 +880,7 @@ mod tests {
         };
         let base = ext.to_base().unwrap();
         let back = ExtendedTransformation::from_base(&base);
-        if let ExtendedTransformation::AssignTokens {
-            node_id,
-            tokens: t,
-        } = back
-        {
+        if let ExtendedTransformation::AssignTokens { node_id, tokens: t } = back {
             assert_eq!(node_id, nid(3));
             assert_eq!(t, tokens);
         } else {

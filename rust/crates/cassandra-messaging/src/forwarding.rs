@@ -126,8 +126,7 @@ impl ForwardingInfo {
                         data[offset + 2],
                         data[offset + 3],
                     );
-                    let port =
-                        u16::from_be_bytes([data[offset + 4], data[offset + 5]]);
+                    let port = u16::from_be_bytes([data[offset + 4], data[offset + 5]]);
                     offset += 6;
                     SocketAddr::from((ip, port))
                 }
@@ -138,10 +137,7 @@ impl ForwardingInfo {
                     let mut octets = [0u8; 16];
                     octets.copy_from_slice(&data[offset..offset + 16]);
                     let ip = std::net::Ipv6Addr::from(octets);
-                    let port = u16::from_be_bytes([
-                        data[offset + 16],
-                        data[offset + 17],
-                    ]);
+                    let port = u16::from_be_bytes([data[offset + 16], data[offset + 17]]);
                     offset += 18;
                     SocketAddr::from((ip, port))
                 }
@@ -163,7 +159,10 @@ impl ForwardingInfo {
             ]);
             offset += 8;
 
-            hops.push(ForwardingHop { from: addr, message_id });
+            hops.push(ForwardingHop {
+                from: addr,
+                message_id,
+            });
         }
 
         Some(Self { hops })

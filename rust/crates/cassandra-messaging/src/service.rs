@@ -115,9 +115,7 @@ impl MessagingService {
             tls_acceptor: None,
             tls_connector: None,
             outbound: DashMap::new(),
-            global_resource_limit: Arc::new(Limit::new(
-                resource_limits::DEFAULT_GLOBAL_LIMIT,
-            )),
+            global_resource_limit: Arc::new(Limit::new(resource_limits::DEFAULT_GLOBAL_LIMIT)),
         }
     }
 
@@ -405,10 +403,7 @@ impl MessagingService {
     /// Get or create the persistent outbound connections for an endpoint.
     ///
     /// Lazily creates three-channel connections on first use.
-    pub fn get_outbound(
-        &self,
-        endpoint: SocketAddr,
-    ) -> Arc<OutboundConnections> {
+    pub fn get_outbound(&self, endpoint: SocketAddr) -> Arc<OutboundConnections> {
         if let Some(existing) = self.outbound.get(&endpoint) {
             return Arc::clone(existing.value());
         }

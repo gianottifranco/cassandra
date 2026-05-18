@@ -20,6 +20,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use cassandra_messaging::Verb;
 use cassandra_messaging::connection_type::ConnectionType;
 use cassandra_messaging::crc::{crc24, crc32c, crc32c_update};
 use cassandra_messaging::forwarding::ForwardingInfo;
@@ -29,7 +30,6 @@ use cassandra_messaging::handshake;
 use cassandra_messaging::outbound_connections::OutboundConnections;
 use cassandra_messaging::outbound_queue::OutboundMessageQueue;
 use cassandra_messaging::resource_limits::{EndpointLimits, Limit};
-use cassandra_messaging::Verb;
 
 use bytes::BytesMut;
 use tokio_util::codec::{Decoder, Encoder};
@@ -130,7 +130,10 @@ fn frame_lz4_compression_reduces_size() {
 
     // Compressed frame should be smaller than uncompressed
     // (8 header + compressed + 4 trailer) < (4096 + overhead)
-    assert!(buf.len() < payload.len(), "LZ4 should compress repetitive data");
+    assert!(
+        buf.len() < payload.len(),
+        "LZ4 should compress repetitive data"
+    );
 }
 
 // ─── Three-channel routing ──────────────────────────────────────────────
@@ -138,12 +141,24 @@ fn frame_lz4_compression_reduces_size() {
 #[test]
 fn three_channel_classification() {
     // Urgent
-    assert_eq!(ConnectionType::classify(Verb::Ping, 0), ConnectionType::Urgent);
-    assert_eq!(ConnectionType::classify(Verb::GossipDigestSyn, 100), ConnectionType::Urgent);
+    assert_eq!(
+        ConnectionType::classify(Verb::Ping, 0),
+        ConnectionType::Urgent
+    );
+    assert_eq!(
+        ConnectionType::classify(Verb::GossipDigestSyn, 100),
+        ConnectionType::Urgent
+    );
 
     // Small
-    assert_eq!(ConnectionType::classify(Verb::Mutation, 1000), ConnectionType::Small);
-    assert_eq!(ConnectionType::classify(Verb::ReadData, 512), ConnectionType::Small);
+    assert_eq!(
+        ConnectionType::classify(Verb::Mutation, 1000),
+        ConnectionType::Small
+    );
+    assert_eq!(
+        ConnectionType::classify(Verb::ReadData, 512),
+        ConnectionType::Small
+    );
 
     // Large
     assert_eq!(
@@ -225,13 +240,7 @@ async fn handshake_all_connection_types() {
         let addr: SocketAddr = "10.0.0.1:7000".parse().unwrap();
 
         let (c, s) = tokio::join!(
-            handshake::perform_outbound_handshake(
-                &mut client,
-                conn_type,
-                false,
-                false,
-                addr,
-            ),
+            handshake::perform_outbound_handshake(&mut client, conn_type, false, false, addr,),
             handshake::accept_inbound_handshake(&mut server),
         );
 
@@ -263,7 +272,9 @@ fn resource_limits_three_tier_backpressure() {
     // Release and retry
     drop(p1);
     assert_eq!(global.allocated(), 400);
-    let _p3 = limits.try_allocate(200).expect("should succeed after release");
+    let _p3 = limits
+        .try_allocate(200)
+        .expect("should succeed after release");
 }
 
 // ─── Message expiration ─────────────────────────────────────────────────
@@ -327,8 +338,7 @@ fn forwarding_info_propagation() {
     assert_eq!(decoded.last_forwarder().unwrap().from, forwarder);
 
     // Attach to message
-    let msg = Message::request(Verb::Mutation, 1, b"data".to_vec())
-        .with_forwarding_info(decoded);
+    let msg = Message::request(Verb::Mutation, 1, b"data".to_vec()).with_forwarding_info(decoded);
     assert!(msg.is_forwarded());
     assert!(msg.forwarding.is_some());
 }
@@ -342,7 +352,10 @@ fn service_persistent_send() {
 
     // get_outbound creates connections lazily
     let conns = svc.get_outbound("10.0.0.1:7000".parse().unwrap());
-    assert_eq!(conns.remote(), "10.0.0.1:7000".parse::<SocketAddr>().unwrap());
+    assert_eq!(
+        conns.remote(),
+        "10.0.0.1:7000".parse::<SocketAddr>().unwrap()
+    );
 
     // Second call returns the same instance
     let conns2 = svc.get_outbound("10.0.0.1:7000".parse().unwrap());
@@ -389,7 +402,9 @@ fn metrics_per_connection_type() {
     metrics.record_bytes_received(300, ConnectionType::Large);
 
     assert_eq!(
-        metrics.bytes_sent.load(std::sync::atomic::Ordering::Relaxed),
+        metrics
+            .bytes_sent
+            .load(std::sync::atomic::Ordering::Relaxed),
         300
     );
     assert_eq!(

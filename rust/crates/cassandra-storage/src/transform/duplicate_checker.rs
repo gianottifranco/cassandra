@@ -7,8 +7,8 @@
 
 use std::collections::HashSet;
 
-use crate::rows::unfiltered::RowData;
 use super::transformation::Transformation;
+use crate::rows::unfiltered::RowData;
 
 /// Detects duplicate clustering keys during merge iteration.
 ///

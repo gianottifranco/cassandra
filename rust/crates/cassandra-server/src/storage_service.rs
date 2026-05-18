@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 // ─── Node State ─────────────────────────────────────────────────
 

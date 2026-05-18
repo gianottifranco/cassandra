@@ -35,7 +35,9 @@ impl AccordExecutor {
     ///
     /// Transitions the command from Committed -> Applied.
     pub async fn execute(&self, txn_id: TxnId) -> AccordResult<Vec<u8>> {
-        let entry = self.command_store.get(&txn_id)
+        let entry = self
+            .command_store
+            .get(&txn_id)
             .ok_or_else(|| AccordError::Internal(format!("Unknown txn: {txn_id}")))?;
 
         if entry.status != CommandStatus::Committed {
@@ -54,12 +56,8 @@ impl AccordExecutor {
         self.command_store.apply(txn_id)?;
 
         // Journal the applied status
-        self.journal.write(
-            txn_id,
-            CommandStatus::Applied,
-            entry.execute_at,
-            vec![],
-        )?;
+        self.journal
+            .write(txn_id, CommandStatus::Applied, entry.execute_at, vec![])?;
 
         info!(%txn_id, "Transaction applied successfully");
         Ok(result)
@@ -108,7 +106,9 @@ mod tests {
         let executor = AccordExecutor::new(store.clone(), journal);
 
         let txn_id = test_txn_id();
-        store.pre_accept(txn_id, test_txn(), Timestamp(100)).unwrap();
+        store
+            .pre_accept(txn_id, test_txn(), Timestamp(100))
+            .unwrap();
 
         let result = executor.execute(txn_id).await;
         assert!(result.is_err());

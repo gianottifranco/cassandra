@@ -9,7 +9,7 @@
 //! │  Magic: [u8; 4] = b"CLSG"                  │
 //! │  Version: u8 = 2                            │
 //! │  Segment ID: u64 (big-endian)               │
-//! │  Flags: u8 (bit0=compressed)                │
+//! │  Flags: u8 (bit0=compressed, bit1=encrypted)│
 //! │  Reserved: [u8; 2]                          │
 //! ├─────────────────────────────────────────────┤
 //! │  Entry: [len:u32][flags:u8][crc32:u32][pay] │
@@ -24,7 +24,11 @@ use std::path::{Path, PathBuf};
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use crc32fast::Hasher;
 
-use super::{CommitLogError, Result, segment_filename};
+use super::{
+    CommitLogError, Result,
+    encrypted::{EncryptedSegmentWriter, PlainSegmentWriter},
+    segment_filename,
+};
 
 const MAGIC: [u8; 4] = *b"CLSG";
 const VERSION_1: u8 = 1;
@@ -33,12 +37,15 @@ const HEADER_SIZE: u64 = 4 + 1 + 8 + 1 + 2; // 16 bytes (same size as v1)
 
 // Entry flags
 const ENTRY_FLAG_COMPRESSED: u8 = 0x01;
+const ENTRY_FLAG_ENCRYPTED: u8 = 0x02;
 
 /// Segment-level flags stored in the header.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SegmentFlags {
     /// If true, entries in this segment may be LZ4-compressed.
     pub compression_enabled: bool,
+    /// If true, entries in this segment may be encrypted.
+    pub encryption_enabled: bool,
 }
 
 impl SegmentFlags {
@@ -47,12 +54,16 @@ impl SegmentFlags {
         if self.compression_enabled {
             b |= 0x01;
         }
+        if self.encryption_enabled {
+            b |= 0x02;
+        }
         b
     }
 
     fn from_byte(b: u8) -> Self {
         Self {
             compression_enabled: (b & 0x01) != 0,
+            encryption_enabled: (b & 0x02) != 0,
         }
     }
 }
@@ -197,6 +208,16 @@ impl Segment {
     /// Append an entry to this segment. Returns the offset at which it was written.
     /// If compression is enabled and beneficial, the entry is LZ4-compressed.
     pub fn append_entry(&mut self, payload: &[u8]) -> Result<u64> {
+        self.append_entry_with_codec(payload, &PlainSegmentWriter)
+    }
+
+    /// Append an entry using an optional encryption codec. Compression is applied
+    /// before encryption, matching Cassandra's commitlog write pipeline.
+    pub fn append_entry_with_codec(
+        &mut self,
+        payload: &[u8],
+        codec: &dyn EncryptedSegmentWriter,
+    ) -> Result<u64> {
         let writer = self
             .writer
             .as_mut()
@@ -205,17 +226,24 @@ impl Segment {
         let offset = self.size;
 
         // Optionally compress
-        let (actual_payload, entry_flags) = if self.flags.compression_enabled && payload.len() > 64
-        {
-            let compressed = lz4_flex::compress_prepend_size(payload);
-            if compressed.len() < payload.len() {
-                (compressed, ENTRY_FLAG_COMPRESSED)
+        let (mut actual_payload, mut entry_flags) =
+            if self.flags.compression_enabled && payload.len() > 64 {
+                let compressed = lz4_flex::compress_prepend_size(payload);
+                if compressed.len() < payload.len() {
+                    (compressed, ENTRY_FLAG_COMPRESSED)
+                } else {
+                    (payload.to_vec(), 0u8)
+                }
             } else {
                 (payload.to_vec(), 0u8)
-            }
-        } else {
-            (payload.to_vec(), 0u8)
-        };
+            };
+
+        if codec.is_encrypted() {
+            actual_payload = codec
+                .encode_block(&actual_payload)
+                .map_err(CommitLogError::Serialization)?;
+            entry_flags |= ENTRY_FLAG_ENCRYPTED;
+        }
 
         // Compute CRC over actual payload
         let mut hasher = Hasher::new();
@@ -250,6 +278,16 @@ impl Segment {
 
     /// Read entries with specified corruption handling.
     pub fn read_entries_with_policy(&self, policy: CorruptionPolicy) -> Vec<Result<Vec<u8>>> {
+        self.read_entries_with_codec(policy, &PlainSegmentWriter)
+    }
+
+    /// Read entries using the supplied encryption codec for encrypted entry
+    /// payloads.
+    pub fn read_entries_with_codec(
+        &self,
+        policy: CorruptionPolicy,
+        codec: &dyn EncryptedSegmentWriter,
+    ) -> Vec<Result<Vec<u8>>> {
         let mut results = Vec::new();
 
         let file = match File::open(&self.path) {
@@ -339,9 +377,26 @@ impl Segment {
                 }
             }
 
+            let decoded_payload = if (entry_flags & ENTRY_FLAG_ENCRYPTED) != 0 {
+                match codec.decode_block(&raw_payload) {
+                    Ok(decoded) => decoded,
+                    Err(e) => {
+                        results.push(Err(CommitLogError::Serialization(format!(
+                            "commitlog decryption failed: {e}"
+                        ))));
+                        match policy {
+                            CorruptionPolicy::StopOnCorrupt => break,
+                            CorruptionPolicy::SkipAndContinue => continue,
+                        }
+                    }
+                }
+            } else {
+                raw_payload
+            };
+
             // Decompress if needed
             let payload = if (entry_flags & ENTRY_FLAG_COMPRESSED) != 0 {
-                match lz4_flex::decompress_size_prepended(&raw_payload) {
+                match lz4_flex::decompress_size_prepended(&decoded_payload) {
                     Ok(decompressed) => decompressed,
                     Err(e) => {
                         results.push(Err(CommitLogError::Serialization(format!(
@@ -354,7 +409,7 @@ impl Segment {
                     }
                 }
             } else {
-                raw_payload
+                decoded_payload
             };
 
             results.push(Ok(payload));
@@ -377,7 +432,26 @@ pub enum CorruptionPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commitlog::encrypted::{CommitLogEncryptor, EncryptingSegmentWriter};
+    use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[derive(Debug)]
+    struct XorEncryptor(u8);
+
+    impl CommitLogEncryptor for XorEncryptor {
+        fn encrypt_segment(&self, data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Ok(data.iter().map(|byte| byte ^ self.0).collect())
+        }
+
+        fn decrypt_segment(&self, data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            self.encrypt_segment(data)
+        }
+
+        fn is_enabled(&self) -> bool {
+            true
+        }
+    }
 
     #[test]
     fn create_and_read_segment() {
@@ -453,6 +527,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let flags = SegmentFlags {
             compression_enabled: true,
+            ..SegmentFlags::default()
         };
         let mut seg = Segment::create_with_flags(dir.path(), 10, flags).unwrap();
 
@@ -472,6 +547,36 @@ mod tests {
             .collect();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], payload.as_bytes());
+    }
+
+    #[test]
+    fn compressed_encrypted_entries_round_trip_with_codec() {
+        let dir = TempDir::new().unwrap();
+        let flags = SegmentFlags {
+            compression_enabled: true,
+            encryption_enabled: true,
+        };
+        let codec = EncryptingSegmentWriter::new(Arc::new(XorEncryptor(0x5a)));
+        let mut seg = Segment::create_with_flags(dir.path(), 11, flags).unwrap();
+
+        let compressible_payload = vec![b'a'; 1024];
+        let small_payload = b"small commitlog mutation".to_vec();
+        seg.append_entry_with_codec(&compressible_payload, &codec)
+            .unwrap();
+        seg.append_entry_with_codec(&small_payload, &codec).unwrap();
+        seg.sync().unwrap();
+
+        let path = dir.path().join(segment_filename(11));
+        let read_seg = Segment::open_for_read(&path).unwrap();
+        assert!(read_seg.flags().compression_enabled);
+        assert!(read_seg.flags().encryption_enabled);
+
+        let entries: Vec<_> = read_seg
+            .read_entries_with_codec(CorruptionPolicy::StopOnCorrupt, &codec)
+            .into_iter()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(entries, vec![compressible_payload, small_payload]);
     }
 
     #[test]

@@ -90,6 +90,7 @@ crc32fast = "1"
 
 # Hashing
 md-5 = "0.10"
+sha2 = "0.10"
 
 # Random
 rand = "0.8"
@@ -128,6 +129,8 @@ ipnet = "2"
 # File watching
 notify = "7"
 hex = "0.4"
+fs2 = "0.4"
+regex = "1"
 
 # Crypto (encryption-at-rest)
 aes = "0.8"

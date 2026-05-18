@@ -9,6 +9,17 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical CQL type name for function signatures.
+///
+/// Cassandra keys functions and aggregates by resolved CQL types, so aliases
+/// such as `varchar` and `text` must map to the same signature.
+pub fn canonical_cql_type_name(cql_type: &str) -> String {
+    let normalized = cql_type.trim().to_ascii_lowercase();
+    cassandra_types::native::parse_cql_type(&normalized)
+        .map(|ty| ty.cql_name())
+        .unwrap_or(normalized)
+}
+
 /// Metadata for a user-defined function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UserFunction {
@@ -39,12 +50,13 @@ impl UserFunction {
         language: impl Into<String>,
         body: impl Into<String>,
     ) -> Self {
+        let return_type = return_type.into();
         Self {
             keyspace: keyspace.into(),
             name: name.into(),
             arg_names: Vec::new(),
             arg_types: Vec::new(),
-            return_type: return_type.into(),
+            return_type: canonical_cql_type_name(&return_type),
             language: language.into(),
             body: body.into(),
             called_on_null_input: false,
@@ -53,8 +65,9 @@ impl UserFunction {
 
     /// Add an argument to the function.
     pub fn with_arg(mut self, name: impl Into<String>, arg_type: impl Into<String>) -> Self {
+        let arg_type = arg_type.into();
         self.arg_names.push(name.into());
-        self.arg_types.push(arg_type.into());
+        self.arg_types.push(canonical_cql_type_name(&arg_type));
         self
     }
 
@@ -66,7 +79,12 @@ impl UserFunction {
 
     /// Signature key for deduplication: name(arg_types).
     pub fn signature(&self) -> String {
-        format!("{}({})", self.name, self.arg_types.join(", "))
+        let arg_types = self
+            .arg_types
+            .iter()
+            .map(|arg_type| canonical_cql_type_name(arg_type))
+            .collect::<Vec<_>>();
+        format!("{}({})", self.name, arg_types.join(", "))
     }
 }
 
@@ -81,6 +99,9 @@ pub struct UserAggregate {
     pub arg_types: Vec<String>,
     /// State type (as CQL type string).
     pub state_type: String,
+    /// Return type (as CQL type string).
+    #[serde(default)]
+    pub return_type: String,
     /// State function name.
     pub sfunc: String,
     /// Final function name (optional).
@@ -97,11 +118,13 @@ impl UserAggregate {
         state_type: impl Into<String>,
         sfunc: impl Into<String>,
     ) -> Self {
+        let state_type = state_type.into();
         Self {
             keyspace: keyspace.into(),
             name: name.into(),
             arg_types: Vec::new(),
-            state_type: state_type.into(),
+            state_type: canonical_cql_type_name(&state_type),
+            return_type: canonical_cql_type_name(&state_type),
             sfunc: sfunc.into(),
             finalfunc: None,
             initcond: None,
@@ -110,13 +133,21 @@ impl UserAggregate {
 
     /// Add an argument type.
     pub fn with_arg_type(mut self, arg_type: impl Into<String>) -> Self {
-        self.arg_types.push(arg_type.into());
+        let arg_type = arg_type.into();
+        self.arg_types.push(canonical_cql_type_name(&arg_type));
         self
     }
 
     /// Set the final function.
     pub fn with_finalfunc(mut self, finalfunc: impl Into<String>) -> Self {
         self.finalfunc = Some(finalfunc.into());
+        self
+    }
+
+    /// Set the aggregate return type.
+    pub fn with_return_type(mut self, return_type: impl Into<String>) -> Self {
+        let return_type = return_type.into();
+        self.return_type = canonical_cql_type_name(&return_type);
         self
     }
 
@@ -128,7 +159,12 @@ impl UserAggregate {
 
     /// Signature key for deduplication: name(arg_types).
     pub fn signature(&self) -> String {
-        format!("{}({})", self.name, self.arg_types.join(", "))
+        let arg_types = self
+            .arg_types
+            .iter()
+            .map(|arg_type| canonical_cql_type_name(arg_type))
+            .collect::<Vec<_>>();
+        format!("{}({})", self.name, arg_types.join(", "))
     }
 }
 
@@ -153,6 +189,17 @@ mod tests {
     }
 
     #[test]
+    fn function_signature_canonicalizes_type_aliases() {
+        let udf = UserFunction::new("ks", "f", "varchar", "java", "return x;")
+            .with_arg("x", "VARCHAR")
+            .with_arg("items", "list<varchar>");
+
+        assert_eq!(udf.return_type, "text");
+        assert_eq!(udf.arg_types, vec!["text", "list<text>"]);
+        assert_eq!(udf.signature(), "f(text, list<text>)");
+    }
+
+    #[test]
     fn create_user_aggregate() {
         let uda = UserAggregate::new("ks", "my_avg", "tuple<int, bigint>", "avg_state")
             .with_arg_type("int")
@@ -161,6 +208,7 @@ mod tests {
 
         assert_eq!(uda.name, "my_avg");
         assert_eq!(uda.state_type, "tuple<int, bigint>");
+        assert_eq!(uda.return_type, "tuple<int, bigint>");
         assert_eq!(uda.sfunc, "avg_state");
         assert_eq!(uda.finalfunc, Some("avg_final".into()));
         assert_eq!(uda.initcond, Some("(0, 0)".into()));
@@ -168,9 +216,19 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_return_type_is_canonicalized() {
+        let uda = UserAggregate::new("ks", "a", "varchar", "state")
+            .with_return_type("list<varchar>")
+            .with_arg_type("varchar");
+
+        assert_eq!(uda.state_type, "text");
+        assert_eq!(uda.return_type, "list<text>");
+        assert_eq!(uda.signature(), "a(text)");
+    }
+
+    #[test]
     fn serde_round_trip_function() {
-        let udf = UserFunction::new("ks", "f", "text", "java", "return x;")
-            .with_arg("x", "text");
+        let udf = UserFunction::new("ks", "f", "text", "java", "return x;").with_arg("x", "text");
         let json = serde_json::to_string(&udf).unwrap();
         let deserialized: UserFunction = serde_json::from_str(&json).unwrap();
         assert_eq!(udf, deserialized);
@@ -178,8 +236,7 @@ mod tests {
 
     #[test]
     fn serde_round_trip_aggregate() {
-        let uda = UserAggregate::new("ks", "a", "int", "sfn")
-            .with_arg_type("int");
+        let uda = UserAggregate::new("ks", "a", "int", "sfn").with_arg_type("int");
         let json = serde_json::to_string(&uda).unwrap();
         let deserialized: UserAggregate = serde_json::from_str(&json).unwrap();
         assert_eq!(uda, deserialized);

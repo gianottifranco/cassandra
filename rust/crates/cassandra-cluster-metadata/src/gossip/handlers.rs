@@ -32,8 +32,10 @@ use cassandra_messaging::verb::Verb;
 use cassandra_messaging::{Message, MessagingService};
 use tracing::{debug, warn};
 
-use crate::gossip::messages::{GossipDigestAck, GossipDigestAck2, GossipDigestSyn};
 use crate::gossip::Gossiper;
+use crate::gossip::messages::{
+    GossipDigestAck, GossipDigestAck2, GossipDigestSyn, JavaGossipCodec,
+};
 
 /// Create a SYN handler for the gossiper.
 ///
@@ -41,7 +43,7 @@ use crate::gossip::Gossiper;
 /// and returns the serialized ACK as a response message.
 pub fn make_syn_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
     Arc::new(move |msg: Message| {
-        let syn: GossipDigestSyn = match serde_json::from_slice(&msg.payload) {
+        let syn: GossipDigestSyn = match JavaGossipCodec::decode_syn(&msg.payload) {
             Ok(s) => s,
             Err(e) => {
                 warn!(error = %e, "Failed to deserialize GossipDigestSyn");
@@ -71,7 +73,16 @@ pub fn make_syn_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
         }
 
         let ack = gossiper.handle_syn(&syn);
-        let payload = serde_json::to_vec(&ack).unwrap_or_default();
+        let payload = match JavaGossipCodec::encode_ack(&ack) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(error = %e, "Failed to serialize GossipDigestAck");
+                return Some(Message::failure(
+                    msg.header.message_id,
+                    format!("Bad ACK payload: {e}").into_bytes(),
+                ));
+            }
+        };
         Some(Message::response(
             msg.header.message_id,
             Verb::GossipDigestAck,
@@ -86,7 +97,7 @@ pub fn make_syn_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
 /// the serialized ACK2 as a response message.
 pub fn make_ack_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
     Arc::new(move |msg: Message| {
-        let ack: GossipDigestAck = match serde_json::from_slice(&msg.payload) {
+        let ack: GossipDigestAck = match JavaGossipCodec::decode_ack(&msg.payload) {
             Ok(a) => a,
             Err(e) => {
                 warn!(error = %e, "Failed to deserialize GossipDigestAck");
@@ -98,7 +109,16 @@ pub fn make_ack_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
         };
 
         let ack2 = gossiper.handle_ack(&ack);
-        let payload = serde_json::to_vec(&ack2).unwrap_or_default();
+        let payload = match JavaGossipCodec::encode_ack2(&ack2) {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!(error = %e, "Failed to serialize GossipDigestAck2");
+                return Some(Message::failure(
+                    msg.header.message_id,
+                    format!("Bad ACK2 payload: {e}").into_bytes(),
+                ));
+            }
+        };
         Some(Message::response(
             msg.header.message_id,
             Verb::GossipDigestAck2,
@@ -113,7 +133,7 @@ pub fn make_ack_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
 /// ACK2 is the terminal message — no response needed.
 pub fn make_ack2_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
     Arc::new(move |msg: Message| {
-        let ack2: GossipDigestAck2 = match serde_json::from_slice(&msg.payload) {
+        let ack2: GossipDigestAck2 = match JavaGossipCodec::decode_ack2(&msg.payload) {
             Ok(a) => a,
             Err(e) => {
                 warn!(error = %e, "Failed to deserialize GossipDigestAck2");
@@ -129,8 +149,14 @@ pub fn make_ack2_handler(gossiper: Arc<Gossiper>) -> MessageHandler {
 
 /// Register all gossip verb handlers on the messaging service.
 pub fn register_gossip_handlers(gossiper: Arc<Gossiper>, messaging: &MessagingService) {
-    messaging.register_handler(Verb::GossipDigestSyn, make_syn_handler(Arc::clone(&gossiper)));
-    messaging.register_handler(Verb::GossipDigestAck, make_ack_handler(Arc::clone(&gossiper)));
+    messaging.register_handler(
+        Verb::GossipDigestSyn,
+        make_syn_handler(Arc::clone(&gossiper)),
+    );
+    messaging.register_handler(
+        Verb::GossipDigestAck,
+        make_ack_handler(Arc::clone(&gossiper)),
+    );
     messaging.register_handler(Verb::GossipDigestAck2, make_ack2_handler(gossiper));
 }
 
@@ -164,7 +190,7 @@ mod tests {
         remote.set_local_state(ApplicationState::Datacenter, "dc1".to_string());
         let syn = remote.make_gossip_digest_syn();
 
-        let syn_payload = serde_json::to_vec(&syn).unwrap();
+        let syn_payload = JavaGossipCodec::encode_syn(&syn).unwrap();
         let msg = Message::request(Verb::GossipDigestSyn, 1, syn_payload);
 
         let response = handler(msg);
@@ -173,8 +199,8 @@ mod tests {
         assert_eq!(resp.header.verb, Verb::GossipDigestAck);
         assert!(resp.is_response());
 
-        // Verify the ACK deserializes
-        let _ack: GossipDigestAck = serde_json::from_slice(&resp.payload).unwrap();
+        // Verify the Java-layout ACK payload deserializes.
+        let _ack = JavaGossipCodec::decode_ack(&resp.payload).unwrap();
     }
 
     #[test]
@@ -198,7 +224,11 @@ mod tests {
 
         // Step 1: G1 builds SYN, dispatches through G2's handler
         let syn = g1.make_gossip_digest_syn();
-        let syn_msg = Message::request(Verb::GossipDigestSyn, 1, serde_json::to_vec(&syn).unwrap());
+        let syn_msg = Message::request(
+            Verb::GossipDigestSyn,
+            1,
+            JavaGossipCodec::encode_syn(&syn).unwrap(),
+        );
         let ack_msg = syn_handler(syn_msg).unwrap();
 
         // Step 2: G1 receives ACK, dispatches through its ACK handler
@@ -219,11 +249,7 @@ mod tests {
 
     #[test]
     fn malformed_payload_returns_failure() {
-        let gossiper = Arc::new(Gossiper::new(
-            ep(7001),
-            SeedProvider::new(vec![]),
-            1,
-        ));
+        let gossiper = Arc::new(Gossiper::new(ep(7001), SeedProvider::new(vec![]), 1));
 
         let handler = make_syn_handler(gossiper);
         let msg = Message::request(Verb::GossipDigestSyn, 1, b"not json".to_vec());
@@ -249,7 +275,11 @@ mod tests {
             cluster_id: "wrong-cluster".to_string(),
             digests: vec![],
         };
-        let msg = Message::request(Verb::GossipDigestSyn, 1, serde_json::to_vec(&syn).unwrap());
+        let msg = Message::request(
+            Verb::GossipDigestSyn,
+            1,
+            JavaGossipCodec::encode_syn(&syn).unwrap(),
+        );
 
         let response = handler(msg);
         assert!(response.is_some());

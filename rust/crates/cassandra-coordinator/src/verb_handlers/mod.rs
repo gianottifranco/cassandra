@@ -31,4 +31,7 @@ pub use hint_handler::HintVerbHandler;
 pub use mutation_handler::MutationVerbHandler;
 pub use read_handler::{ReadDataVerbHandler, ReadDigestVerbHandler};
 pub use read_repair_handler::ReadRepairVerbHandler;
-pub use registration::register_all_verb_handlers;
+pub use registration::{
+    register_all_verb_handlers, register_all_verb_handlers_with_storage,
+    register_all_verb_handlers_with_storage_and_batchlog,
+};

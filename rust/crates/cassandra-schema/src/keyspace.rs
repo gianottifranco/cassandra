@@ -177,11 +177,7 @@ impl KeyspaceMetadata {
     }
 
     /// Return a new `KeyspaceMetadata` with the given index added to the specified table.
-    pub fn with_table_index(
-        mut self,
-        table_name: &str,
-        idx: crate::index::IndexMetadata,
-    ) -> Self {
+    pub fn with_table_index(mut self, table_name: &str, idx: crate::index::IndexMetadata) -> Self {
         if let Some(table) = self.tables.remove(table_name) {
             let updated = table.with_index(idx);
             self.tables.insert(table_name.to_string(), updated);

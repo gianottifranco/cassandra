@@ -94,6 +94,8 @@ pub struct RepairCoordinator {
     sessions: Arc<Mutex<HashMap<RepairSessionId, RepairSession>>>,
     /// Current active repair ID (only one at a time).
     active_repair: Arc<Mutex<Option<Uuid>>>,
+    /// Type of the current active repair.
+    active_repair_type: Arc<Mutex<Option<RepairType>>>,
     /// Metrics.
     pub metrics: Arc<RepairMetrics>,
     /// Whether the repair has been cancelled.
@@ -108,6 +110,7 @@ impl RepairCoordinator {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             active_repair: Arc::new(Mutex::new(None)),
+            active_repair_type: Arc::new(Mutex::new(None)),
             metrics: Arc::new(RepairMetrics::new()),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             history_tracker: Arc::new(LoggingRepairHistoryTracker),
@@ -119,6 +122,7 @@ impl RepairCoordinator {
         Self {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             active_repair: Arc::new(Mutex::new(None)),
+            active_repair_type: Arc::new(Mutex::new(None)),
             metrics: Arc::new(RepairMetrics::new()),
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             history_tracker: tracker,
@@ -147,6 +151,7 @@ impl RepairCoordinator {
 
         let repair_id = Uuid::new_v4();
         *active = Some(repair_id);
+        *self.active_repair_type.lock() = Some(repair_type);
         self.cancelled
             .store(false, std::sync::atomic::Ordering::SeqCst);
 
@@ -202,6 +207,7 @@ impl RepairCoordinator {
     pub fn status(&self) -> Option<RepairStatus> {
         let active = self.active_repair.lock();
         let repair_id = (*active)?;
+        let repair_type = (*self.active_repair_type.lock())?;
 
         let sessions = self.sessions.lock();
         let mut total = 0;
@@ -225,7 +231,7 @@ impl RepairCoordinator {
 
         Some(RepairStatus {
             repair_id,
-            repair_type: RepairType::Full, // GAP(gap_guard_nodetool_commands): track actual repair type — tracked in gap_guards.rs
+            repair_type,
             keyspace,
             tables,
             total_ranges: total,
@@ -378,6 +384,7 @@ impl RepairCoordinator {
             drop(sessions);
         }
         *active = None;
+        *self.active_repair_type.lock() = None;
         self.sessions.lock().clear();
     }
 
@@ -433,8 +440,28 @@ mod tests {
 
         let status = rc.status().unwrap();
         assert_eq!(status.repair_id, id);
+        assert_eq!(status.repair_type, RepairType::Full);
         assert_eq!(status.total_ranges, 2);
         assert_eq!(status.completed_ranges, 0);
+    }
+
+    #[test]
+    fn status_reports_active_repair_type() {
+        let rc = RepairCoordinator::new();
+        let ranges = vec![(tok(0), tok(100))];
+        let replicas = vec![ep(7001)];
+
+        rc.start_repair(
+            RepairType::Incremental,
+            "ks",
+            &["t1".into()],
+            &ranges,
+            &replicas,
+        )
+        .unwrap();
+
+        let status = rc.status().unwrap();
+        assert_eq!(status.repair_type, RepairType::Incremental);
     }
 
     #[test]

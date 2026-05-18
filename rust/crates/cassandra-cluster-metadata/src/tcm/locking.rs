@@ -112,10 +112,7 @@ pub enum LockError {
     KeyspaceNotFound(String),
 
     #[error("Conflict detected: operation {operation} on range {range}")]
-    ConflictDetected {
-        operation: Uuid,
-        range: TokenRange,
-    },
+    ConflictDetected { operation: Uuid, range: TokenRange },
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,7 +316,10 @@ mod tests {
         LockRequest {
             operation_id: Uuid::from_u128(op),
             keyspace: keyspace.to_string(),
-            ranges: vec![TokenRange::new(Token::from_raw(start), Token::from_raw(end))],
+            ranges: vec![TokenRange::new(
+                Token::from_raw(start),
+                Token::from_raw(end),
+            )],
             scope,
             requested_by: node_id(1),
         }
@@ -385,7 +385,10 @@ mod tests {
 
         let req2 = make_request(2, "ks1", 50, 150, LockScope::Write);
         match lr.try_lock(req2) {
-            LockResult::Denied { conflicting_operation, .. } => {
+            LockResult::Denied {
+                conflicting_operation,
+                ..
+            } => {
                 assert_eq!(conflicting_operation, Uuid::from_u128(1));
             }
             LockResult::Granted => panic!("expected denial"),
@@ -430,7 +433,10 @@ mod tests {
         );
 
         // Overlapping.
-        assert!(ar.intersects("ks1", &TokenRange::new(Token::from_raw(30), Token::from_raw(60))));
+        assert!(ar.intersects(
+            "ks1",
+            &TokenRange::new(Token::from_raw(30), Token::from_raw(60))
+        ));
 
         // Disjoint.
         assert!(!ar.intersects(

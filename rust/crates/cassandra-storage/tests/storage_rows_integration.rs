@@ -2,8 +2,8 @@
 
 //! Integration tests for the rich rows/partitions/filters/transforms/tries model.
 
-use cassandra_common::tombstone::DeletionTime;
 use cassandra_common::token::Token;
+use cassandra_common::tombstone::DeletionTime;
 use cassandra_common::ttl::NO_TTL;
 
 use cassandra_storage::filter::clustering_filter::{
@@ -21,7 +21,9 @@ use cassandra_storage::rows::cell::CellData;
 use cassandra_storage::rows::liveness::LivenessInfo;
 use cassandra_storage::rows::unfiltered::{RowData, Unfiltered};
 use cassandra_storage::transform::filtered::FilteredRows;
-use cassandra_storage::transform::transformation::{LimitsTransform, PurgeTransform, Transformation};
+use cassandra_storage::transform::transformation::{
+    LimitsTransform, PurgeTransform, Transformation,
+};
 use cassandra_storage::tries::in_memory::InMemoryTrie;
 use cassandra_storage::tries::merge::MergeTrie;
 use cassandra_storage::tries::trie::Trie;
@@ -83,7 +85,10 @@ fn partition_update_iterate_row_ordering() {
     while let Some(item) = iter.next() {
         keys.push(item.clustering_key().to_vec());
     }
-    assert_eq!(keys, vec![b"ck1".to_vec(), b"ck2".to_vec(), b"ck3".to_vec()]);
+    assert_eq!(
+        keys,
+        vec![b"ck1".to_vec(), b"ck2".to_vec(), b"ck3".to_vec()]
+    );
 }
 
 #[test]

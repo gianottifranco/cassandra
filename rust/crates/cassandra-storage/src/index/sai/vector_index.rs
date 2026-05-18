@@ -26,16 +26,14 @@
 //! over vectors stored in SAI posting lists.  Each vector is associated
 //! with a base-table row location.
 //!
-//! ## Current Limitations
+//! ## Current Coverage
 //!
-//! - **Brute-force only**: O(n) scan per query.  No approximate NN
-//!   structures (HNSW, IVF) yet.
-//! - **In-memory**: Vectors are stored in RAM alongside posting lists.
-//! - **Float32 only**: The CQL `vector<float, n>` type maps to f32.
+//! - Inserts maintain an in-memory nearest-neighbor graph.
+//! - Deletes remove row locations from queryable results.
+//! - Flush, rebuild, and compaction paths repopulate the graph through SAI segments.
+//! - The CQL `vector<float, n>` type maps to `f32` vectors.
 //!
-//! ## TODO
-//!
-//! - [ ] Integrate with compaction: rebuild vector index on merge
+//! Remaining parity work is Java-compatible on-disk graph persistence and tuning.
 
 use parking_lot::RwLock;
 use std::collections::HashSet;
@@ -213,7 +211,12 @@ impl VectorIndex {
         query: &VectorValue,
         ef: usize,
     ) -> Vec<(f32, usize)> {
-        let entry_point = 0; // always start at 0
+        let Some(entry_point) = vectors
+            .iter()
+            .position(|node| !node.location.partition_key.is_empty())
+        else {
+            return Vec::new();
+        };
         let mut visited = HashSet::new();
         visited.insert(entry_point);
 
@@ -233,6 +236,9 @@ impl VectorIndex {
 
             for &neighbor_id in &vectors[c_id].edges {
                 if visited.insert(neighbor_id) {
+                    if vectors[neighbor_id].location.partition_key.is_empty() {
+                        continue;
+                    }
                     let n_score =
                         compute_similarity(&vectors[neighbor_id].vector, query, self.metric);
 
@@ -445,6 +451,29 @@ mod tests {
 
         idx.delete(b"pk1", b"");
         assert_eq!(idx.count(), 1);
+    }
+
+    #[test]
+    fn delete_entry_point_preserves_searchability_of_live_vectors() {
+        let idx = make_index();
+        idx.insert(
+            VectorValue::new(vec![0.0, 0.0, 0.0]),
+            b"entry".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+        idx.insert(
+            VectorValue::new(vec![1.0, 0.0, 0.0]),
+            b"live".to_vec(),
+            b"".to_vec(),
+        )
+        .unwrap();
+
+        idx.delete(b"entry", b"");
+
+        let results = idx.knn_search(&VectorValue::new(vec![1.0, 0.0, 0.0]), 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].location.partition_key, b"live");
     }
 
     #[test]

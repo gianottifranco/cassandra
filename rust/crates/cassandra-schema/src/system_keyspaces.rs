@@ -83,6 +83,7 @@ impl SystemTableDef {
                 column_type: col.cql_type.clone(),
                 clustering_order: ClusteringOrder::Asc,
                 masked_with: None,
+                constraints: Vec::new(),
             });
         }
         builder.build()

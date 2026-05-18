@@ -172,20 +172,20 @@ impl CqlFunction for ToJsonFunction {
         CqlType::Varchar
     }
     fn execute(&self, args: &[Option<&[u8]>]) -> Result<Option<Vec<u8>>, String> {
-        // Basic toJson: converts value bytes to JSON string representation.
-        // Full implementation would need the source CqlType at runtime.
-        // For now, returns the bytes as a JSON string or "null".
+        // Without source type context, function dispatch passes raw value bytes.
+        // Text values are emitted as JSON strings; non-UTF-8 values are emitted
+        // as Cassandra blob literals.
         match args.first().and_then(|a| *a) {
             Some(bytes) => {
-                // Try to interpret as UTF-8 text first
                 if let Ok(s) = std::str::from_utf8(bytes) {
-                    let json = format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
-                    Ok(Some(json.into_bytes()))
+                    serde_json::to_vec(s)
+                        .map(Some)
+                        .map_err(|e| format!("json encode error: {e}"))
                 } else {
-                    // Hex-encode binary data
-                    let hex = hex::encode(bytes);
-                    let json = format!("\"0x{}\"", hex);
-                    Ok(Some(json.into_bytes()))
+                    let blob_literal = format!("0x{}", hex::encode(bytes));
+                    serde_json::to_vec(&blob_literal)
+                        .map(Some)
+                        .map_err(|e| format!("json encode error: {e}"))
                 }
             }
             None => Ok(Some(b"null".to_vec())),
@@ -208,18 +208,24 @@ impl CqlFunction for FromJsonFunction {
         CqlType::Blob // actual type determined by context
     }
     fn execute(&self, args: &[Option<&[u8]>]) -> Result<Option<Vec<u8>>, String> {
-        // Basic fromJson: parses JSON text to a value.
-        // Full implementation would need target CqlType at runtime.
+        // Without target type context, numeric values use Cassandra's widest
+        // primitive encodings and strings return their UTF-8 payload.
         match args.first().and_then(|a| *a) {
             Some(bytes) => {
                 let s = std::str::from_utf8(bytes).map_err(|_| "invalid utf8")?;
                 let trimmed = s.trim();
                 if trimmed == "null" {
                     Ok(None)
-                } else if trimmed.starts_with('"') && trimmed.ends_with('"') {
-                    // String value: strip quotes
-                    let inner = &trimmed[1..trimmed.len() - 1];
-                    Ok(Some(inner.as_bytes().to_vec()))
+                } else if trimmed.starts_with('"') {
+                    let inner: String = serde_json::from_str(trimmed)
+                        .map_err(|e| format!("invalid json string: {e}"))?;
+                    if let Some(hex) = inner.strip_prefix("0x") {
+                        hex::decode(hex)
+                            .map(Some)
+                            .map_err(|e| format!("invalid blob literal: {e}"))
+                    } else {
+                        Ok(Some(inner.into_bytes()))
+                    }
                 } else if let Ok(v) = trimmed.parse::<i64>() {
                     Ok(Some(v.to_be_bytes().to_vec()))
                 } else if let Ok(v) = trimmed.parse::<f64>() {
@@ -305,9 +311,20 @@ mod tests {
     #[test]
     fn to_json_text() {
         let f = ToJsonFunction;
-        let bytes = b"hello";
+        let bytes = b"hello \"cql\"\n";
         let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
-        assert_eq!(String::from_utf8(result).unwrap(), "\"hello\"");
+        assert_eq!(
+            String::from_utf8(result).unwrap(),
+            "\"hello \\\"cql\\\"\\n\""
+        );
+    }
+
+    #[test]
+    fn to_json_blob() {
+        let f = ToJsonFunction;
+        let bytes = [0, 159, 255];
+        let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
+        assert_eq!(String::from_utf8(result).unwrap(), "\"0x009fff\"");
     }
 
     #[test]
@@ -321,10 +338,7 @@ mod tests {
     fn from_json_integer() {
         let f = FromJsonFunction;
         let bytes = b"42";
-        let result = f
-            .execute(&[Some(bytes.as_slice())])
-            .unwrap()
-            .unwrap();
+        let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
         let v = i64::from_be_bytes(result.try_into().unwrap());
         assert_eq!(v, 42);
     }
@@ -340,11 +354,16 @@ mod tests {
     #[test]
     fn from_json_string() {
         let f = FromJsonFunction;
-        let bytes = b"\"hello\"";
-        let result = f
-            .execute(&[Some(bytes.as_slice())])
-            .unwrap()
-            .unwrap();
-        assert_eq!(String::from_utf8(result).unwrap(), "hello");
+        let bytes = b"\"hello \\\"cql\\\"\\n\"";
+        let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
+        assert_eq!(String::from_utf8(result).unwrap(), "hello \"cql\"\n");
+    }
+
+    #[test]
+    fn from_json_blob_literal() {
+        let f = FromJsonFunction;
+        let bytes = b"\"0x009fff\"";
+        let result = f.execute(&[Some(bytes.as_slice())]).unwrap().unwrap();
+        assert_eq!(result, vec![0, 159, 255]);
     }
 }

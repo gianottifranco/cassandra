@@ -63,7 +63,7 @@ pub struct StreamRequest {
 ///     .transfer_ranges(target, "ks", vec!["t1"], ranges)
 ///     .build();
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct StreamPlan {
     /// What operation this plan is for.
     pub operation: StreamOperation,

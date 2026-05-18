@@ -54,10 +54,7 @@ impl ReceiveBuffer {
 
     fn is_complete(&self) -> bool {
         match self.expected_last {
-            Some(last) => {
-                self.chunks.len() as u64 == last + 1
-                    && self.chunks.contains_key(&last)
-            }
+            Some(last) => self.chunks.len() as u64 == last + 1 && self.chunks.contains_key(&last),
             None => false,
         }
     }
@@ -94,10 +91,7 @@ impl StreamReceiver {
     }
 
     /// Register verb handlers on the messaging service.
-    pub fn register_handlers(
-        receiver: Arc<StreamReceiver>,
-        messaging: &MessagingService,
-    ) {
+    pub fn register_handlers(receiver: Arc<StreamReceiver>, messaging: &MessagingService) {
         let r1 = Arc::clone(&receiver);
         messaging.register_handler(
             Verb::StreamInit,
@@ -325,7 +319,11 @@ mod tests {
         let data = b"test payload";
         let checksum = ChunkChecksum::compute(data, ChecksumAlgorithm::Crc32);
         assert!(verify_chunk_checksum(data, &checksum.hash, "Crc32"));
-        assert!(!verify_chunk_checksum(b"corrupted", &checksum.hash, "Crc32"));
+        assert!(!verify_chunk_checksum(
+            b"corrupted",
+            &checksum.hash,
+            "Crc32"
+        ));
     }
 
     #[test]

@@ -175,11 +175,7 @@ mod tests {
 
     #[test]
     fn range_tombstone_empty_keys() {
-        let rt = RangeTombstone::new(
-            Vec::new(),
-            Vec::new(),
-            DeletionTime::new(42, 100),
-        );
+        let rt = RangeTombstone::new(Vec::new(), Vec::new(), DeletionTime::new(42, 100));
 
         let mut buf = Vec::new();
         let mut crc = Hasher::new();
@@ -210,11 +206,7 @@ mod tests {
 
     #[test]
     fn crc_is_updated() {
-        let rt = RangeTombstone::new(
-            b"a".to_vec(),
-            b"b".to_vec(),
-            DeletionTime::new(1, 2),
-        );
+        let rt = RangeTombstone::new(b"a".to_vec(), b"b".to_vec(), DeletionTime::new(1, 2));
 
         let mut buf = Vec::new();
         let mut crc = Hasher::new();
@@ -226,11 +218,7 @@ mod tests {
 
     #[test]
     fn marker_bytes_correct() {
-        let rt = RangeTombstone::new(
-            b"s".to_vec(),
-            b"e".to_vec(),
-            DeletionTime::new(1, 2),
-        );
+        let rt = RangeTombstone::new(b"s".to_vec(), b"e".to_vec(), DeletionTime::new(1, 2));
         let mut buf = Vec::new();
         let mut crc = Hasher::new();
         write_range_tombstone(&mut buf, &rt, &mut crc).unwrap();

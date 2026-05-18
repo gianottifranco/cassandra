@@ -10,10 +10,10 @@ use std::sync::Arc;
 use crate::sstable::format::SSTableId;
 use crate::sstable::key_cache::KeyCache;
 
+use super::CacheStats;
 use super::chunk_cache::ChunkCache;
 use super::counter_cache::CounterCache;
 use super::row_cache::RowCache;
-use super::CacheStats;
 
 /// Unified coordinator holding references to all cache instances.
 pub struct CacheService {
@@ -212,12 +212,7 @@ mod tests {
         cc.put(42, b"pk1".to_vec(), b"col1".to_vec(), b"val1".to_vec());
         cc.put(99, b"pk2".to_vec(), b"col2".to_vec(), b"val2".to_vec());
 
-        let svc = CacheService::new(
-            make_key_cache(),
-            Some(rc.clone()),
-            Some(cc.clone()),
-            None,
-        );
+        let svc = CacheService::new(make_key_cache(), Some(rc.clone()), Some(cc.clone()), None);
         svc.invalidate_table(42);
 
         assert!(rc.get(42, b"pk1").is_none());

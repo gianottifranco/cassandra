@@ -74,12 +74,20 @@ pub enum ApplicationState {
     RpcAddress,
     /// Release version string.
     ReleaseVersion,
+    /// Endpoint coordinating removal of another endpoint.
+    RemovalCoordinator,
     /// Internal IP (for internode).
     InternalIp,
+    /// Legacy padding state retained by Java's ordinal layout.
+    X11Padding,
     /// Severity (for dynamic snitch).
     Severity,
 
     // ── New in Cassandra 4.x+ ──────────────────────────────────────────
+    /// Whether the native protocol endpoint is ready.
+    RpcReady,
+    /// Internode address with storage and SSL ports.
+    InternalAddressAndPort,
     /// Status with port (STATUS_WITH_PORT). Carries the same info as
     /// Status but includes port numbers for mixed-version clusters.
     StatusWithPort,
@@ -93,6 +101,17 @@ pub enum ApplicationState {
     SstableVersions,
     /// Disk usage percentage.
     DiskUsage,
+    /// Reserved Java padding states retained for ordinal compatibility.
+    PaddingX1,
+    PaddingX2,
+    PaddingX3,
+    PaddingX4,
+    PaddingX5,
+    PaddingX6,
+    PaddingX7,
+    PaddingX8,
+    PaddingX9,
+    PaddingX10,
     /// Current TCM (Transactional Cluster Metadata) epoch.
     /// Used for epoch dissemination and peer catch-up detection.
     TcmEpoch,

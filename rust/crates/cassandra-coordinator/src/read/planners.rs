@@ -30,8 +30,8 @@ pub enum QueryPlan {
     },
 }
 
-/// A stub schema catalog interface for the planner to query index availability.
-pub trait SchemaCatalogStub {
+/// Schema/index catalog interface for the planner to query index availability.
+pub trait SchemaIndexCatalog {
     /// Returns the name of the index and its type (e.g. "sai_vector" or "legacy")
     /// if an index exists for the given column.
     fn get_index_for_column(
@@ -43,11 +43,11 @@ pub trait SchemaCatalogStub {
 }
 
 pub struct QueryPlanner<'a> {
-    catalog: &'a dyn SchemaCatalogStub,
+    catalog: &'a dyn SchemaIndexCatalog,
 }
 
 impl<'a> QueryPlanner<'a> {
-    pub fn new(catalog: &'a dyn SchemaCatalogStub) -> Self {
+    pub fn new(catalog: &'a dyn SchemaIndexCatalog) -> Self {
         Self { catalog }
     }
 
@@ -112,12 +112,62 @@ impl<'a> QueryPlanner<'a> {
     }
 }
 
+impl SchemaIndexCatalog for cassandra_schema::SchemaCatalog {
+    fn get_index_for_column(
+        &self,
+        keyspace: &str,
+        table: &str,
+        column: &str,
+    ) -> Option<(String, String)> {
+        self.snapshot()
+            .table(keyspace, table)?
+            .indexes
+            .iter()
+            .find(|index| index.target_column().is_some_and(|target| target == column))
+            .map(|index| (index.name.clone(), planner_index_type(index)))
+    }
+}
+
+impl SchemaIndexCatalog for cassandra_schema::catalog::SchemaSnapshot {
+    fn get_index_for_column(
+        &self,
+        keyspace: &str,
+        table: &str,
+        column: &str,
+    ) -> Option<(String, String)> {
+        self.table(keyspace, table)?
+            .indexes
+            .iter()
+            .find(|index| index.target_column().is_some_and(|target| target == column))
+            .map(|index| (index.name.clone(), planner_index_type(index)))
+    }
+}
+
+fn planner_index_type(index: &cassandra_schema::index::IndexMetadata) -> String {
+    match index.kind {
+        cassandra_schema::index::IndexKind::Custom => index
+            .index_class_name()
+            .map(|class| {
+                if class.contains("StorageAttachedIndex") {
+                    "sai".to_string()
+                } else if class.contains("SASI") {
+                    "sasi".to_string()
+                } else {
+                    "custom".to_string()
+                }
+            })
+            .unwrap_or_else(|| "custom".to_string()),
+        cassandra_schema::index::IndexKind::Keys
+        | cassandra_schema::index::IndexKind::Composites => "legacy".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     struct MockCatalog;
-    impl SchemaCatalogStub for MockCatalog {
+    impl SchemaIndexCatalog for MockCatalog {
         fn get_index_for_column(&self, ks: &str, tbl: &str, col: &str) -> Option<(String, String)> {
             if ks == "ks" && tbl == "t1" {
                 match col {
@@ -178,13 +228,8 @@ mod tests {
 
     /// Mock catalog with multiple indexes for best-index selection testing.
     struct MultiIndexCatalog;
-    impl SchemaCatalogStub for MultiIndexCatalog {
-        fn get_index_for_column(
-            &self,
-            ks: &str,
-            tbl: &str,
-            col: &str,
-        ) -> Option<(String, String)> {
+    impl SchemaIndexCatalog for MultiIndexCatalog {
+        fn get_index_for_column(&self, ks: &str, tbl: &str, col: &str) -> Option<(String, String)> {
             if ks == "ks" && tbl == "t1" {
                 match col {
                     "email" => Some(("email_legacy_idx".to_string(), "legacy".to_string())),
@@ -227,7 +272,7 @@ mod tests {
         let planner = QueryPlanner::new(&MultiIndexCatalog);
         // ANN on a non-indexed column won't match, but let's use a catalog that has vector
         struct VecCatalog;
-        impl SchemaCatalogStub for VecCatalog {
+        impl SchemaIndexCatalog for VecCatalog {
             fn get_index_for_column(
                 &self,
                 _ks: &str,

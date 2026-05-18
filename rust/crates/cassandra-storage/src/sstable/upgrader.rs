@@ -34,9 +34,7 @@ impl SSTableUpgrader {
         output: &SSTableDescriptor,
     ) -> io::Result<UpgradeResult> {
         // Guard against overwriting the source
-        if input.generation == output.generation
-            && input.directory == output.directory
-        {
+        if input.generation == output.generation && input.directory == output.directory {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "input and output descriptors must differ in generation or \
@@ -44,11 +42,9 @@ impl SSTableUpgrader {
             ));
         }
 
-        let input_data_size = std::fs::metadata(
-            input.component_path(Component::Data),
-        )
-        .map(|m| m.len())
-        .unwrap_or(0);
+        let input_data_size = std::fs::metadata(input.component_path(Component::Data))
+            .map(|m| m.len())
+            .unwrap_or(0);
 
         let reader = SSTableReader::open(input.clone())?;
         let partitions = reader.iter_partitions()?;
@@ -106,8 +102,7 @@ mod tests {
             .write(&original)
             .unwrap();
 
-        let result =
-            SSTableUpgrader::upgrade(&input_desc, &output_desc).unwrap();
+        let result = SSTableUpgrader::upgrade(&input_desc, &output_desc).unwrap();
         assert_eq!(result.partitions_written, 4);
         assert!(result.input_data_size > 0);
         assert!(result.output_data_size > 0);
@@ -130,8 +125,7 @@ mod tests {
 
         SSTableWriter::new(input_desc.clone()).write(&[]).unwrap();
 
-        let result =
-            SSTableUpgrader::upgrade(&input_desc, &output_desc).unwrap();
+        let result = SSTableUpgrader::upgrade(&input_desc, &output_desc).unwrap();
         assert_eq!(result.partitions_written, 0);
     }
 
@@ -145,8 +139,7 @@ mod tests {
             .write(&sample_partitions())
             .unwrap();
 
-        let err =
-            SSTableUpgrader::upgrade(&input_desc, &output_desc).unwrap_err();
+        let err = SSTableUpgrader::upgrade(&input_desc, &output_desc).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert!(err.to_string().contains("generation"));
     }

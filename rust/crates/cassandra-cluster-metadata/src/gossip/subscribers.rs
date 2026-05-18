@@ -86,12 +86,7 @@ pub trait EndpointStateChangeSubscriber: Send + Sync {
     fn on_restart(&self, endpoint: Endpoint, state: &EndpointState);
 
     /// Called when a specific application state changes on an endpoint.
-    fn on_state_changed(
-        &self,
-        endpoint: Endpoint,
-        key: ApplicationState,
-        value: &VersionedValue,
-    );
+    fn on_state_changed(&self, endpoint: Endpoint, key: ApplicationState, value: &VersionedValue);
 }
 
 /// Registry that manages gossip event subscribers and dispatches notifications.

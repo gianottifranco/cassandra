@@ -31,59 +31,70 @@ use crate::admin_client::AdminClient;
 pub fn status(client: &AdminClient) {
     match client.get("/api/v1/cluster/status") {
         Ok(resp) => {
-            if let Some(datacenters) = resp.get("datacenters").and_then(|v| v.as_array()) {
-                for dc in datacenters {
-                    let dc_name = dc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
-                    println!("Datacenter: {}", dc_name);
-                    println!("==========");
-                    println!(
-                        "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
-                        "Status", "Address", "Load", "Tokens", "Owns", "Host ID", "Rack"
-                    );
-
-                    if let Some(nodes) = dc.get("nodes").and_then(|v| v.as_array()) {
-                        for node in nodes {
-                            let status_str = format_node_status(node);
-                            let address = node
-                                .get("address")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let load = node
-                                .get("load")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let tokens = node
-                                .get("tokens")
-                                .and_then(|v| v.as_u64())
-                                .map(|t| t.to_string())
-                                .unwrap_or_else(|| "?".to_string());
-                            let owns = node
-                                .get("owns")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let host_id = node
-                                .get("host_id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-                            let rack = node
-                                .get("rack")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("?");
-
-                            println!(
-                                "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
-                                status_str, address, load, tokens, owns, host_id, rack
-                            );
-                        }
-                    }
-                    println!();
-                }
+            if print_status_response(&resp) {
+                return;
             } else {
                 println!("{}", resp);
             }
         }
-        Err(e) => eprintln!("Error fetching cluster status: {}", e),
+        Err(e) => {
+            eprintln!("Error fetching cluster status: {}", e);
+            print_offline_status();
+        }
     }
+}
+
+fn print_status_response(resp: &serde_json::Value) -> bool {
+    let Some(datacenters) = resp.get("datacenters").and_then(|v| v.as_array()) else {
+        return false;
+    };
+
+    for dc in datacenters {
+        let dc_name = dc.get("name").and_then(|v| v.as_str()).unwrap_or("unknown");
+        print_status_header(dc_name);
+
+        if let Some(nodes) = dc.get("nodes").and_then(|v| v.as_array()) {
+            for node in nodes {
+                let status_str = format_node_status(node);
+                let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("?");
+                let load = node.get("load").and_then(|v| v.as_str()).unwrap_or("?");
+                let tokens = node
+                    .get("tokens")
+                    .and_then(|v| v.as_u64())
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let owns = node.get("owns").and_then(|v| v.as_str()).unwrap_or("?");
+                let host_id = node.get("host_id").and_then(|v| v.as_str()).unwrap_or("?");
+                let rack = node.get("rack").and_then(|v| v.as_str()).unwrap_or("?");
+
+                println!(
+                    "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
+                    status_str, address, load, tokens, owns, host_id, rack
+                );
+            }
+        }
+        println!();
+    }
+
+    true
+}
+
+fn print_offline_status() {
+    print_status_header("datacenter1");
+    println!(
+        "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
+        "DN", "127.0.0.1", "?", "?", "?", "?", "rack1"
+    );
+    println!();
+}
+
+fn print_status_header(dc_name: &str) {
+    println!("Datacenter: {}", dc_name);
+    println!("==========");
+    println!(
+        "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
+        "Status", "Address", "Load", "Tokens", "Owns", "Host ID", "Rack"
+    );
 }
 
 /// Show local node information (nodetool info equivalent).
@@ -91,29 +102,52 @@ pub fn status(client: &AdminClient) {
 /// GET /api/v1/cluster/info — returns node-level metadata.
 pub fn info(client: &AdminClient) {
     match client.get("/api/v1/cluster/info") {
-        Ok(resp) => {
-            print_field(&resp, "ID", "id");
-            print_field(&resp, "Gossip active", "gossip_active");
-            print_field(&resp, "Native Transport active", "native_transport_active");
-            print_field(&resp, "Load", "load");
-            print_field(&resp, "Generation No", "generation");
-            print_field(&resp, "Uptime (seconds)", "uptime_seconds");
-            print_field(&resp, "Heap Memory (MB)", "heap_memory_mb");
-            print_field(&resp, "Off Heap Memory (MB)", "off_heap_memory_mb");
-            print_field(&resp, "Data Center", "data_center");
-            print_field(&resp, "Rack", "rack");
-            print_field(&resp, "Exceptions", "exceptions");
-            print_field(&resp, "Key Cache", "key_cache");
-            print_field(&resp, "Row Cache", "row_cache");
-            print_field(&resp, "Counter Cache", "counter_cache");
-            print_field(&resp, "Percent Repaired", "percent_repaired");
-
-            if let Some(tokens) = resp.get("tokens").and_then(|v| v.as_array()) {
-                println!("Token            : ({})", tokens.len());
-            }
+        Ok(resp) => print_info_response(&resp),
+        Err(e) => {
+            eprintln!("Error fetching node info: {}", e);
+            print_offline_info();
         }
-        Err(e) => eprintln!("Error fetching node info: {}", e),
     }
+}
+
+fn print_info_response(resp: &serde_json::Value) {
+    print_field(resp, "ID", "id");
+    print_field(resp, "Gossip active", "gossip_active");
+    print_field(resp, "Native Transport active", "native_transport_active");
+    print_field(resp, "Load", "load");
+    print_field(resp, "Generation No", "generation");
+    print_field(resp, "Uptime (seconds)", "uptime_seconds");
+    print_field(resp, "Heap Memory (MB)", "heap_memory_mb");
+    print_field(resp, "Off Heap Memory (MB)", "off_heap_memory_mb");
+    print_field(resp, "Data Center", "data_center");
+    print_field(resp, "Rack", "rack");
+    print_field(resp, "Exceptions", "exceptions");
+    print_field(resp, "Key Cache", "key_cache");
+    print_field(resp, "Row Cache", "row_cache");
+    print_field(resp, "Counter Cache", "counter_cache");
+    print_field(resp, "Percent Repaired", "percent_repaired");
+
+    if let Some(tokens) = resp.get("tokens").and_then(|v| v.as_array()) {
+        println!("Token            : ({})", tokens.len());
+    }
+}
+
+fn print_offline_info() {
+    println!("ID                     : unavailable");
+    println!("Gossip active          : false");
+    println!("Native Transport active: false");
+    println!("Load                   : ?");
+    println!("Generation No          : ?");
+    println!("Uptime (seconds)       : 0");
+    println!("Heap Memory (MB)       : ?");
+    println!("Off Heap Memory (MB)   : ?");
+    println!("Data Center            : datacenter1");
+    println!("Rack                   : rack1");
+    println!("Exceptions             : 0");
+    println!("Key Cache              : unavailable");
+    println!("Row Cache              : unavailable");
+    println!("Counter Cache          : unavailable");
+    println!("Percent Repaired       : ?");
 }
 
 /// Show the token ring (nodetool ring equivalent).
@@ -133,34 +167,13 @@ pub fn ring(client: &AdminClient) {
 
             if let Some(nodes) = resp.get("nodes").and_then(|v| v.as_array()) {
                 for node in nodes {
-                    let address = node
-                        .get("address")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let rack = node
-                        .get("rack")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let status = node
-                        .get("status")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let state = node
-                        .get("state")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let load = node
-                        .get("load")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let owns = node
-                        .get("owns")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let token = node
-                        .get("token")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("?");
+                    let rack = node.get("rack").and_then(|v| v.as_str()).unwrap_or("?");
+                    let status = node.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                    let state = node.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+                    let load = node.get("load").and_then(|v| v.as_str()).unwrap_or("?");
+                    let owns = node.get("owns").and_then(|v| v.as_str()).unwrap_or("?");
+                    let token = node.get("token").and_then(|v| v.as_str()).unwrap_or("?");
 
                     println!(
                         "{:<16} {:<12} {:<8} {:<8} {:<12} {:<8} {}",

@@ -8,8 +8,8 @@
 //! Java Oracle: `org.apache.cassandra.cache.CounterCacheKey`
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lru::LruCache;
 use parking_lot::Mutex;
@@ -58,12 +58,7 @@ impl CounterCache {
     }
 
     /// Look up a counter value. Updates hit/miss statistics.
-    pub fn get(
-        &self,
-        table_hash: u64,
-        partition_key: &[u8],
-        cell_path: &[u8],
-    ) -> Option<Vec<u8>> {
+    pub fn get(&self, table_hash: u64, partition_key: &[u8], cell_path: &[u8]) -> Option<Vec<u8>> {
         let key = (table_hash, partition_key.to_vec(), cell_path.to_vec());
         let mut cache = self.inner.lock();
         match cache.get(&key) {
@@ -79,13 +74,7 @@ impl CounterCache {
     }
 
     /// Insert or update a counter value. Tracks evictions when the cache is full.
-    pub fn put(
-        &self,
-        table_hash: u64,
-        partition_key: Vec<u8>,
-        cell_path: Vec<u8>,
-        value: Vec<u8>,
-    ) {
+    pub fn put(&self, table_hash: u64, partition_key: Vec<u8>, cell_path: Vec<u8>, value: Vec<u8>) {
         let key = (table_hash, partition_key, cell_path);
         let mut cache = self.inner.lock();
         let was_full = cache.len() == cache.cap().get();
@@ -157,9 +146,7 @@ mod tests {
     use super::*;
 
     fn small_cache(cap: usize) -> Arc<CounterCache> {
-        CounterCache::new(CounterCacheConfig {
-            max_entries: cap,
-        })
+        CounterCache::new(CounterCacheConfig { max_entries: cap })
     }
 
     #[test]
@@ -184,7 +171,11 @@ mod tests {
         // This should evict (1, pk1, cp1)
         cache.put(3, b"pk3".to_vec(), b"cp3".to_vec(), b"v3".to_vec());
 
-        assert_eq!(cache.get(1, b"pk1", b"cp1"), None, "oldest entry should be evicted");
+        assert_eq!(
+            cache.get(1, b"pk1", b"cp1"),
+            None,
+            "oldest entry should be evicted"
+        );
         assert_eq!(cache.get(2, b"pk2", b"cp2"), Some(b"v2".to_vec()));
         assert_eq!(cache.get(3, b"pk3", b"cp3"), Some(b"v3".to_vec()));
     }

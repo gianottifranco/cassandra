@@ -5,6 +5,8 @@
 //! ## Java Oracle
 //! - `org.apache.cassandra.schema.ViewMetadata`
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Metadata for a materialized view.
@@ -26,6 +28,8 @@ pub struct ViewMetadata {
     pub partition_key: Vec<String>,
     /// Clustering key column names for the view.
     pub clustering_key: Vec<String>,
+    /// Table options attached to the materialized view.
+    pub options: BTreeMap<String, String>,
 }
 
 impl ViewMetadata {
@@ -44,6 +48,7 @@ impl ViewMetadata {
             columns: Vec::new(),
             partition_key: Vec::new(),
             clustering_key: Vec::new(),
+            options: BTreeMap::new(),
         }
     }
 
@@ -76,6 +81,26 @@ impl ViewMetadata {
         self.clustering_key = ck;
         self
     }
+
+    /// Set view table options.
+    pub fn with_options<I, K, V>(mut self, options: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        self.options = options
+            .into_iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        self
+    }
+
+    /// Return a new `ViewMetadata` with the given option upserted.
+    pub fn with_option(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.options.insert(key.into(), value.into());
+        self
+    }
 }
 
 #[cfg(test)]
@@ -103,10 +128,27 @@ mod tests {
     }
 
     #[test]
+    fn view_options_are_stored() {
+        let view = ViewMetadata::new("users_by_email", "ks", "users")
+            .with_option("gc_grace_seconds", "3600")
+            .with_option("comment", "by email");
+
+        assert_eq!(
+            view.options.get("gc_grace_seconds").map(String::as_str),
+            Some("3600")
+        );
+        assert_eq!(
+            view.options.get("comment").map(String::as_str),
+            Some("by email")
+        );
+    }
+
+    #[test]
     fn serde_round_trip() {
         let view = ViewMetadata::new("v1", "ks", "t1")
             .with_where_clause("x IS NOT NULL")
-            .with_column("x");
+            .with_column("x")
+            .with_option("comment", "view");
         let json = serde_json::to_string(&view).unwrap();
         let deserialized: ViewMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(view, deserialized);

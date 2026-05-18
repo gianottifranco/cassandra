@@ -89,7 +89,7 @@ impl FunctionRegistry {
     }
 
     /// Resolve a function by name and argument types.
-    /// Tries exact match first, then falls back to matching by arg count.
+    /// Tries compatible overloads first, then variadic functions.
     pub fn resolve(&self, name: &str, arg_types: &[CqlType]) -> Option<Arc<dyn CqlFunction>> {
         let key = name.to_lowercase();
         let overloads = self.functions.get(&key)?;
@@ -108,10 +108,10 @@ impl FunctionRegistry {
             }
         }
 
-        // Fallback: match by arg count only (for polymorphic functions)
+        // Fallback only for variadic/polymorphic functions such as token() and toJson().
         for func in overloads.iter() {
             let expected = func.arg_types();
-            if expected.is_empty() || expected.len() == arg_types.len() {
+            if expected.is_empty() {
                 return Some(Arc::clone(func));
             }
         }
@@ -149,6 +149,10 @@ fn types_compatible(expected: &CqlType, actual: &CqlType) -> bool {
         (CqlType::Bigint, CqlType::Int)
             | (CqlType::Double, CqlType::Float)
             | (CqlType::Varchar, CqlType::Ascii)
+    ) || matches!(
+        (expected, actual),
+        (CqlType::Vector(expected_inner, 0), CqlType::Vector(actual_inner, _))
+            if expected_inner == actual_inner
     )
 }
 
@@ -241,6 +245,37 @@ mod tests {
         // Int should widen to Bigint
         let f = registry.resolve("f", &[CqlType::Int]);
         assert!(f.is_some());
+    }
+
+    #[test]
+    fn same_arity_type_mismatch_does_not_resolve() {
+        let registry = FunctionRegistry::new();
+        registry.register(Arc::new(TestFunc {
+            name: "f".into(),
+            args: vec![CqlType::Int],
+            ret: CqlType::Int,
+        }));
+
+        assert!(registry.resolve("f", &[CqlType::Varchar]).is_none());
+    }
+
+    #[test]
+    fn vector_dimension_wildcard_resolves() {
+        let registry = FunctionRegistry::new();
+        registry.register(Arc::new(TestFunc {
+            name: "similarity".into(),
+            args: vec![CqlType::Vector(Box::new(CqlType::Float), 0)],
+            ret: CqlType::Float,
+        }));
+
+        assert!(
+            registry
+                .resolve(
+                    "similarity",
+                    &[CqlType::Vector(Box::new(CqlType::Float), 3)]
+                )
+                .is_some()
+        );
     }
 
     #[test]

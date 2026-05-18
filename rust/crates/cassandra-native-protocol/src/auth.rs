@@ -21,6 +21,14 @@
 //! - `org.apache.cassandra.auth.AllowAllAuthenticator`
 //! - `org.apache.cassandra.auth.PasswordAuthenticator`
 
+use std::sync::Arc;
+
+use cassandra_security::auth::{
+    Authenticator as SecurityAuthenticator, Credentials,
+    PasswordAuthenticator as SecurityPasswordAuthenticator,
+};
+use cassandra_security::roles::{InMemoryRoleManager, RoleManager};
+
 /// Authenticator trait for pluggable authentication backends.
 pub trait Authenticator: Send + Sync {
     /// The authenticator class name sent in AUTHENTICATE response.
@@ -63,17 +71,74 @@ impl Authenticator for AllowAllAuthenticator {
     }
 }
 
-/// PasswordAuthenticator — PLAIN SASL credential parser.
+/// Credentials decoded from a SASL PLAIN authentication token.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlainCredentials {
+    /// Optional authorization identity from the first PLAIN field.
+    pub authzid: String,
+    /// Authentication identity from the second PLAIN field.
+    pub username: String,
+    /// Password from the third PLAIN field.
+    pub password: String,
+}
+
+/// Parse a native protocol SASL PLAIN token.
 ///
-/// Parses SASL PLAIN tokens (\0username\0password) for the native protocol.
-/// In production, `cassandra-server::NativeAuthWrapper` wraps a
-/// `cassandra-security::PasswordAuthenticator` for real bcrypt verification.
-/// This standalone implementation accepts any non-empty credentials and is
-/// only used when the native-protocol crate is used without the server layer.
+/// The wire layout is `[authzid] NUL username NUL password`.
+pub fn parse_plain_credentials(token: &[u8]) -> Result<PlainCredentials, String> {
+    let parts: Vec<&[u8]> = token.splitn(3, |&b| b == 0).collect();
+    if parts.len() < 3 {
+        return Err("Invalid PLAIN credentials format".to_string());
+    }
+
+    let authzid = std::str::from_utf8(parts[0]).map_err(|_| "Invalid UTF-8 in authzid")?;
+    let username = std::str::from_utf8(parts[1]).map_err(|_| "Invalid UTF-8 in username")?;
+    let password = std::str::from_utf8(parts[2]).map_err(|_| "Invalid UTF-8 in password")?;
+
+    if username.is_empty() || password.is_empty() {
+        return Err("Username and password must not be empty".to_string());
+    }
+
+    Ok(PlainCredentials {
+        authzid: authzid.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+    })
+}
+
+/// PasswordAuthenticator — native protocol adapter over `cassandra-security`.
+///
+/// Parses SASL PLAIN tokens and verifies credentials with the same bcrypt-backed
+/// role authenticator used by the server layer. The default instance is backed
+/// by an in-memory role manager containing Cassandra's initial `cassandra`
+/// superuser; callers can inject any `cassandra-security` authenticator.
 ///
 /// ## Java Oracle
 /// - `org.apache.cassandra.auth.PasswordAuthenticator`
-pub struct PasswordAuthenticator;
+pub struct PasswordAuthenticator {
+    inner: Arc<dyn SecurityAuthenticator>,
+}
+
+impl PasswordAuthenticator {
+    /// Create a native password authenticator from a security authenticator.
+    pub fn new(inner: Arc<dyn SecurityAuthenticator>) -> Self {
+        Self { inner }
+    }
+
+    /// Create a native password authenticator from a role manager.
+    pub fn with_role_manager<R>(role_manager: R) -> Self
+    where
+        R: RoleManager + Send + Sync + 'static,
+    {
+        Self::new(Arc::new(SecurityPasswordAuthenticator::new(role_manager)))
+    }
+}
+
+impl Default for PasswordAuthenticator {
+    fn default() -> Self {
+        Self::with_role_manager(InMemoryRoleManager::new())
+    }
+}
 
 impl Authenticator for PasswordAuthenticator {
     fn class_name(&self) -> &str {
@@ -86,25 +151,17 @@ impl Authenticator for PasswordAuthenticator {
 
     fn authenticate(&self, token: Option<&[u8]>) -> Result<AuthResult, String> {
         let token = token.ok_or("No authentication token provided")?;
+        let parsed = parse_plain_credentials(token)?;
 
-        // PLAIN SASL: \0username\0password
-        let parts: Vec<&[u8]> = token.splitn(3, |&b| b == 0).collect();
-        if parts.len() < 3 {
-            return Err("Invalid PLAIN credentials format".to_string());
-        }
-
-        let _authzid = std::str::from_utf8(parts[0]).map_err(|_| "Invalid UTF-8 in authzid")?;
-        let username = std::str::from_utf8(parts[1]).map_err(|_| "Invalid UTF-8 in username")?;
-        let password = std::str::from_utf8(parts[2]).map_err(|_| "Invalid UTF-8 in password")?;
-
-        if username.is_empty() || password.is_empty() {
-            return Err("Username and password must not be empty".to_string());
-        }
-
-        // GAP(gap_guard_ldap_kerberos_auth): Real credential verification against system_auth.roles — tracked in gap_guards.rs
-        // For now, accept any non-empty credentials (stub).
-        tracing::info!("PasswordAuthenticator: accepted user '{}' (stub)", username);
-        Ok(AuthResult::Success(Some(username.to_string()), None))
+        let credentials = Credentials {
+            username: parsed.username,
+            password: parsed.password,
+            source_address: None,
+        };
+        self.inner
+            .authenticate(&credentials)
+            .map(|user| AuthResult::Success(Some(user.role_name), None))
+            .map_err(|err| err.to_string())
     }
 }
 
@@ -122,7 +179,7 @@ mod tests {
 
     #[test]
     fn password_auth_valid() {
-        let auth = PasswordAuthenticator;
+        let auth = PasswordAuthenticator::default();
         assert!(auth.requires_auth());
 
         let token = b"\0cassandra\0cassandra";
@@ -132,25 +189,55 @@ mod tests {
 
     #[test]
     fn password_auth_empty_username() {
-        let auth = PasswordAuthenticator;
+        let auth = PasswordAuthenticator::default();
         let token = b"\0\0password";
         let result = auth.authenticate(Some(token));
         assert!(result.is_err());
     }
 
     #[test]
+    fn password_auth_wrong_password() {
+        let auth = PasswordAuthenticator::default();
+        let token = b"\0cassandra\0wrong";
+        let result = auth.authenticate(Some(token));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn password_auth_unknown_user() {
+        let auth = PasswordAuthenticator::default();
+        let token = b"\0alice\0cassandra";
+        let result = auth.authenticate(Some(token));
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn password_auth_no_token() {
-        let auth = PasswordAuthenticator;
+        let auth = PasswordAuthenticator::default();
         let result = auth.authenticate(None);
         assert!(result.is_err());
     }
 
     #[test]
     fn password_auth_class_name() {
-        let auth = PasswordAuthenticator;
+        let auth = PasswordAuthenticator::default();
         assert_eq!(
             auth.class_name(),
             "org.apache.cassandra.auth.PasswordAuthenticator"
         );
+    }
+
+    #[test]
+    fn parse_plain_credentials_rejects_malformed_token() {
+        assert!(parse_plain_credentials(b"cassandra").is_err());
+        assert!(parse_plain_credentials(b"\0cassandra").is_err());
+    }
+
+    #[test]
+    fn parse_plain_credentials_keeps_authzid() {
+        let parsed = parse_plain_credentials(b"proxy\0cassandra\0cassandra").unwrap();
+        assert_eq!(parsed.authzid, "proxy");
+        assert_eq!(parsed.username, "cassandra");
+        assert_eq!(parsed.password, "cassandra");
     }
 }

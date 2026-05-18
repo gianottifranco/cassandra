@@ -53,7 +53,8 @@ impl DistributedSchema {
     pub fn remove_keyspace(&mut self, name: &str) {
         self.catalog = self.catalog.without_keyspace(name);
         self.recompute_version();
-        self.notifier.notify(&SchemaChangeEvent::KeyspaceDropped(name.to_string()));
+        self.notifier
+            .notify(&SchemaChangeEvent::KeyspaceDropped(name.to_string()));
     }
 
     /// Current schema version UUID.

@@ -21,6 +21,7 @@
 //! active → flushing → flushed. It enforces backpressure based on
 //! memory thresholds.
 
+pub mod allocator;
 pub mod partition;
 pub mod shard;
 pub mod trie;
@@ -352,6 +353,15 @@ impl MemtableManager {
     /// List all active CF names.
     pub fn active_cf_names(&self) -> Vec<String> {
         self.active.read().keys().cloned().collect()
+    }
+
+    /// Snapshot all active partitions for a column family.
+    pub fn active_partitions(&self, cf_name: &str) -> Vec<(Vec<u8>, PartitionData)> {
+        self.active
+            .read()
+            .get(cf_name)
+            .map(|mt| mt.iter_partitions())
+            .unwrap_or_default()
     }
 }
 

@@ -10,6 +10,7 @@
 //! see masked values instead of the real data.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 // ─── MaskingFunction Trait ─────────────────────────────────────────────────
 
@@ -103,16 +104,13 @@ pub struct HashMask;
 
 impl MaskingFunction for HashMask {
     fn mask(&self, value: &[u8]) -> Vec<u8> {
-        // Simple hash using available primitives (not cryptographic-grade for DDM).
-        // In production, use a proper SHA-256 from ring or sha2 crate.
-        // For now, use a simple FNV-1a style hash as placeholder.
-        // GAP(gap_guard_ldap_kerberos_auth): Replace with SHA-256 when sha2 crate is added — tracked in gap_guards.rs
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for &byte in value {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
+        let digest = Sha256::digest(value);
+        let mut encoded = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write;
+            write!(&mut encoded, "{byte:02x}").expect("write to String cannot fail");
         }
-        format!("{:016x}", hash).into_bytes()
+        encoded.into_bytes()
     }
 
     fn name(&self) -> &str {
@@ -269,7 +267,11 @@ mod tests {
         let a = mask.mask(b"test");
         let b = mask.mask(b"test");
         assert_eq!(a, b);
-        assert!(!a.is_empty());
+        assert_eq!(a.len(), 64);
+        assert_eq!(
+            a,
+            b"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08".to_vec()
+        );
     }
 
     #[test]

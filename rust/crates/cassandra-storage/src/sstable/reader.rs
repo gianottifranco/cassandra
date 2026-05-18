@@ -21,6 +21,7 @@ use byteorder::{BigEndian, ReadBytesExt};
 use super::bloom::BloomFilter;
 use super::format::*;
 use super::key_cache::KeyCache;
+use super::metadata::MetadataSerializer;
 use crate::memtable::partition::{Cell, PartitionData, Row};
 
 /// Index entry loaded from Index.db.
@@ -266,8 +267,18 @@ impl SSTableReader {
 
     fn load_stats(desc: &SSTableDescriptor) -> io::Result<SSTableStats> {
         let path = desc.component_path(Component::Statistics);
-        let data = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&data).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        let data = std::fs::read(&path)?;
+        let metadata = MetadataSerializer::deserialize_auto(&data)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(SSTableStats {
+            partition_count: metadata.partition_count,
+            row_count: metadata.row_count,
+            cell_count: metadata.cell_count,
+            min_timestamp: metadata.min_timestamp,
+            max_timestamp: metadata.max_timestamp,
+            data_size: metadata.data_size,
+            index_size: metadata.index_size,
+        })
     }
 }
 

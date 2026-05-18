@@ -17,7 +17,7 @@ use http_body_util::Full;
 use hyper::{Response, StatusCode};
 use serde_json::json;
 
-use crate::http_admin::{json_response, AdminState};
+use crate::http_admin::{AdminState, json_response};
 
 /// GET /api/v1/cluster/status — cluster status with datacenter and node list.
 pub fn handle_cluster_status(state: &AdminState) -> Response<Full<Bytes>> {
@@ -30,10 +30,19 @@ pub fn handle_cluster_status(state: &AdminState) -> Response<Full<Bytes>> {
     // Add local node
     if let Some(table) = local {
         for row in table.rows() {
-            let address = row.get("listen_address").cloned().unwrap_or_else(|| "127.0.0.1".into());
-            let dc = row.get("data_center").cloned().unwrap_or_else(|| "datacenter1".into());
+            let address = row
+                .get("listen_address")
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".into());
+            let dc = row
+                .get("data_center")
+                .cloned()
+                .unwrap_or_else(|| "datacenter1".into());
             let rack = row.get("rack").cloned().unwrap_or_else(|| "rack1".into());
-            let host_id = row.get("host_id").cloned().unwrap_or_else(|| "unknown".into());
+            let host_id = row
+                .get("host_id")
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
             nodes.push(json!({
                 "address": address,
                 "status": "UP",
@@ -51,10 +60,19 @@ pub fn handle_cluster_status(state: &AdminState) -> Response<Full<Bytes>> {
     // Add gossip peers
     if let Some(table) = gossip {
         for row in table.rows() {
-            let address = row.get("address").cloned().unwrap_or_else(|| "unknown".into());
-            let dc = row.get("data_center").cloned().unwrap_or_else(|| "datacenter1".into());
+            let address = row
+                .get("address")
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
+            let dc = row
+                .get("data_center")
+                .cloned()
+                .unwrap_or_else(|| "datacenter1".into());
             let rack = row.get("rack").cloned().unwrap_or_else(|| "rack1".into());
-            let host_id = row.get("host_id").cloned().unwrap_or_else(|| "unknown".into());
+            let host_id = row
+                .get("host_id")
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
             let status = row.get("status").cloned().unwrap_or_else(|| "UP".into());
             let load = row.get("load").cloned().unwrap_or_else(|| "0 bytes".into());
             nodes.push(json!({
@@ -110,11 +128,23 @@ pub fn handle_cluster_info(state: &AdminState) -> Response<Full<Bytes>> {
     if let Some(table) = local {
         let rows = table.rows();
         if let Some(row) = rows.first() {
-            let host_id = row.get("host_id").cloned().unwrap_or_else(|| "unknown".into());
-            let dc = row.get("data_center").cloned().unwrap_or_else(|| "datacenter1".into());
+            let host_id = row
+                .get("host_id")
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
+            let dc = row
+                .get("data_center")
+                .cloned()
+                .unwrap_or_else(|| "datacenter1".into());
             let rack = row.get("rack").cloned().unwrap_or_else(|| "rack1".into());
-            let listen_address = row.get("listen_address").cloned().unwrap_or_else(|| "127.0.0.1".into());
-            let release_version = row.get("release_version").cloned().unwrap_or_else(|| "unknown".into());
+            let listen_address = row
+                .get("listen_address")
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".into());
+            let release_version = row
+                .get("release_version")
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
 
             return json_response(
                 StatusCode::OK,
@@ -161,7 +191,10 @@ pub fn handle_cluster_ring(state: &AdminState) -> Response<Full<Bytes>> {
 
     if let Some(table) = local {
         for row in table.rows() {
-            let address = row.get("listen_address").cloned().unwrap_or_else(|| "127.0.0.1".into());
+            let address = row
+                .get("listen_address")
+                .cloned()
+                .unwrap_or_else(|| "127.0.0.1".into());
             let rack = row.get("rack").cloned().unwrap_or_else(|| "rack1".into());
             ring_nodes.push(json!({
                 "address": address,
@@ -177,7 +210,10 @@ pub fn handle_cluster_ring(state: &AdminState) -> Response<Full<Bytes>> {
 
     if let Some(table) = gossip {
         for row in table.rows() {
-            let address = row.get("address").cloned().unwrap_or_else(|| "unknown".into());
+            let address = row
+                .get("address")
+                .cloned()
+                .unwrap_or_else(|| "unknown".into());
             let rack = row.get("rack").cloned().unwrap_or_else(|| "rack1".into());
             let status = row.get("status").cloned().unwrap_or_else(|| "Up".into());
             let load = row.get("load").cloned().unwrap_or_else(|| "0 bytes".into());
@@ -223,10 +259,7 @@ pub fn handle_describe_cluster(state: &AdminState) -> Response<Full<Bytes>> {
         .unwrap_or_else(|| "unknown".into());
 
     let mut schema_versions = serde_json::Map::new();
-    schema_versions.insert(
-        "current".into(),
-        json!([release_version]),
-    );
+    schema_versions.insert("current".into(), json!([release_version]));
 
     json_response(
         StatusCode::OK,

@@ -192,7 +192,12 @@ pub fn string_to_decimal(s: &str) -> MarshalResult<Vec<u8>> {
     let scale = frac_part.len() as i32 - exp;
 
     // Unscaled integer = int_part + frac_part (as a single integer string)
-    let combined = format!("{}{}{}", if negative { "-" } else { "" }, int_part, frac_part);
+    let combined = format!(
+        "{}{}{}",
+        if negative { "-" } else { "" },
+        int_part,
+        frac_part
+    );
     let unscaled = string_to_varint(&combined)?;
 
     let mut result = Vec::with_capacity(4 + unscaled.len());

@@ -1,0 +1,14 @@
+{
+  "error_code": "0x1200",
+  "error_name": "READ_TIMEOUT",
+  "description": "Read request timed out waiting for replica responses",
+  "fields": {
+    "cl": "QUORUM",
+    "required": 2,
+    "received": 1,
+    "block_for": 2,
+    "data_present": false
+  },
+  "java_class": "org.apache.cassandra.exceptions.ReadTimeoutException",
+  "protocol_version": 4
+}

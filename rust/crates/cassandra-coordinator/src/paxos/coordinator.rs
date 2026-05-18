@@ -124,11 +124,11 @@ pub enum PaxosCoordinatorError {
     Internal(String),
 }
 
-/// Simulated replica — holds per-partition Paxos state.
+/// Local replica — holds per-partition Paxos state.
 ///
 /// In a real deployment, each replica is a remote node contacted via the
 /// messaging service.  For unit testing and single-node validation, we
-/// use this local simulation.
+/// use this in-process implementation.
 #[derive(Debug)]
 pub struct PaxosReplica {
     /// Per-partition Paxos state.
@@ -204,7 +204,9 @@ impl PaxosReplica {
 
         if resp.accepted {
             if let Some(ref storage) = self.storage {
-                if let Err(e) = storage.save_proposal(&msg.partition_key, Uuid::nil(), &msg.proposal) {
+                if let Err(e) =
+                    storage.save_proposal(&msg.partition_key, Uuid::nil(), &msg.proposal)
+                {
                     warn!(error = %e, "Failed to persist Paxos proposal");
                 }
             }
@@ -238,7 +240,7 @@ impl PaxosReplica {
 /// The Paxos coordinator — drives a CAS operation across a set of replicas.
 ///
 /// In production, `replicas` would be contacted via the inter-node messaging
-/// service.  Here we use `Arc<PaxosReplica>` for in-process simulation.
+/// service.  Here we use `Arc<PaxosReplica>` for in-process coordination.
 pub struct PaxosCoordinator {
     /// Our node's identity (used to generate ballots).
     node_id: Uuid,
@@ -375,7 +377,7 @@ impl PaxosCoordinator {
                 .filter_map(|p| p.in_progress.as_ref())
                 .max_by_key(|p| p.ballot);
 
-            let proposal_mutation = if let Some(adopted) = in_progress {
+            let (proposal_mutation, adopted_in_progress) = if let Some(adopted) = in_progress {
                 debug!(
                     adopted_ballot = %adopted.ballot,
                     "Adopting in-progress proposal — completing prior round (recovery)"
@@ -383,7 +385,7 @@ impl PaxosCoordinator {
                 // Paxos safety: must finish the prior round with the adopted value.
                 // We propose and commit the adopted mutation, then the caller's
                 // CAS will need to retry with a fresh round.
-                adopted.mutation.clone()
+                (adopted.mutation.clone(), true)
             } else {
                 // No in-progress — we can propose our own mutation.
                 // Phase 2: Read current row value at SERIAL consistency.
@@ -398,7 +400,7 @@ impl PaxosCoordinator {
                     };
                 }
 
-                mutation.clone()
+                (mutation.clone(), false)
             };
 
             // Phase 2: Propose
@@ -449,6 +451,11 @@ impl PaxosCoordinator {
                 ballot = %ballot,
                 "Paxos CAS committed successfully"
             );
+
+            if adopted_in_progress {
+                debug!("Completed adopted Paxos round; retrying caller CAS");
+                continue;
+            }
 
             return CasResult::Success;
         }
@@ -598,9 +605,6 @@ mod tests {
         let coord_a = PaxosCoordinator::with_config(node_a(), replicas.clone(), 2, config.clone());
         let coord_b = PaxosCoordinator::with_config(node_b(), replicas.clone(), 2, config);
 
-        // We run them sequentially in the test to verify safety, simulating overlap
-        // With an async runtime we could spawn both, but simulating the exact interleaving
-        // requires hooks into the mock. For now, testing basic success.
         let result_a = coord_a
             .execute_cas(
                 "ks",
@@ -635,6 +639,69 @@ mod tests {
                 matches!(result_b, CasResult::ConditionNotMet { .. }),
                 "B should see condition-not-met after A succeeded"
             );
+        }
+    }
+
+    #[tokio::test]
+    async fn adopted_in_progress_proposal_is_completed_before_own_cas() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let r1 = Arc::new(PaxosReplica::new(node_a()));
+        let r2 = Arc::new(PaxosReplica::new(node_b()));
+        let r3 = Arc::new(PaxosReplica::new(node_c()));
+        let replicas = vec![r1.clone(), r2.clone(), r3.clone()];
+
+        let prior_ballot = Ballot::with_timestamp(1, node_a());
+        let prepare = PaxosPrepare {
+            partition_key: b"contested_key".to_vec(),
+            keyspace: "ks".into(),
+            table: "t".into(),
+            ballot: prior_ballot,
+        };
+        for replica in &replicas {
+            assert!(replica.handle_prepare(&prepare).promised);
+        }
+
+        let prior_proposal = Proposal {
+            ballot: prior_ballot,
+            mutation: b"A wins".to_vec(),
+        };
+        let propose = PaxosPropose {
+            partition_key: b"contested_key".to_vec(),
+            keyspace: "ks".into(),
+            table: "t".into(),
+            proposal: prior_proposal,
+        };
+        for replica in &replicas {
+            assert!(replica.handle_propose(&propose).accepted);
+        }
+
+        let config = PaxosConfig {
+            use_jitter: false,
+            ..Default::default()
+        };
+        let coord_b = PaxosCoordinator::with_config(node_b(), replicas.clone(), 2, config);
+        let reads = AtomicUsize::new(0);
+
+        let result_b = coord_b
+            .execute_cas(
+                "ks",
+                "t",
+                b"contested_key",
+                b"B wins".to_vec(),
+                || {
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    async { Some(b"A wins".to_vec()) }
+                },
+                |current| current.is_none(),
+            )
+            .await;
+
+        assert!(matches!(result_b, CasResult::ConditionNotMet { .. }));
+        assert_eq!(reads.load(Ordering::SeqCst), 1);
+        for replica in &replicas {
+            let state = replica.get_state(b"contested_key").unwrap();
+            assert_eq!(state.committed.unwrap().mutation, b"A wins");
         }
     }
 

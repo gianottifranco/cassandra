@@ -7,15 +7,15 @@
 //! - `org.apache.cassandra.db.compaction.ActiveCompactions`
 //! - `org.apache.cassandra.db.compaction.CompactionTask`
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use uuid::Uuid;
 
+use crate::compaction::CompactionMetrics;
 use crate::compaction::active::*;
 use crate::compaction::errors::*;
 use crate::compaction::task::*;
-use crate::compaction::CompactionMetrics;
 use crate::memtable::partition::PartitionData;
 
 // ─── RateLimiter ────────────────────────────────────────────────────────────
@@ -119,8 +119,11 @@ impl CompactionManager {
                 .as_millis() as u64,
             cancel_token: ctx.cancel_token.clone(),
         };
-        // Ignore conflict errors for simplicity; the caller should check.
-        let _ = self.active.register(info);
+        self.active
+            .register(info)
+            .map_err(|_| CompactionError::ConcurrentModification {
+                sstable_ids: ctx.input_sstables.clone(),
+            })?;
         Ok(id)
     }
 
@@ -148,7 +151,11 @@ impl CompactionManager {
                 .as_millis() as u64,
             cancel_token: ctx.cancel_token.clone(),
         };
-        let _ = self.active.register(info);
+        self.active
+            .register(info)
+            .map_err(|_| CompactionError::ConcurrentModification {
+                sstable_ids: ctx.input_sstables.clone(),
+            })?;
         Ok(id)
     }
 
@@ -313,6 +320,29 @@ mod tests {
         let ctx3 = test_ctx_with_ids(vec![5, 6]);
         let _id2 = mgr.submit_user_defined(&task, &ctx3).unwrap();
         assert_eq!(mgr.active_count(), 2);
+    }
+
+    #[test]
+    fn submit_rejects_overlapping_sstables() {
+        let mgr = CompactionManager::new(4, RateLimiter::disabled());
+        let task = RegularCompactionTask;
+        let ctx = test_ctx_with_ids(vec![1, 2]);
+
+        mgr.submit_background(&task, &ctx).unwrap();
+        let err = mgr.submit_background(&task, &ctx).unwrap_err();
+        assert!(matches!(
+            err,
+            CompactionError::ConcurrentModification { sstable_ids }
+                if sstable_ids == vec![1, 2]
+        ));
+
+        let user_err = mgr.submit_user_defined(&task, &ctx).unwrap_err();
+        assert!(matches!(
+            user_err,
+            CompactionError::ConcurrentModification { sstable_ids }
+                if sstable_ids == vec![1, 2]
+        ));
+        assert_eq!(mgr.active_count(), 1);
     }
 
     #[test]

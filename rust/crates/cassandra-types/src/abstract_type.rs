@@ -27,7 +27,7 @@ use std::cmp::Ordering;
 use std::net::IpAddr;
 
 use crate::bigint;
-use crate::codec::{CqlValue, CodecError};
+use crate::codec::{CodecError, CqlValue};
 use crate::comparator::compare_bytes;
 use crate::marshal::{MarshalError, MarshalResult};
 use crate::native::CqlType;
@@ -201,6 +201,18 @@ pub fn from_cql_string(cql_type: &CqlType, s: &str) -> MarshalResult<Vec<u8>> {
             })?;
             Ok(n.to_be_bytes().to_vec())
         }
+        CqlType::Vector(inner, dimensions) => {
+            if **inner != CqlType::Float {
+                return Err(MarshalError::UnsupportedType(cql_type.cql_name()));
+            }
+            let components = parse_vector_literal(s, *dimensions)?;
+            let vector = crate::vector::VectorValue::new(components);
+            vector.validate().map_err(|err| MarshalError::InvalidData {
+                type_name: cql_type.cql_name(),
+                reason: err.to_string(),
+            })?;
+            Ok(vector.serialize())
+        }
         _ => Err(MarshalError::UnsupportedType(cql_type.cql_name())),
     }
 }
@@ -226,6 +238,10 @@ fn codec_to_marshal(_cql_type: &CqlType) -> impl Fn(CodecError) -> MarshalError 
             actual: got,
         },
         CodecError::UnsupportedType(name) => MarshalError::UnsupportedType(name),
+        CodecError::InvalidVector(reason) => MarshalError::InvalidData {
+            type_name: "vector".to_string(),
+            reason,
+        },
     }
 }
 
@@ -237,7 +253,10 @@ fn parse_int(s: &str, type_name: &str) -> MarshalResult<i64> {
 }
 
 fn parse_hex_blob(s: &str) -> MarshalResult<Vec<u8>> {
-    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     (0..s.len())
         .step_by(2)
         .map(|i| {
@@ -249,6 +268,45 @@ fn parse_hex_blob(s: &str) -> MarshalResult<Vec<u8>> {
                 })
         })
         .collect()
+}
+
+fn parse_vector_literal(s: &str, dimensions: u32) -> MarshalResult<Vec<f32>> {
+    let inner = s
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix(']'))
+        .ok_or_else(|| MarshalError::InvalidData {
+            type_name: "vector".into(),
+            reason: format!("vector literal must be enclosed in brackets: '{}'", s),
+        })?
+        .trim();
+
+    let components = if inner.is_empty() {
+        Vec::new()
+    } else {
+        inner
+            .split(',')
+            .map(|part| {
+                let part = part.trim();
+                part.parse::<f32>().map_err(|_| MarshalError::InvalidData {
+                    type_name: "vector".into(),
+                    reason: format!("cannot parse vector component '{}'", part),
+                })
+            })
+            .collect::<MarshalResult<Vec<_>>>()?
+    };
+
+    if components.len() != dimensions as usize {
+        return Err(MarshalError::InvalidData {
+            type_name: "vector".into(),
+            reason: format!(
+                "dimension mismatch: expected {}, got {}",
+                dimensions,
+                components.len()
+            ),
+        });
+    }
+
+    Ok(components)
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -307,5 +365,34 @@ mod tests {
         let bytes = serialize(&CqlType::Bigint, &val);
         let out = deserialize(&CqlType::Bigint, &bytes).unwrap();
         assert_eq!(out, val);
+    }
+
+    #[test]
+    fn from_cql_string_vector_float() {
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+        let bytes = from_cql_string(&ty, "[1.0, -2.5, 3.25]").unwrap();
+        let out = deserialize(&ty, &bytes).unwrap();
+        assert_eq!(
+            out,
+            CqlValue::Vector(crate::vector::VectorValue::new(vec![1.0, -2.5, 3.25]))
+        );
+    }
+
+    #[test]
+    fn from_cql_string_vector_rejects_dimension_mismatch() {
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 3);
+        assert!(matches!(
+            from_cql_string(&ty, "[1.0, 2.0]"),
+            Err(MarshalError::InvalidData { .. })
+        ));
+    }
+
+    #[test]
+    fn from_cql_string_vector_rejects_non_finite_component() {
+        let ty = CqlType::Vector(Box::new(CqlType::Float), 2);
+        assert!(matches!(
+            from_cql_string(&ty, "[1.0, NaN]"),
+            Err(MarshalError::InvalidData { .. })
+        ));
     }
 }
