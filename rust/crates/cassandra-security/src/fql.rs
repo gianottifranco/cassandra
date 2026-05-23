@@ -289,7 +289,7 @@ mod tests {
 
     fn sample_record() -> FqlRecord {
         FqlRecord {
-            timestamp_micros: 1700000000_000000,
+            timestamp_micros: 1_700_000_000_000_000,
             consistency_level: 1, // ONE
             query: "SELECT * FROM ks.users WHERE id = ?".into(),
             bind_values: vec![b"user-123".to_vec()],

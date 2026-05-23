@@ -241,6 +241,26 @@ mod tests {
     }
 
     #[test]
+    fn reads_java_compressor_class_names() {
+        let mut buf = Vec::new();
+        let name = "org.apache.cassandra.io.compress.ZstdCompressor";
+        buf.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        buf.extend_from_slice(name.as_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&4096u32.to_be_bytes());
+        buf.extend_from_slice(&8192u64.to_be_bytes());
+        buf.extend_from_slice(&2u32.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&123u64.to_be_bytes());
+
+        let restored = CompressionMetadata::read_from(&mut buf.as_slice()).unwrap();
+        assert_eq!(restored.compressor_type, CompressorType::Zstd);
+        assert_eq!(restored.chunk_size, 4096);
+        assert_eq!(restored.data_length, 8192);
+        assert_eq!(restored.chunk_offsets, vec![0, 123]);
+    }
+
+    #[test]
     fn test_default_params() {
         let params = CompressionParams::default();
         assert_eq!(params.compressor_type, CompressorType::Lz4);

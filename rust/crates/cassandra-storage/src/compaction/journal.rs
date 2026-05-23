@@ -110,7 +110,7 @@ impl Journal {
         let writer = self
             .writer
             .as_mut()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "journal not open for writing"))?;
+            .ok_or_else(|| io::Error::other("journal not open for writing"))?;
 
         let entry_json = serde_json::to_string(&entry)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;

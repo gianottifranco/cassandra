@@ -389,6 +389,48 @@ impl HintStore {
         }
     }
 
+    /// Requeue hints that were drained but not delivered.
+    ///
+    /// Requeued hints keep their original IDs and creation timestamps. They are
+    /// placed ahead of newer hints for the same target so a transient delivery
+    /// failure does not let older writes fall behind later ones.
+    pub fn requeue_hints(&self, target: Endpoint, hints_to_requeue: Vec<Hint>) -> usize {
+        if hints_to_requeue.is_empty() {
+            return 0;
+        }
+
+        let mut requeued = 0usize;
+        let mut hints = self.hints.write();
+        let queue = hints.entry(target).or_default();
+
+        for hint in hints_to_requeue.into_iter().rev() {
+            if queue.len() >= self.config.max_hints_per_endpoint {
+                self.metrics
+                    .hints_dropped_overflow
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+
+            let estimated_size = serde_json::to_vec(&hint)
+                .map(|v| v.len() as u64)
+                .unwrap_or(256);
+            self.metrics
+                .hint_store_size_bytes
+                .fetch_add(estimated_size, Ordering::Relaxed);
+
+            queue.push_front(hint);
+            requeued += 1;
+        }
+
+        if requeued > 0 {
+            self.total_hints
+                .fetch_add(requeued as u64, Ordering::Relaxed);
+            self.update_oldest_hint_timestamp_locked(&hints);
+        }
+
+        requeued
+    }
+
     /// Read hints from on-disk segments for the given target when in-memory queue is empty.
     fn drain_from_segments(&self, target: &Endpoint) -> Vec<Hint> {
         let mgr = match self.segment_manager.as_ref() {
@@ -788,7 +830,7 @@ impl HintedHandoffManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::write::{CellMutation, CoordinatedMutation, MutationRow};
+    use crate::write::CoordinatedMutation;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn ep(port: u16) -> Endpoint {
@@ -920,6 +962,33 @@ mod tests {
         let stats = store.stats_per_endpoint();
         assert_eq!(stats[&ep(7002)], 2);
         assert_eq!(stats[&ep(7003)], 1);
+    }
+
+    #[test]
+    fn requeue_hints_preserves_original_order_ahead_of_newer_hints() {
+        let store = HintStore::new(100);
+        let target = ep(7002);
+
+        store.store_hint(target, test_mutation());
+        store.store_hint(target, test_mutation());
+        let drained = store.drain_hints(&target);
+        assert_eq!(
+            drained.iter().map(|hint| hint.hint_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        store.store_hint(target, test_mutation());
+        assert_eq!(store.requeue_hints(target, drained), 2);
+        assert_eq!(store.total_hints(), 3);
+
+        let redrained = store.drain_hints(&target);
+        assert_eq!(
+            redrained
+                .iter()
+                .map(|hint| hint.hint_id)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
     }
 
     // ── HintedHandoffManager tests ───────────────────────────────

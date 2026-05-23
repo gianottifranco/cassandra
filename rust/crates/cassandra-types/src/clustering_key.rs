@@ -168,7 +168,7 @@ mod tests {
     fn compare_clustering() {
         let a = ClusteringKey::new(vec![vec![0, 1]]);
         let b = ClusteringKey::new(vec![vec![0, 2]]);
-        let comps: Vec<fn(&[u8], &[u8]) -> Ordering> = vec![|a, b| a.cmp(b)];
+        let comps: Vec<ClusteringComparator> = vec![|a, b| a.cmp(b)];
         assert_eq!(compare_clustering_keys(&a, &b, &comps), Ordering::Less);
     }
 
@@ -176,7 +176,7 @@ mod tests {
     fn prefix_comparison() {
         let short = ClusteringKey::new(vec![vec![0, 1]]);
         let long = ClusteringKey::new(vec![vec![0, 1], vec![0, 2]]);
-        let comps: Vec<fn(&[u8], &[u8]) -> Ordering> = vec![|a, b| a.cmp(b), |a, b| a.cmp(b)];
+        let comps: Vec<ClusteringComparator> = vec![|a, b| a.cmp(b), |a, b| a.cmp(b)];
         assert_eq!(
             compare_clustering_keys(&short, &long, &comps),
             Ordering::Less

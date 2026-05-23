@@ -122,17 +122,12 @@ fn parse_at_least_two(value: &str, original: &str) -> Result<i32, String> {
     Ok(parsed)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OverlapInclusionMethod {
     None,
     Single,
+    #[default]
     Transitive,
-}
-
-impl Default for OverlapInclusionMethod {
-    fn default() -> Self {
-        Self::Transitive
-    }
 }
 
 impl OverlapInclusionMethod {

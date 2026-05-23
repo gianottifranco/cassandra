@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::too_many_arguments)]
+
 //! # Materialized Views
 //!
 //! ## Status: ACTIVE — write-path integration via feature flag

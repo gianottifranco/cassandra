@@ -153,6 +153,8 @@ pub enum Keyword {
     Contains,
     Distinct,
     Json,
+    Default,
+    Unset,
     Null,
     True,
     False,
@@ -183,6 +185,7 @@ pub enum Keyword {
     // Phase 12: DCL, UDF/UDA, triggers, long tail
     Role,
     Roles,
+    User,
     Grant,
     Revoke,
     Permission,
@@ -202,6 +205,7 @@ pub enum Keyword {
     Replace,
     Login,
     Superuser,
+    Hashed,
     Password,
     Norecursive,
     Of,
@@ -213,6 +217,8 @@ pub enum Keyword {
     Schema,
     Cluster,
     Full,
+    Comment,
+    Field,
     // Phase 12-13: Transaction keywords
     Transaction,
     Let,
@@ -268,6 +274,8 @@ impl Keyword {
             "CONTAINS" => Some(Keyword::Contains),
             "DISTINCT" => Some(Keyword::Distinct),
             "JSON" => Some(Keyword::Json),
+            "DEFAULT" => Some(Keyword::Default),
+            "UNSET" => Some(Keyword::Unset),
             "NULL" => Some(Keyword::Null),
             "TRUE" => Some(Keyword::True),
             "FALSE" => Some(Keyword::False),
@@ -298,6 +306,7 @@ impl Keyword {
             // Phase 12: new keywords
             "ROLE" => Some(Keyword::Role),
             "ROLES" => Some(Keyword::Roles),
+            "USER" => Some(Keyword::User),
             "GRANT" => Some(Keyword::Grant),
             "REVOKE" => Some(Keyword::Revoke),
             "PERMISSION" => Some(Keyword::Permission),
@@ -317,6 +326,7 @@ impl Keyword {
             "LOGIN" => Some(Keyword::Login),
             "SUPERUSER" => Some(Keyword::Superuser),
             "NOSUPERUSER" => Some(Keyword::Superuser), // handled at parser level
+            "HASHED" => Some(Keyword::Hashed),
             "PASSWORD" => Some(Keyword::Password),
             "NORECURSIVE" => Some(Keyword::Norecursive),
             "OF" => Some(Keyword::Of),
@@ -328,6 +338,8 @@ impl Keyword {
             "SCHEMA" => Some(Keyword::Schema),
             "CLUSTER" => Some(Keyword::Cluster),
             "FULL" => Some(Keyword::Full),
+            "COMMENT" => Some(Keyword::Comment),
+            "FIELD" => Some(Keyword::Field),
             // Phase 12-13: Transaction keywords
             "TRANSACTION" => Some(Keyword::Transaction),
             "LET" => Some(Keyword::Let),
@@ -467,7 +479,7 @@ impl<'a> Lexer<'a> {
             }
             b':' if self
                 .peek(1)
-                .is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_') =>
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_') =>
             {
                 self.pos += 1;
                 let name = self.read_ident_text();
@@ -485,6 +497,7 @@ impl<'a> Lexer<'a> {
                 TokenKind::Minus
             }
             b'\'' => return self.read_string_literal(start),
+            b'$' if self.peek(1) == Some(b'$') => return self.read_dollar_quoted_string(start),
             b'"' => return self.read_quoted_ident(start),
             b'0' if self.peek(1) == Some(b'x') || self.peek(1) == Some(b'X') => {
                 return self.read_blob_literal(start);
@@ -576,6 +589,30 @@ impl<'a> Lexer<'a> {
                 start,
                 end: self.pos,
             },
+        })
+    }
+
+    fn read_dollar_quoted_string(&mut self, start: usize) -> Result<Token, LexError> {
+        self.pos += 2; // skip opening $$
+        let content_start = self.pos;
+        while self.pos + 1 < self.input.len() {
+            if self.input[self.pos] == b'$' && self.input[self.pos + 1] == b'$' {
+                let value =
+                    String::from_utf8_lossy(&self.input[content_start..self.pos]).to_string();
+                self.pos += 2;
+                return Ok(Token {
+                    kind: TokenKind::StringLiteral(value),
+                    span: Span {
+                        start,
+                        end: self.pos,
+                    },
+                });
+            }
+            self.pos += 1;
+        }
+        Err(LexError {
+            message: "unterminated dollar-quoted string literal".to_string(),
+            position: start,
         })
     }
 
@@ -869,6 +906,12 @@ mod tests {
     }
 
     #[test]
+    fn dollar_quoted_string() {
+        let tokens = lex("$$ r1 ' x $ x ' $$");
+        assert_eq!(tokens[0], TokenKind::StringLiteral(" r1 ' x $ x ' ".into()));
+    }
+
+    #[test]
     fn integer_literal() {
         let tokens = lex("42 -10");
         assert_eq!(tokens[0], TokenKind::IntegerLiteral(42));
@@ -877,8 +920,8 @@ mod tests {
 
     #[test]
     fn float_literal() {
-        let tokens = lex("3.14");
-        assert_eq!(tokens[0], TokenKind::FloatLiteral(3.14));
+        let tokens = lex("3.125");
+        assert_eq!(tokens[0], TokenKind::FloatLiteral(3.125));
     }
 
     #[test]
@@ -908,6 +951,13 @@ mod tests {
         let tokens = lex("? :name");
         assert_eq!(tokens[0], TokenKind::QuestionMark);
         assert_eq!(tokens[1], TokenKind::NamedBind("name".into()));
+    }
+
+    #[test]
+    fn colon_before_number_is_not_named_bind() {
+        let tokens = lex("{'b':1}");
+        assert_eq!(tokens[2], TokenKind::Colon);
+        assert_eq!(tokens[3], TokenKind::IntegerLiteral(1));
     }
 
     #[test]

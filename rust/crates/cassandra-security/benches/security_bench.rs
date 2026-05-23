@@ -43,7 +43,7 @@ fn bench_noop_audit_log(c: &mut Criterion) {
 
 fn bench_fql_encode(c: &mut Criterion) {
     let record = FqlRecord {
-        timestamp_micros: 1700000000_000000,
+        timestamp_micros: 1_700_000_000_000_000,
         consistency_level: 1,
         query: "SELECT * FROM ks.users WHERE id = ?".into(),
         bind_values: vec![b"user-123".to_vec()],
@@ -56,7 +56,7 @@ fn bench_fql_encode(c: &mut Criterion) {
 
 fn bench_fql_decode(c: &mut Criterion) {
     let record = FqlRecord {
-        timestamp_micros: 1700000000_000000,
+        timestamp_micros: 1_700_000_000_000_000,
         consistency_level: 1,
         query: "SELECT * FROM ks.users WHERE id = ?".into(),
         bind_values: vec![b"user-123".to_vec()],

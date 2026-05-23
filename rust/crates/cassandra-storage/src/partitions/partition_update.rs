@@ -87,6 +87,24 @@ impl PartitionUpdate {
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty() && self.static_row.is_none() && self.deletion_info.is_live()
     }
+
+    /// Returns rows with live content after applying partition and range tombstones.
+    pub fn live_rows(&self, now_in_seconds: i32) -> Vec<&RowData> {
+        self.rows
+            .values()
+            .filter(|row| {
+                let deletion = self.deletion_info.active_deletion_for(&row.clustering_key);
+                row.has_live_data_after(now_in_seconds, deletion)
+            })
+            .collect()
+    }
+
+    /// Returns the static row when it has live content after partition deletion.
+    pub fn live_static_row(&self, now_in_seconds: i32) -> Option<&RowData> {
+        self.static_row.as_ref().filter(|row| {
+            row.has_live_data_after(now_in_seconds, self.deletion_info.partition_deletion)
+        })
+    }
 }
 
 /// Convert from simplified `PartitionData`.
@@ -248,5 +266,42 @@ mod tests {
 
         let pu2 = PartitionUpdate::from_partition_data(b"pk".to_vec(), &pd);
         assert_eq!(pu2.row_count(), 1);
+    }
+
+    #[test]
+    fn live_rows_applies_range_tombstones_by_timestamp() {
+        let dk = DecoratedKey::with_token(b"pk".to_vec(), Token::from_raw(1));
+        let mut pu = PartitionUpdate::new(dk);
+        pu.add_row(make_row(b"ck1", "name", b"old", 100));
+        pu.add_row(make_row(b"ck2", "name", b"new", 300));
+        pu.add_range_tombstone(RangeTombstone::new(
+            b"ck1".to_vec(),
+            b"ck2".to_vec(),
+            DeletionTime::new(200, 200),
+        ));
+
+        let live = pu.live_rows(0);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].clustering_key, b"ck2");
+    }
+
+    #[test]
+    fn live_static_row_applies_partition_deletion() {
+        let dk = DecoratedKey::with_token(b"pk".to_vec(), Token::from_raw(1));
+        let mut pu = PartitionUpdate::new(dk);
+        let mut static_row = RowData::new_static();
+        static_row.liveness_info = LivenessInfo::create(100);
+        static_row.add_cell(CellData {
+            column: "s".to_string(),
+            value: Some(b"old".to_vec()),
+            timestamp: 100,
+            ttl: NO_TTL,
+            local_deletion_time: i32::MAX,
+            path: None,
+        });
+        pu.add_row(static_row);
+        pu.set_partition_deletion(DeletionTime::new(200, 200));
+
+        assert!(pu.live_static_row(0).is_none());
     }
 }

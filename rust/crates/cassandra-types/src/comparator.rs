@@ -7,6 +7,7 @@
 
 use crate::native::CqlType;
 use crate::vint::decode_vint;
+use crate::{composite, dynamic_composite};
 use byteorder::{BigEndian, ByteOrder};
 use std::cmp::Ordering;
 
@@ -72,6 +73,14 @@ pub fn compare_bytes(cql_type: &CqlType, left: &[u8], right: &[u8]) -> Ordering 
         // Tuple: positional comparison by field type.
         // Java oracle: TupleType.compare
         CqlType::Tuple(types) => cmp_tuple(types, left, right),
+
+        // Legacy CompositeType: u16 length + payload + EOC per component.
+        // Java oracle: CompositeType.compare
+        CqlType::Composite(types) => cmp_composite(types, left, right),
+
+        // DynamicCompositeType: comparator metadata is stored inline per component.
+        // Java oracle: DynamicCompositeType.compare
+        CqlType::DynamicComposite(aliases) => cmp_dynamic_composite(aliases, left, right),
 
         // UDT: same wire format as Tuple.
         // Java oracle: UserType.compare
@@ -286,6 +295,81 @@ fn cmp_tuple(types: &[CqlType], left: &[u8], right: &[u8]) -> Ordering {
     Ordering::Equal
 }
 
+fn cmp_composite(types: &[CqlType], left: &[u8], right: &[u8]) -> Ordering {
+    let Ok(left_components) = composite::deserialize_composite(left) else {
+        return left.cmp(right);
+    };
+    let Ok(right_components) = composite::deserialize_composite(right) else {
+        return left.cmp(right);
+    };
+    let min_len = left_components.len().min(right_components.len());
+    for idx in 0..min_len {
+        let fallback;
+        let ty = if let Some(ty) = types.get(idx) {
+            ty
+        } else {
+            fallback = CqlType::Blob;
+            &fallback
+        };
+        let cmp = compare_bytes(ty, &left_components[idx].data, &right_components[idx].data);
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let eoc_cmp = compare_eoc(left_components[idx].eoc, right_components[idx].eoc);
+        if eoc_cmp != Ordering::Equal {
+            return eoc_cmp;
+        }
+    }
+    left_components.len().cmp(&right_components.len())
+}
+
+fn cmp_dynamic_composite(
+    aliases: &std::collections::BTreeMap<u8, CqlType>,
+    left: &[u8],
+    right: &[u8],
+) -> Ordering {
+    let Ok(left_components) = dynamic_composite::deserialize_dynamic_composite(left, aliases)
+    else {
+        return left.cmp(right);
+    };
+    let Ok(right_components) = dynamic_composite::deserialize_dynamic_composite(right, aliases)
+    else {
+        return left.cmp(right);
+    };
+    let min_len = left_components.len().min(right_components.len());
+    for idx in 0..min_len {
+        let left_type = &left_components[idx].comparator;
+        let right_type = &right_components[idx].comparator;
+        if left_type != right_type {
+            let cmp = type_order_name(left_type).cmp(&type_order_name(right_type));
+            if cmp != Ordering::Equal {
+                return cmp;
+            }
+        }
+        let cmp = compare_bytes(
+            left_type,
+            &left_components[idx].value,
+            &right_components[idx].value,
+        );
+        if cmp != Ordering::Equal {
+            return cmp;
+        }
+        let eoc_cmp = compare_eoc(left_components[idx].eoc, right_components[idx].eoc);
+        if eoc_cmp != Ordering::Equal {
+            return eoc_cmp;
+        }
+    }
+    left_components.len().cmp(&right_components.len())
+}
+
+fn compare_eoc(left: u8, right: u8) -> Ordering {
+    (left as i8).cmp(&(right as i8))
+}
+
+fn type_order_name(cql_type: &CqlType) -> String {
+    dynamic_composite::java_marshal_name(cql_type)
+}
+
 /// Fixed-width vector comparison.
 fn cmp_vector(inner: &CqlType, dimensions: u32, left: &[u8], right: &[u8]) -> Ordering {
     let Some(element_size) = inner.fixed_size() else {
@@ -416,6 +500,74 @@ mod tests {
 
         assert_eq!(compare_bytes(&ty, &a, &b), Ordering::Less);
         assert_eq!(compare_bytes(&ty, &a, &c), Ordering::Equal);
+    }
+
+    #[test]
+    fn composite_type_comparison_uses_eoc_and_component_types() {
+        let ty = CqlType::Composite(vec![CqlType::Varchar, CqlType::Int]);
+        let left = composite::serialize_composite(&[
+            composite::Component {
+                data: b"test".to_vec(),
+                eoc: composite::EOC_NONE,
+            },
+            composite::Component {
+                data: 24i32.to_be_bytes().to_vec(),
+                eoc: composite::EOC_NONE,
+            },
+        ]);
+        let right = composite::serialize_composite(&[
+            composite::Component {
+                data: b"test".to_vec(),
+                eoc: composite::EOC_NONE,
+            },
+            composite::Component {
+                data: 42i32.to_be_bytes().to_vec(),
+                eoc: composite::EOC_NONE,
+            },
+        ]);
+        assert_eq!(compare_bytes(&ty, &left, &right), Ordering::Less);
+    }
+
+    #[test]
+    fn dynamic_composite_type_comparison_uses_inline_comparators() {
+        use crate::dynamic_composite::{DynamicComponent, serialize_dynamic_composite};
+        use std::collections::BTreeMap;
+
+        let aliases = BTreeMap::from([(b'b', CqlType::Blob), (b't', CqlType::Timeuuid)]);
+        let ty = CqlType::DynamicComposite(aliases.clone());
+        let first = serialize_dynamic_composite(
+            &[
+                DynamicComponent {
+                    comparator: CqlType::Blob,
+                    value: b"test1".to_vec(),
+                    eoc: 0,
+                },
+                DynamicComponent {
+                    comparator: CqlType::Varint,
+                    value: vec![24],
+                    eoc: 0,
+                },
+            ],
+            &aliases,
+        )
+        .unwrap();
+        let second = serialize_dynamic_composite(
+            &[
+                DynamicComponent {
+                    comparator: CqlType::Blob,
+                    value: b"test1".to_vec(),
+                    eoc: 0,
+                },
+                DynamicComponent {
+                    comparator: CqlType::Varint,
+                    value: vec![42],
+                    eoc: 0,
+                },
+            ],
+            &aliases,
+        )
+        .unwrap();
+        assert_eq!(compare_bytes(&ty, &first, &second), Ordering::Less);
     }
 
     #[test]

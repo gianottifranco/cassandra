@@ -43,7 +43,7 @@ pub fn encode_response(msg: &Message, version: u8, stream_id: i16) -> Frame {
             Opcode::Supported
         }
         Message::Result(r) => {
-            encode_result(r, &mut body);
+            encode_result(r, version, &mut body);
             Opcode::Result
         }
         Message::Error(e) => {
@@ -77,7 +77,7 @@ pub fn encode_response(msg: &Message, version: u8, stream_id: i16) -> Frame {
     frame::response_frame(version, stream_id, opcode, 0, body.freeze())
 }
 
-fn encode_result(result: &ResultMessage, buf: &mut BytesMut) {
+fn encode_result(result: &ResultMessage, version: u8, buf: &mut BytesMut) {
     types::write_int(buf, result.kind_id());
 
     match result {
@@ -96,7 +96,9 @@ fn encode_result(result: &ResultMessage, buf: &mut BytesMut) {
         }
         ResultMessage::Prepared(p) => {
             types::write_short_bytes(buf, &p.id);
-            // v4: bind_metadata then result_metadata
+            if version >= 5 {
+                types::write_short_bytes(buf, p.result_metadata_id.as_deref().unwrap_or_default());
+            }
             encode_rows_metadata(&p.bind_metadata, buf);
             encode_rows_metadata(&p.result_metadata, buf);
         }
@@ -303,7 +305,10 @@ pub fn ready_frame(version: u8, stream_id: i16) -> Frame {
 /// Build a SUPPORTED response frame.
 pub fn supported_frame(version: u8, stream_id: i16) -> Frame {
     let mut options = std::collections::HashMap::new();
-    options.insert("CQL_VERSION".to_string(), vec!["3.4.7".to_string()]);
+    options.insert(
+        "CQL_VERSION".to_string(),
+        vec![SUPPORTED_CQL_VERSION.to_string()],
+    );
     options.insert(
         "COMPRESSION".to_string(),
         vec!["lz4".to_string(), "snappy".to_string()],

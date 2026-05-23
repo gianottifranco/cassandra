@@ -25,7 +25,11 @@ pub fn typed_term_to_bytes(term: &Term, target: &CqlType) -> Option<Vec<u8>> {
         Term::Literal(lit) => typed_literal_to_bytes(lit, target),
         Term::BindMarker(_) => None,
         Term::FunctionCall(_, _) => None,
-        Term::TypeHint(_, inner) => typed_term_to_bytes(inner, target),
+        Term::TypeHint(type_hint, inner) => type_hint
+            .resolve()
+            .and_then(|hinted_type| typed_term_to_bytes(inner, &hinted_type))
+            .or_else(|| typed_term_to_bytes(inner, target)),
+        Term::CollectionElement { .. } => None,
         Term::CollectionLiteral(elems) => collection_literal_to_bytes(elems, target),
         Term::MapLiteral(pairs) => {
             map_literal_to_bytes(pairs, target).or_else(|| udt_map_literal_to_bytes(pairs, target))
@@ -342,6 +346,19 @@ mod tests {
             &CqlType::Ascii,
         );
         assert_eq!(bytes, None);
+    }
+
+    #[test]
+    fn type_hint_controls_literal_encoding() {
+        let term = Term::TypeHint(
+            cassandra_cql::ast::CqlTypeName::Simple("bigint".to_string()),
+            Box::new(Term::Literal(Literal::Integer(7))),
+        );
+
+        assert_eq!(
+            typed_term_to_bytes(&term, &CqlType::Int),
+            Some(7i64.to_be_bytes().to_vec())
+        );
     }
 
     #[test]

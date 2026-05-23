@@ -35,12 +35,22 @@ fn gap_guard_cql_functions() {
     // Java-source UDF adapter for deterministic scalar bodies.
     use cassandra_cql::functions::FunctionRegistry;
     use cassandra_storage::udf::{UdfDefinition, UdfManager};
+    use cassandra_types::CqlType;
     let registry = FunctionRegistry::with_builtins();
     let names = registry.function_names();
     // Verify core builtins are registered
     assert!(names.contains(&"now".to_string()), "Missing now()");
     assert!(names.contains(&"uuid".to_string()), "Missing uuid()");
     assert!(names.contains(&"tojson".to_string()), "Missing toJson()");
+    assert!(names.contains(&"to_json".to_string()), "Missing to_json()");
+    assert!(
+        names.contains(&"fromjson".to_string()),
+        "Missing fromJson()"
+    );
+    assert!(
+        names.contains(&"from_json".to_string()),
+        "Missing from_json()"
+    );
     assert!(names.contains(&"abs".to_string()), "Missing abs()");
     assert!(names.contains(&"length".to_string()), "Missing length()");
     assert!(names.contains(&"token".to_string()), "Missing token()");
@@ -49,6 +59,162 @@ fn gap_guard_cql_functions() {
         "Expected at least 10 builtin functions, got {}",
         names.len()
     );
+    let complex_map = CqlType::Map(
+        Box::new(CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar])),
+        Box::new(CqlType::List(Box::new(CqlType::Varchar), true)),
+        true,
+    );
+    assert_eq!(
+        registry
+            .resolve("map_keys", &[complex_map.clone()])
+            .unwrap()
+            .return_type(),
+        CqlType::Set(
+            Box::new(CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar])),
+            false
+        )
+    );
+    assert_eq!(
+        registry
+            .resolve("map_values", &[complex_map])
+            .unwrap()
+            .return_type(),
+        CqlType::List(
+            Box::new(CqlType::List(Box::new(CqlType::Varchar), true)),
+            false
+        )
+    );
+    let complex_list = CqlType::List(
+        Box::new(CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar])),
+        true,
+    );
+    assert_eq!(
+        registry
+            .resolve("collection_min", &[complex_list.clone()])
+            .unwrap()
+            .return_type(),
+        CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar])
+    );
+    assert_eq!(
+        registry
+            .resolve("collection_max", &[complex_list])
+            .unwrap()
+            .return_type(),
+        CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar])
+    );
+    assert_eq!(
+        registry
+            .resolve_with_return("from_json", &[CqlType::Varchar], &CqlType::Int)
+            .unwrap()
+            .return_type(),
+        CqlType::Int
+    );
+    let to_json_int = registry.resolve("to_json", &[CqlType::Int]).unwrap();
+    assert_eq!(to_json_int.arg_types(), vec![CqlType::Int]);
+    assert_eq!(to_json_int.return_type(), CqlType::Varchar);
+
+    let varint_input = cassandra_types::bigint::string_to_varint("1000").unwrap();
+    for name in ["exp", "log", "log10"] {
+        let function = registry
+            .resolve(name, &[CqlType::Varint])
+            .unwrap_or_else(|| panic!("missing MathFcts {name}(varint) overload"));
+        assert_eq!(function.return_type(), CqlType::Varint);
+    }
+    let log10_varint = registry.resolve("log10", &[CqlType::Varint]).unwrap();
+    let log10 = log10_varint
+        .execute(&[Some(&varint_input)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(cassandra_types::bigint::varint_to_string(&log10), "3");
+    let decimal_input = cassandra_types::bigint::string_to_decimal("-2.5").unwrap();
+    let abs_decimal = registry.resolve("abs", &[CqlType::Decimal]).unwrap();
+    let abs_result = abs_decimal
+        .execute(&[Some(&decimal_input)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cassandra_types::bigint::decimal_to_string(&abs_result).unwrap(),
+        "2.5"
+    );
+    let round_decimal = registry.resolve("round", &[CqlType::Decimal]).unwrap();
+    let round_result = round_decimal
+        .execute(&[Some(&decimal_input)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cassandra_types::bigint::decimal_to_string(&round_result).unwrap(),
+        "-3"
+    );
+    let decimal_log10_input = cassandra_types::bigint::string_to_decimal("1000").unwrap();
+    for name in ["exp", "log", "log10"] {
+        let function = registry
+            .resolve(name, &[CqlType::Decimal])
+            .unwrap_or_else(|| panic!("missing MathFcts {name}(decimal) overload"));
+        assert_eq!(function.return_type(), CqlType::Decimal);
+    }
+    let log10_decimal = registry.resolve("log10", &[CqlType::Decimal]).unwrap();
+    let log10_decimal_result = log10_decimal
+        .execute(&[Some(&decimal_log10_input)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        cassandra_types::bigint::decimal_to_string(&log10_decimal_result).unwrap(),
+        "3"
+    );
+    let cast_bool_text = registry
+        .resolve("cast_as_text", &[CqlType::Boolean])
+        .unwrap_or_else(|| panic!("missing CastFcts cast_as_text(boolean) overload"));
+    assert_eq!(cast_bool_text.return_type(), CqlType::Varchar);
+    assert_eq!(
+        cast_bool_text.execute(&[Some(&[1])]).unwrap(),
+        Some(b"true".to_vec())
+    );
+    let uuid_bytes = uuid::Uuid::parse_str("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
+        .unwrap()
+        .into_bytes();
+    let cast_uuid_ascii = registry
+        .resolve("cast_as_ascii", &[CqlType::Uuid])
+        .unwrap_or_else(|| panic!("missing CastFcts cast_as_ascii(uuid) overload"));
+    assert_eq!(cast_uuid_ascii.return_type(), CqlType::Ascii);
+    assert_eq!(
+        cast_uuid_ascii.execute(&[Some(&uuid_bytes)]).unwrap(),
+        Some(b"6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_vec())
+    );
+    let cast_inet_text = registry
+        .resolve("cast_as_text", &[CqlType::Inet])
+        .unwrap_or_else(|| panic!("missing CastFcts cast_as_text(inet) overload"));
+    assert_eq!(
+        cast_inet_text.execute(&[Some(&[127, 0, 0, 1])]).unwrap(),
+        Some(b"127.0.0.1".to_vec())
+    );
+
+    let vector_type = CqlType::Vector(Box::new(CqlType::Float), 2);
+    let zero_vector = cassandra_types::vector::VectorValue::new(vec![0.0, 0.0]).serialize();
+    let non_zero_vector = cassandra_types::vector::VectorValue::new(vec![1.0, 0.0]).serialize();
+    let cosine = registry
+        .resolve(
+            "similarity_cosine",
+            &[vector_type.clone(), vector_type.clone()],
+        )
+        .unwrap();
+    assert!(
+        cosine
+            .execute(&[Some(&zero_vector), Some(&non_zero_vector)])
+            .unwrap_err()
+            .contains("doesn't support all-zero vectors"),
+        "VectorFcts cosine parity requires all-zero vector rejection"
+    );
+    let dot_product = registry
+        .resolve(
+            "similarity_dot_product",
+            &[vector_type.clone(), vector_type],
+        )
+        .unwrap();
+    let dot = dot_product
+        .execute(&[Some(&zero_vector), Some(&non_zero_vector)])
+        .unwrap()
+        .unwrap();
+    assert_eq!(f32::from_be_bytes(dot.try_into().unwrap()), 0.0);
 
     let mut udf_manager = UdfManager::new();
     udf_manager
@@ -117,29 +283,113 @@ fn gap_guard_cql_functions() {
 fn gap_guard_cql_permission_statements() {
     // CLOSED by prompt-14 follow-up: parser carries role and permission DCL
     // statements through concrete AST variants.
-    use cassandra_cql::ast::{Resource, Statement};
+    use cassandra_cql::ast::{Resource, RoleAccess, Statement};
     use cassandra_cql::parser::parse;
 
     let stmt =
-        parse("CREATE ROLE IF NOT EXISTS analyst WITH PASSWORD = 'pw' AND LOGIN = true").unwrap();
+        parse("CREATE ROLE IF NOT EXISTS analyst WITH PASSWORD = 'pw' AND LOGIN = true AND ACCESS TO DATACENTERS {'dc1'} AND ACCESS FROM ALL CIDRS").unwrap();
     match stmt {
         Statement::CreateRole(role) => {
             assert_eq!(role.name, "analyst");
             assert!(role.if_not_exists);
             assert_eq!(role.password.as_deref(), Some("pw"));
             assert_eq!(role.login, Some(true));
+            assert_eq!(
+                role.datacenter_access,
+                Some(RoleAccess::Restricted(vec!["dc1".to_string()]))
+            );
+            assert_eq!(role.cidr_access, Some(RoleAccess::All));
         }
         other => panic!("expected CreateRole, got {other:?}"),
     }
 
-    let stmt = parse("ALTER ROLE analyst WITH SUPERUSER = false AND LOGIN = true").unwrap();
+    let stmt = parse("CREATE ROLE custom WITH OPTIONS = {'a':'b', 'b':1}").unwrap();
+    match stmt {
+        Statement::CreateRole(role) => {
+            assert_eq!(role.name, "custom");
+            assert_eq!(role.options.get("a").map(String::as_str), Some("b"));
+            assert_eq!(role.options.get("b").map(String::as_str), Some("1"));
+        }
+        other => panic!("expected CreateRole, got {other:?}"),
+    }
+
+    let stmt = parse("ALTER ROLE analyst WITH SUPERUSER = false AND LOGIN = true AND ACCESS TO ALL DATACENTERS AND ACCESS FROM CIDRS {'region1', 'region2'}").unwrap();
     match stmt {
         Statement::AlterRole(role) => {
             assert_eq!(role.name, "analyst");
+            assert!(!role.if_exists);
             assert_eq!(role.superuser, Some(false));
             assert_eq!(role.login, Some(true));
+            assert_eq!(role.datacenter_access, Some(RoleAccess::All));
+            assert_eq!(
+                role.cidr_access,
+                Some(RoleAccess::Restricted(vec![
+                    "region1".to_string(),
+                    "region2".to_string()
+                ]))
+            );
         }
         other => panic!("expected AlterRole, got {other:?}"),
+    }
+
+    let stmt = parse("ALTER ROLE analyst WITH OPTIONS = {'region':'west'}").unwrap();
+    match stmt {
+        Statement::AlterRole(role) => {
+            assert_eq!(role.name, "analyst");
+            assert_eq!(role.options.get("region").map(String::as_str), Some("west"));
+        }
+        other => panic!("expected AlterRole, got {other:?}"),
+    }
+
+    let stmt = parse("ALTER ROLE analyst WITH HASHED PASSWORD = '$2b$12$hash'").unwrap();
+    match stmt {
+        Statement::AlterRole(role) => {
+            assert_eq!(role.name, "analyst");
+            assert_eq!(role.password, None);
+            assert_eq!(role.hashed_password.as_deref(), Some("$2b$12$hash"));
+        }
+        other => panic!("expected AlterRole, got {other:?}"),
+    }
+
+    let stmt =
+        parse("CREATE USER IF NOT EXISTS app WITH HASHED PASSWORD '$2b$12$apphash'").unwrap();
+    match stmt {
+        Statement::CreateRole(role) => {
+            assert_eq!(role.name, "app");
+            assert!(role.if_not_exists);
+            assert_eq!(role.login, Some(true));
+            assert_eq!(role.hashed_password.as_deref(), Some("$2b$12$apphash"));
+        }
+        other => panic!("expected CreateRole, got {other:?}"),
+    }
+
+    let stmt = parse("CREATE ROLE $$ r1 ' x $ x ' $$").unwrap();
+    match stmt {
+        Statement::CreateRole(role) => {
+            assert_eq!(role.name, " r1 ' x $ x ' ");
+        }
+        other => panic!("expected CreateRole, got {other:?}"),
+    }
+
+    assert!(parse(r#"CREATE USER "quoted_user""#).is_err());
+
+    let stmt = parse("ALTER USER IF EXISTS app WITH PASSWORD 'pw'").unwrap();
+    match stmt {
+        Statement::AlterRole(role) => {
+            assert_eq!(role.name, "app");
+            assert!(role.if_exists);
+            assert_eq!(role.password.as_deref(), Some("pw"));
+        }
+        other => panic!("expected AlterRole, got {other:?}"),
+    }
+
+    let stmt = parse("DROP USER IF EXISTS app").unwrap();
+    match stmt {
+        Statement::DropRole(role) => {
+            assert_eq!(role.name, "app");
+            assert!(role.if_exists);
+        }
+        other => panic!("expected DropRole, got {other:?}"),
     }
 
     let stmt = parse("DROP ROLE IF EXISTS analyst").unwrap();
@@ -167,12 +417,33 @@ fn gap_guard_cql_permission_statements() {
         other => panic!("expected Grant, got {other:?}"),
     }
 
+    let stmt =
+        parse("GRANT MODIFY PERMISSION, SELECT PERMISSION ON ALL KEYSPACES TO 'analyst'").unwrap();
+    match stmt {
+        Statement::Grant(grant) => {
+            assert_eq!(grant.permissions, vec!["MODIFY", "SELECT"]);
+            assert_eq!(grant.role, "analyst");
+            assert_eq!(grant.resource, Resource::AllKeyspaces);
+        }
+        other => panic!("expected Grant, got {other:?}"),
+    }
+
     let stmt = parse("REVOKE MODIFY ON KEYSPACE ks FROM analyst").unwrap();
     match stmt {
         Statement::Revoke(revoke) => {
             assert_eq!(revoke.permissions, vec!["MODIFY"]);
             assert_eq!(revoke.role, "analyst");
             assert_eq!(revoke.resource, Resource::Keyspace("ks".to_string()));
+        }
+        other => panic!("expected Revoke, got {other:?}"),
+    }
+
+    let stmt = parse("REVOKE CREATE, ALTER ON ROLE $$source$$ FROM $$ target $$").unwrap();
+    match stmt {
+        Statement::Revoke(revoke) => {
+            assert_eq!(revoke.permissions, vec!["CREATE", "ALTER"]);
+            assert_eq!(revoke.role, " target ");
+            assert_eq!(revoke.resource, Resource::Role("source".to_string()));
         }
         other => panic!("expected Revoke, got {other:?}"),
     }
@@ -195,6 +466,133 @@ fn gap_guard_cql_permission_statements() {
         }
         other => panic!("expected ListPermissions, got {other:?}"),
     }
+
+    let stmt = parse("LIST ALTER, DROP PERMISSION ON ROLE 'source' OF $$ target $$").unwrap();
+    match stmt {
+        Statement::ListPermissions(list) => {
+            assert_eq!(list.permissions, vec!["ALTER", "DROP"]);
+            assert_eq!(list.resource, Some(Resource::Role("source".to_string())));
+            assert_eq!(list.of_role.as_deref(), Some(" target "));
+        }
+        other => panic!("expected ListPermissions, got {other:?}"),
+    }
+}
+
+#[test]
+fn gap_guard_cql_batch_using_attributes() {
+    // CLOSED by Rust rewrite follow-up: CQL parser limits batch objectives to
+    // mutation statements like Java, and planner preserves Java BatchStatement
+    // USING TIMESTAMP semantics plus validation rejects global TTL and invalid
+    // custom timestamp combinations.
+    use cassandra_cql::{
+        ast::BatchType,
+        parser::parse,
+        planner::{QueryPlan, plan},
+    };
+    use cassandra_schema::SchemaSnapshot;
+
+    let schema = SchemaSnapshot::empty();
+    let stmt = parse(
+        "BEGIN BATCH USING TIMESTAMP 123
+            INSERT INTO ks.users (id, name) VALUES (1, 'Ada');
+            UPDATE ks.users SET name = 'Grace' WHERE id = 2;
+            DELETE FROM ks.users WHERE id = 3;
+         APPLY BATCH",
+    )
+    .unwrap();
+    let QueryPlan::Batch(batch) = plan(&stmt, &schema, Some("ks")).unwrap() else {
+        panic!("expected batch plan");
+    };
+    assert_eq!(batch.batch_type, BatchType::Logged);
+    assert!(matches!(
+        &batch.plans[0],
+        QueryPlan::Insert(insert) if insert.using_timestamp == Some(123)
+    ));
+    assert!(matches!(
+        &batch.plans[1],
+        QueryPlan::Update(update) if update.using_timestamp == Some(123)
+    ));
+    assert!(matches!(
+        &batch.plans[2],
+        QueryPlan::Delete(delete) if delete.using_timestamp == Some(123)
+    ));
+
+    let global_ttl = parse(
+        "BEGIN BATCH USING TTL 60
+            INSERT INTO ks.users (id, name) VALUES (1, 'Ada');
+         APPLY BATCH",
+    )
+    .unwrap();
+    assert!(
+        plan(&global_ttl, &schema, Some("ks"))
+            .unwrap_err()
+            .to_string()
+            .contains("Global TTL on the BATCH statement is not supported")
+    );
+
+    let mixed_timestamps = parse(
+        "BEGIN BATCH USING TIMESTAMP 123
+            INSERT INTO ks.users (id, name) VALUES (1, 'Ada') USING TIMESTAMP 456;
+         APPLY BATCH",
+    )
+    .unwrap();
+    assert!(
+        plan(&mixed_timestamps, &schema, Some("ks"))
+            .unwrap_err()
+            .to_string()
+            .contains("Timestamp must be set either on BATCH or individual statements")
+    );
+
+    let conditional = parse(
+        "BEGIN BATCH USING TIMESTAMP 123
+            INSERT INTO ks.users (id, name) VALUES (1, 'Ada') IF NOT EXISTS;
+         APPLY BATCH",
+    )
+    .unwrap();
+    assert!(
+        plan(&conditional, &schema, Some("ks"))
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot provide custom timestamp for conditional BATCH")
+    );
+
+    let counter = parse(
+        "BEGIN COUNTER BATCH USING TIMESTAMP 123
+            UPDATE ks.users SET visits = visits + 1 WHERE id = 1;
+         APPLY BATCH",
+    )
+    .unwrap();
+    assert!(
+        plan(&counter, &schema, Some("ks"))
+            .unwrap_err()
+            .to_string()
+            .contains("Cannot provide custom timestamp for counter BATCH")
+    );
+
+    assert!(parse("BEGIN BATCH SELECT * FROM ks.users; APPLY BATCH").is_err());
+    assert!(parse("BEGIN BATCH USE ks; APPLY BATCH").is_err());
+}
+
+#[test]
+fn gap_guard_cql_delete_using_timestamp_only() {
+    // CLOSED by Rust rewrite follow-up: DELETE uses Java's dedicated
+    // usingClauseDelete grammar, which accepts USING TIMESTAMP but not TTL.
+    use cassandra_cql::{
+        ast::{Literal, Statement, Term, UsingClause},
+        parser::parse,
+    };
+
+    let stmt = parse("DELETE FROM ks.users USING TIMESTAMP 123 WHERE id = 1").unwrap();
+    let Statement::Delete(delete) = stmt else {
+        panic!("expected DELETE");
+    };
+    assert!(matches!(
+        delete.using.as_slice(),
+        [UsingClause::Timestamp(Term::Literal(Literal::Integer(123)))]
+    ));
+
+    assert!(parse("DELETE FROM ks.users USING TTL 60 WHERE id = 1").is_err());
+    assert!(parse("DELETE FROM ks.users USING TIMESTAMP 123 AND TTL 60 WHERE id = 1").is_err());
 }
 
 #[test]
@@ -508,7 +906,7 @@ fn gap_guard_index_differential_testing() {
 #[test]
 fn gap_guard_cql_masking_functions() {
     // CLOSED by prompt-14 follow-up: FunctionRegistry registers the dynamic
-    // data masking builtins and their runtime behavior is callable.
+    // data masking builtins and their Java-style native scalar behavior is callable.
     use cassandra_cql::functions::FunctionRegistry;
     use cassandra_types::CqlType;
 
@@ -520,6 +918,7 @@ fn gap_guard_cql_masking_functions() {
         "mask_inner",
         "mask_outer",
         "mask_replace",
+        "mask_hash",
     ] {
         assert!(names.contains(&name.to_string()), "missing {name}");
     }
@@ -530,19 +929,65 @@ fn gap_guard_cql_masking_functions() {
     assert_eq!(mask_null.execute(&[Some(b"secret")]).unwrap(), None);
 
     let mask_inner = registry
-        .resolve("mask_inner", &[CqlType::Varchar, CqlType::Varchar])
+        .resolve(
+            "mask_inner",
+            &[
+                CqlType::Varchar,
+                CqlType::Int,
+                CqlType::Int,
+                CqlType::Varchar,
+            ],
+        )
         .expect("mask_inner");
+    let begin = 1i32.to_be_bytes();
+    let end = 1i32.to_be_bytes();
     assert_eq!(
-        mask_inner.execute(&[Some(b"secret"), Some(b"*")]).unwrap(),
+        mask_inner
+            .execute(&[Some(b"secret"), Some(&begin), Some(&end), Some(b"*")])
+            .unwrap(),
         Some(b"s****t".to_vec())
     );
 
     let mask_outer = registry
-        .resolve("mask_outer", &[CqlType::Varchar, CqlType::Varchar])
+        .resolve(
+            "mask_outer",
+            &[
+                CqlType::Varchar,
+                CqlType::Int,
+                CqlType::Int,
+                CqlType::Varchar,
+            ],
+        )
         .expect("mask_outer");
     assert_eq!(
-        mask_outer.execute(&[Some(b"secret"), Some(b"#")]).unwrap(),
+        mask_outer
+            .execute(&[Some(b"secret"), Some(&begin), Some(&end), Some(b"#")])
+            .unwrap(),
         Some(b"#ecre#".to_vec())
+    );
+    let begin_zero = 0i32.to_be_bytes();
+    let end_past_len = 10i32.to_be_bytes();
+    assert_eq!(
+        mask_inner
+            .execute(&[
+                Some(b"secret"),
+                Some(&begin_zero),
+                Some(&end_past_len),
+                Some(b"*")
+            ])
+            .unwrap(),
+        Some(b"secret".to_vec())
+    );
+    assert_eq!(
+        mask_outer
+            .execute(&[
+                Some(b"secret"),
+                Some(&begin_zero),
+                Some(&end_past_len),
+                Some(b"#")
+            ])
+            .unwrap(),
+        Some(b"######".to_vec())
     );
 
     let mask_replace = registry
@@ -561,6 +1006,58 @@ fn gap_guard_cql_masking_functions() {
     assert_eq!(
         mask_default.execute(&[Some(&42i32.to_be_bytes())]).unwrap(),
         Some(0i32.to_be_bytes().to_vec())
+    );
+
+    let list_type = CqlType::List(Box::new(CqlType::Int), false);
+    let mask_default_list = registry
+        .resolve("mask_default", std::slice::from_ref(&list_type))
+        .expect("mask_default(list<int>)");
+    assert_eq!(mask_default_list.return_type(), list_type);
+    assert_eq!(
+        mask_default_list.execute(&[Some(&[])]).unwrap(),
+        Some(0i32.to_be_bytes().to_vec())
+    );
+
+    let tuple_type = CqlType::Tuple(vec![CqlType::Int, CqlType::Varchar]);
+    let mask_default_tuple = registry
+        .resolve("mask_default", std::slice::from_ref(&tuple_type))
+        .expect("mask_default(tuple<int, text>)");
+    let mut expected_tuple = Vec::new();
+    expected_tuple.extend_from_slice(&4i32.to_be_bytes());
+    expected_tuple.extend_from_slice(&0i32.to_be_bytes());
+    expected_tuple.extend_from_slice(&4i32.to_be_bytes());
+    expected_tuple.extend_from_slice(b"****");
+    assert_eq!(
+        mask_default_tuple.execute(&[Some(&[])]).unwrap(),
+        Some(expected_tuple)
+    );
+
+    let mask_hash = registry
+        .resolve("mask_hash", &[CqlType::Varchar])
+        .expect("mask_hash");
+    assert_eq!(mask_hash.return_type(), CqlType::Blob);
+    assert_eq!(
+        hex::encode(mask_hash.execute(&[Some(b"secret")]).unwrap().unwrap()),
+        "2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b"
+    );
+
+    let mask_hash_with_algorithm = registry
+        .resolve("mask_hash", &[CqlType::Varchar, CqlType::Varchar])
+        .expect("mask_hash(text, text)");
+    assert_eq!(
+        hex::encode(
+            mask_hash_with_algorithm
+                .execute(&[Some(b"secret"), Some(b"SHA3-256")])
+                .unwrap()
+                .unwrap()
+        ),
+        "f5a5207a8729b1f709cb710311751eb2fc8acad5a1fb8ac991b736e69b6529a3"
+    );
+    assert!(
+        mask_hash_with_algorithm
+            .execute(&[Some(b"secret"), Some(b"unknown-algorithm")])
+            .unwrap_err()
+            .contains("Hash algorithm not found")
     );
 }
 
@@ -632,6 +1129,36 @@ fn gap_guard_cql_function_type_helpers() {
             .unwrap(),
         UdfValue::List(vec![UdfValue::Int(1), UdfValue::Int(2)])
     );
+    for cql_type in [
+        CqlType::Boolean,
+        CqlType::Int,
+        CqlType::Bigint,
+        CqlType::Counter,
+        CqlType::Float,
+        CqlType::Double,
+        CqlType::Varint,
+        CqlType::Decimal,
+        CqlType::Timestamp,
+        CqlType::Uuid,
+        CqlType::Timeuuid,
+        CqlType::Inet,
+        CqlType::Reversed(Box::new(CqlType::Int)),
+    ] {
+        assert_eq!(
+            UdfValue::deserialize_arg(&cql_type, Some(&[])).unwrap(),
+            UdfValue::Null,
+            "empty {} UDF argument should match Java null composition",
+            cql_type.cql_name()
+        );
+    }
+    assert_eq!(
+        UdfValue::deserialize_arg(&CqlType::Varchar, Some(&[])).unwrap(),
+        UdfValue::Text(String::new())
+    );
+    assert_eq!(
+        UdfValue::deserialize_arg(&CqlType::Blob, Some(&[])).unwrap(),
+        UdfValue::Blob(Vec::new())
+    );
     assert_eq!(
         UdfValue::Text("ok".to_string())
             .serialize_return(&CqlType::Varchar)
@@ -675,6 +1202,14 @@ fn gap_guard_cql_schema_statements() {
     // Verify DESCRIBE parses
     let stmt = parser::parse("DESCRIBE KEYSPACE system");
     assert!(stmt.is_ok(), "DESCRIBE should parse");
+
+    let stmt = parser::parse("TRUNCATE COLUMNFAMILY ks.t").unwrap();
+    let Statement::Truncate(truncate) = stmt else {
+        panic!("expected TRUNCATE");
+    };
+    assert_eq!(truncate.keyspace.as_deref(), Some("ks"));
+    assert_eq!(truncate.table, "t");
+    assert!(parser::parse("TRUNCATE TABLE ks.t").is_err());
 
     let stmt = parser::parse(
         "ALTER TABLE ks.t WITH compression = {'class': 'LZ4Compressor', 'chunk_length_in_kb': 64}",
@@ -1282,7 +1817,7 @@ fn gap_guard_db_filters() {
         },
     );
     assert_eq!(filtered.rows.len(), 1);
-    assert!(filtered.rows.contains_key(&b"ck1".to_vec()));
+    assert!(filtered.rows.contains_key(b"ck1".as_slice()));
 }
 
 #[test]
@@ -1451,7 +1986,7 @@ fn gap_guard_memtable_trie() {
     assert!(memtable.memory_usage() > 0);
 
     let merged = memtable.get_partition(b"user:0002").unwrap();
-    let merged_row = merged.rows.get(&b"ck".to_vec()).unwrap();
+    let merged_row = merged.rows.get(b"ck".as_slice()).unwrap();
     assert_eq!(
         merged_row.cells[0].value.as_deref(),
         Some(b"two".as_slice())
@@ -1570,7 +2105,7 @@ fn gap_guard_commitlog_compression() {
         .unwrap();
     encrypted_segment.sync().unwrap();
 
-    let read_encrypted = Segment::open_for_read(&encrypted_segment.path().to_path_buf()).unwrap();
+    let read_encrypted = Segment::open_for_read(encrypted_segment.path()).unwrap();
     assert!(read_encrypted.flags().encryption_enabled);
     let encrypted_entries: Vec<_> = read_encrypted
         .read_entries_with_codec(CorruptionPolicy::StopOnCorrupt, &codec)
@@ -3494,8 +4029,12 @@ fn gap_guard_paging() {
 fn gap_guard_aggregation() {
     // CLOSED by prompt-14 follow-up: parser/planner carry GROUP BY and the
     // executor has grouped aggregate state for count/sum/min/max/avg.
+    // Native count_rows/countRows catalog names and COUNT(1) route to the same
+    // row-count aggregate used by Cassandra.
     use cassandra_cql::ast::{SelectColumns, Statement};
+    use cassandra_cql::functions::FunctionRegistry;
     use cassandra_cql::selection::aggregation::has_aggregates;
+    use cassandra_types::CqlType;
 
     let stmt = cassandra_cql::parser::parse("SELECT id, count(*) FROM ks.t GROUP BY id").unwrap();
     let Statement::Select(select) = stmt else {
@@ -3506,6 +4045,62 @@ fn gap_guard_aggregation() {
         panic!("expected named selectors");
     };
     assert!(has_aggregates(&selectors));
+
+    let count_one = cassandra_cql::parser::parse("SELECT COUNT(1) FROM ks.t").unwrap();
+    let Statement::Select(select) = count_one else {
+        panic!("expected select");
+    };
+    let SelectColumns::Named(selectors) = select.columns else {
+        panic!("expected named selectors");
+    };
+    assert!(matches!(
+        selectors.as_slice(),
+        [cassandra_cql::ast::Selector::Count]
+    ));
+
+    let count_rows = cassandra_cql::ast::Selector::Function("count_rows".to_string(), Vec::new());
+    let legacy_count_rows =
+        cassandra_cql::ast::Selector::Function("countRows".to_string(), Vec::new());
+    assert!(has_aggregates(&[count_rows, legacy_count_rows]));
+
+    let registry = FunctionRegistry::with_builtins();
+    for name in ["count_rows", "countRows"] {
+        let function = registry
+            .resolve(name, &[])
+            .unwrap_or_else(|| panic!("missing aggregate catalog function {name}"));
+        assert_eq!(function.return_type(), CqlType::Bigint);
+    }
+
+    let count_column = registry
+        .resolve("count", &[CqlType::Int])
+        .expect("missing count(int) aggregate catalog function");
+    assert_eq!(count_column.arg_types(), vec![CqlType::Int]);
+    assert_eq!(count_column.return_type(), CqlType::Bigint);
+
+    for cql_type in [
+        CqlType::Tinyint,
+        CqlType::Smallint,
+        CqlType::Int,
+        CqlType::Bigint,
+        CqlType::Counter,
+        CqlType::Float,
+        CqlType::Double,
+        CqlType::Varint,
+        CqlType::Decimal,
+    ] {
+        for name in ["sum", "avg", "min", "max"] {
+            let function = registry
+                .resolve(name, std::slice::from_ref(&cql_type))
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing aggregate catalog function {name}({})",
+                        cql_type.cql_name()
+                    )
+                });
+            assert_eq!(function.arg_types(), vec![cql_type.clone()]);
+            assert_eq!(function.return_type(), cql_type);
+        }
+    }
 }
 
 #[test]

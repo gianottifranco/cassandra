@@ -124,12 +124,8 @@ pub fn load_counter_cache(path: &Path, cache: &CounterCache) -> io::Result<usize
 
 /// Write JSON to a temp file then rename for atomicity.
 fn atomic_write_json<T: Serialize>(path: &Path, value: &T) -> io::Result<()> {
-    let json = serde_json::to_string_pretty(value).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::Other,
-            format!("failed to serialize cache: {e}"),
-        )
-    })?;
+    let json = serde_json::to_string_pretty(value)
+        .map_err(|e| io::Error::other(format!("failed to serialize cache: {e}")))?;
 
     let tmp_path = path.with_extension("tmp");
     fs::write(&tmp_path, json.as_bytes())?;

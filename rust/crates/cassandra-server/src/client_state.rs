@@ -295,7 +295,8 @@ mod tests {
     #[test]
     fn elapsed_is_nonnegative() {
         let cs = ClientState::new(localhost());
-        assert!(cs.elapsed().as_nanos() >= 0);
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        assert!(cs.elapsed() >= std::time::Duration::from_millis(1));
     }
 
     #[test]

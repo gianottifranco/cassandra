@@ -203,6 +203,12 @@ impl RangeTombstone {
     pub fn is_live(&self) -> bool {
         self.deletion.is_live()
     }
+
+    /// Returns `true` if this tombstone covers the serialized clustering key.
+    #[inline]
+    pub fn covers(&self, clustering_key: &[u8]) -> bool {
+        clustering_key >= self.start.as_slice() && clustering_key <= self.end.as_slice()
+    }
 }
 
 #[cfg(test)]

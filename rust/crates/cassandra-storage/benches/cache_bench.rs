@@ -72,7 +72,8 @@ fn key_cache_invalidate_benchmarks(c: &mut Criterion) {
                         cache
                     },
                     |cache| {
-                        black_box(cache.invalidate_sstable(sstable_count / 2));
+                        cache.invalidate_sstable(sstable_count / 2);
+                        black_box(());
                     },
                 );
             },

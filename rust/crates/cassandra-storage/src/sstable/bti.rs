@@ -37,7 +37,14 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use super::bloom::BloomFilter;
 use super::format::*;
 use super::metadata::{MetadataSerializer, SSTableMetadata};
+use super::tombstone_serializer::{
+    PARTITION_DELETION_MARKER, RANGE_TOMBSTONE_BOUND_MARKER, read_partition_deletion,
+    read_range_tombstone_marker, write_partition_deletion, write_range_tombstone_marker,
+};
+use super::writer::row_data_to_row;
 use crate::memtable::partition::{Cell, PartitionData, Row};
+use crate::partitions::filtered_partition::FilteredPartition;
+use crate::rows::unfiltered::Unfiltered;
 
 // ─── BTI constants ─────────────────────────────────────────────────────────
 
@@ -204,6 +211,22 @@ impl BtiWriter {
         Ok(stats)
     }
 
+    /// Write materialized unfiltered partitions to BTI-format SSTables.
+    pub fn write_filtered_partitions(
+        &self,
+        partitions: &[(Vec<u8>, FilteredPartition)],
+    ) -> io::Result<super::writer::SSTableStats> {
+        fs::create_dir_all(&self.descriptor.directory)?;
+
+        let (stats, entries) = self.write_filtered_data(partitions)?;
+        self.write_partition_index(&entries)?;
+        self.write_bloom_filter_keys(partitions.iter().map(|(pk, _)| pk.as_slice()))?;
+        self.write_statistics_keys(&stats, partitions.iter().map(|(pk, _)| pk.as_slice()))?;
+        self.write_toc()?;
+
+        Ok(stats)
+    }
+
     fn write_data(
         &self,
         partitions: &[(Vec<u8>, PartitionData)],
@@ -250,12 +273,117 @@ impl BtiWriter {
 
             stats.partition_count += 1;
 
+            if let (Some(ts), Some(ldt)) = (
+                partition.tombstone_timestamp,
+                partition.tombstone_local_deletion_time,
+            ) {
+                data_offset += write_partition_deletion(
+                    &mut data_file,
+                    &cassandra_common::tombstone::DeletionTime::new(ts, ldt),
+                    &mut crc,
+                )?;
+            }
+
             // Rows
             for (ck, row) in &partition.rows {
                 data_offset += self.write_row(&mut data_file, ck, row, &mut crc, &mut stats)?;
             }
 
             // End of partition marker
+            data_file.write_all(&[END_OF_PARTITION])?;
+            crc.update(&[END_OF_PARTITION]);
+            data_offset += 1;
+        }
+
+        let crc_val = crc.finalize();
+        data_file.write_u32::<BigEndian>(crc_val)?;
+        data_offset += 4;
+        data_file.flush()?;
+        stats.data_size = data_offset;
+
+        Ok((stats, entries))
+    }
+
+    fn write_filtered_data(
+        &self,
+        partitions: &[(Vec<u8>, FilteredPartition)],
+    ) -> io::Result<(super::writer::SSTableStats, Vec<TrieEntry>)> {
+        let data_path = self.descriptor.component_path(Component::Data);
+        let mut data_file = BufWriter::new(File::create(&data_path)?);
+        let mut crc = crc32fast::Hasher::new();
+        let mut data_offset: u64 = 0;
+
+        let mut stats = super::writer::SSTableStats {
+            partition_count: 0,
+            row_count: 0,
+            cell_count: 0,
+            min_timestamp: i64::MAX,
+            max_timestamp: i64::MIN,
+            data_size: 0,
+            index_size: 0,
+        };
+        let mut entries = Vec::new();
+
+        data_file.write_all(&DATA_MAGIC)?;
+        crc.update(&DATA_MAGIC);
+        data_file.write_all(&[DATA_VERSION])?;
+        crc.update(&[DATA_VERSION]);
+        data_offset += 5;
+
+        for (pk, partition) in partitions {
+            let partition_offset = data_offset;
+
+            let len_bytes = (pk.len() as u32).to_be_bytes();
+            data_file.write_all(&len_bytes)?;
+            crc.update(&len_bytes);
+            data_file.write_all(pk)?;
+            crc.update(pk);
+            data_offset += 4 + pk.len() as u64;
+
+            entries.push(TrieEntry {
+                key: pk.clone(),
+                data_offset: partition_offset,
+            });
+            stats.partition_count += 1;
+
+            if !partition.partition_deletion.is_live() {
+                data_offset += write_partition_deletion(
+                    &mut data_file,
+                    &partition.partition_deletion,
+                    &mut crc,
+                )?;
+            }
+
+            if let Some(static_row) = &partition.static_row {
+                let row = row_data_to_row(static_row);
+                data_offset += self.write_row(
+                    &mut data_file,
+                    &row.clustering_key,
+                    &row,
+                    &mut crc,
+                    &mut stats,
+                )?;
+            }
+
+            for item in &partition.items {
+                match item {
+                    Unfiltered::Row(row_data) => {
+                        let row = row_data_to_row(row_data);
+                        data_offset += self.write_row(
+                            &mut data_file,
+                            &row.clustering_key,
+                            &row,
+                            &mut crc,
+                            &mut stats,
+                        )?;
+                    }
+                    Unfiltered::Marker(marker) => {
+                        data_offset +=
+                            write_range_tombstone_marker(&mut data_file, marker, &mut crc)?;
+                    }
+                }
+            }
+
             data_file.write_all(&[END_OF_PARTITION])?;
             crc.update(&[END_OF_PARTITION]);
             data_offset += 1;
@@ -405,13 +533,21 @@ impl BtiWriter {
     }
 
     fn write_bloom_filter(&self, partitions: &[(Vec<u8>, PartitionData)]) -> io::Result<()> {
+        self.write_bloom_filter_keys(partitions.iter().map(|(pk, _)| pk.as_slice()))
+    }
+
+    fn write_bloom_filter_keys<'a>(
+        &self,
+        partition_keys: impl Iterator<Item = &'a [u8]>,
+    ) -> io::Result<()> {
         let filter_path = self.descriptor.component_path(Component::Filter);
         let mut filter_file = BufWriter::new(File::create(&filter_path)?);
         filter_file.write_all(&FILTER_MAGIC)?;
 
-        let mut bloom = BloomFilter::new(partitions.len().max(1), 0.01);
-        for (pk, _) in partitions {
-            bloom.add(pk);
+        let keys: Vec<&[u8]> = partition_keys.collect();
+        let mut bloom = BloomFilter::new(keys.len().max(1), 0.01);
+        for key in keys {
+            bloom.add(key);
         }
         bloom.serialize(&mut filter_file)?;
         filter_file.flush()?;
@@ -423,19 +559,18 @@ impl BtiWriter {
         stats: &super::writer::SSTableStats,
         partitions: &[(Vec<u8>, PartitionData)],
     ) -> io::Result<()> {
+        self.write_statistics_keys(stats, partitions.iter().map(|(pk, _)| pk.as_slice()))
+    }
+
+    fn write_statistics_keys<'a>(
+        &self,
+        stats: &super::writer::SSTableStats,
+        partition_keys: impl Iterator<Item = &'a [u8]>,
+    ) -> io::Result<()> {
         let path = self.descriptor.component_path(Component::Statistics);
-        let min_partition_key = partitions
-            .iter()
-            .map(|(pk, _)| pk.as_slice())
-            .min()
-            .unwrap_or_default()
-            .to_vec();
-        let max_partition_key = partitions
-            .iter()
-            .map(|(pk, _)| pk.as_slice())
-            .max()
-            .unwrap_or_default()
-            .to_vec();
+        let keys: Vec<&[u8]> = partition_keys.collect();
+        let min_partition_key = keys.iter().copied().min().unwrap_or_default().to_vec();
+        let max_partition_key = keys.iter().copied().max().unwrap_or_default().to_vec();
         let metadata = SSTableMetadata::from_stats(stats, min_partition_key, max_partition_key);
         fs::write(&path, MetadataSerializer::serialize(&metadata))?;
         Ok(())
@@ -531,6 +666,16 @@ impl BtiReader {
             if marker == END_OF_PARTITION {
                 break;
             }
+            if marker == PARTITION_DELETION_MARKER {
+                let deletion = read_partition_deletion(&mut reader)?;
+                partition
+                    .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                continue;
+            }
+            if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                let _ = read_range_tombstone_marker(&mut reader)?;
+                continue;
+            }
             if marker != ROW_MARKER {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -542,6 +687,34 @@ impl BtiReader {
         }
 
         Ok(Some(partition))
+    }
+
+    /// Read a partition by key as a materialized unfiltered stream.
+    pub fn get_filtered_partition(
+        &self,
+        partition_key: &[u8],
+    ) -> io::Result<Option<FilteredPartition>> {
+        if !self.bloom.might_contain(partition_key) {
+            return Ok(None);
+        }
+
+        let offset = match self.trie.lookup(partition_key) {
+            Some(o) => o,
+            None => return Ok(None),
+        };
+
+        let data_path = self.descriptor.component_path(Component::Data);
+        let mut reader = BufReader::new(File::open(&data_path)?);
+        reader.seek(SeekFrom::Start(offset))?;
+
+        let pk_len = reader.read_u32::<BigEndian>()? as usize;
+        let mut pk = vec![0u8; pk_len];
+        reader.read_exact(&mut pk)?;
+        if pk != partition_key {
+            return Ok(None);
+        }
+
+        super::reader::read_filtered_partition_body(pk, &mut reader).map(Some)
     }
 
     /// Iterate all partitions.
@@ -578,6 +751,16 @@ impl BtiReader {
                 if marker == END_OF_PARTITION {
                     break;
                 }
+                if marker == PARTITION_DELETION_MARKER {
+                    let deletion = read_partition_deletion(&mut reader)?;
+                    partition
+                        .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                    continue;
+                }
+                if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                    let _ = read_range_tombstone_marker(&mut reader)?;
+                    continue;
+                }
                 if marker != ROW_MARKER {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -589,6 +772,42 @@ impl BtiReader {
             }
 
             result.push((pk, partition));
+        }
+
+        Ok(result)
+    }
+
+    /// Iterate all partitions as materialized unfiltered streams.
+    pub fn iter_filtered_partitions(&self) -> io::Result<Vec<FilteredPartition>> {
+        let data_path = self.descriptor.component_path(Component::Data);
+        let mut reader = BufReader::new(File::open(&data_path)?);
+        reader.seek(SeekFrom::Start(5))?;
+
+        let mut result = Vec::new();
+        let file_size = fs::metadata(&data_path)?.len();
+
+        loop {
+            let pos = reader.stream_position()?;
+            if pos + 4 >= file_size {
+                break;
+            }
+
+            let pk_len = match reader.read_u32::<BigEndian>() {
+                Ok(l) => l,
+                Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            };
+
+            if pk_len == 0 {
+                break;
+            }
+
+            let mut pk = vec![0u8; pk_len as usize];
+            reader.read_exact(&mut pk)?;
+            result.push(super::reader::read_filtered_partition_body(
+                pk,
+                &mut reader,
+            )?);
         }
 
         Ok(result)
@@ -652,6 +871,11 @@ impl BtiReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rows::cell::CellData;
+    use crate::rows::unfiltered::{
+        ClusteringBound, ClusteringBoundKind, RangeTombstoneMarker, RowData,
+    };
+    use cassandra_common::tombstone::DeletionTime;
     use tempfile::TempDir;
 
     fn sample_partitions() -> Vec<(Vec<u8>, PartitionData)> {
@@ -727,6 +951,85 @@ mod tests {
         for i in 0..10u8 {
             assert_eq!(all[i as usize].0, vec![i]);
         }
+    }
+
+    #[test]
+    fn bti_partition_tombstone_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let mut desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+        desc.format = SSTableFormat::Bti;
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(123, 456);
+        BtiWriter::new(desc.clone())
+            .write(&[(b"pk".to_vec(), pd)])
+            .unwrap();
+
+        let reader = BtiReader::open(desc).unwrap();
+        let partition = reader.get_partition(b"pk").unwrap().unwrap();
+        assert_eq!(partition.tombstone_timestamp, Some(123));
+        assert_eq!(partition.tombstone_local_deletion_time, Some(456));
+
+        let all = reader.iter_partitions().unwrap();
+        assert_eq!(all[0].1.tombstone_timestamp, Some(123));
+        assert_eq!(all[0].1.tombstone_local_deletion_time, Some(456));
+    }
+
+    #[test]
+    fn bti_write_filtered_partitions_preserves_range_tombstone_markers() {
+        let dir = TempDir::new().unwrap();
+        let mut desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+        desc.format = SSTableFormat::Bti;
+
+        let mut row = RowData::new(b"ck1".to_vec());
+        row.add_cell(CellData {
+            column: "x".to_string(),
+            value: Some(b"v".to_vec()),
+            timestamp: 100,
+            ttl: 0,
+            local_deletion_time: i32::MAX,
+            path: None,
+        });
+        let marker = RangeTombstoneMarker::Boundary {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveEnd,
+                values: b"ck2".to_vec(),
+            },
+            close_deletion: DeletionTime::new(200, 200),
+            open_deletion: DeletionTime::new(300, 300),
+        };
+        let partition = FilteredPartition {
+            partition_key: b"pk".to_vec(),
+            partition_deletion: DeletionTime::new(50, 50),
+            static_row: None,
+            items: vec![Unfiltered::Row(row), Unfiltered::Marker(marker.clone())],
+        };
+
+        let stats = BtiWriter::new(desc.clone())
+            .write_filtered_partitions(&[(b"pk".to_vec(), partition)])
+            .unwrap();
+        assert_eq!(stats.partition_count, 1);
+        assert_eq!(stats.row_count, 1);
+
+        let reader = BtiReader::open(desc).unwrap();
+        let decoded = reader.get_filtered_partition(b"pk").unwrap().unwrap();
+        assert_eq!(decoded.partition_deletion, DeletionTime::new(50, 50));
+        assert_eq!(decoded.row_count(), 1);
+        assert!(decoded.items.iter().any(|item| matches!(
+            item,
+            Unfiltered::Marker(decoded_marker) if decoded_marker == &marker
+        )));
+
+        let all = reader.iter_filtered_partitions().unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all[0].items.iter().any(|item| matches!(
+            item,
+            Unfiltered::Marker(decoded_marker) if decoded_marker == &marker
+        )));
+
+        let simplified = reader.get_partition(b"pk").unwrap().unwrap();
+        assert_eq!(simplified.tombstone_timestamp, Some(50));
+        assert_eq!(simplified.rows.len(), 1);
     }
 
     #[test]

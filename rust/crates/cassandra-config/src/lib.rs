@@ -20,8 +20,9 @@ pub mod validation;
 pub use config::CassandraConfig;
 pub use database_descriptor::{ConfigSnapshot, DatabaseDescriptor};
 pub use guardrails::{
-    EnableFlagGuardrail, Guardrail, GuardrailAction, GuardrailRegistry, GuardrailViolation,
-    GuardrailsConfig, PasswordPolicyGuardrail, ThresholdGuardrail, ValuesGuardrail,
+    DataSizeThresholdGuardrail, EnableFlagGuardrail, Guardrail, GuardrailAction, GuardrailRegistry,
+    GuardrailViolation, GuardrailsConfig, PasswordPolicyConfig, PasswordPolicyGuardrail,
+    RoleNamePolicyConfig, ThresholdGuardrail, ValuesGuardrail,
 };
 pub use hot_reload::{ConfigWatcher, ConfigWatcherError};
 pub use loader::{load_config, load_config_from_str};

@@ -20,6 +20,7 @@
 //! - [`http_admin`] — HTTP admin API server
 
 pub mod diagnostics;
+pub mod disk_management;
 pub mod http_admin;
 pub mod http_diagnostics;
 pub mod http_tracing_audit;
@@ -43,6 +44,7 @@ pub mod handlers_stats;
 pub mod handlers_topology;
 
 pub use diagnostics::{DiagnosticEvent, DiagnosticEventService, DiagnosticEventType};
+pub use disk_management::{DataDirectory, DiskBoundary, DiskBoundaryManager, DiskError};
 pub use http_admin::{AdminState, start_admin_server};
 pub use metrics::AdminMetrics;
 pub use nodetool::{

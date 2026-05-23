@@ -222,7 +222,7 @@ fn golden_complex_tombstones_ttls_empty_large() {
 
     // Regular
     let p = reader.get_partition(b"aaa_regular").unwrap().unwrap();
-    let row = p.rows.get(&b"ck_regular".to_vec()).unwrap();
+    let row = p.rows.get(b"ck_regular".as_slice()).unwrap();
     assert!(!row.is_tombstone);
     assert_eq!(
         row.cells[0].value.as_deref(),
@@ -234,20 +234,20 @@ fn golden_complex_tombstones_ttls_empty_large() {
         .get_partition(b"bbb_cell_tombstone")
         .unwrap()
         .unwrap();
-    let row = p.rows.get(&b"ck_cell_tomb".to_vec()).unwrap();
+    let row = p.rows.get(b"ck_cell_tomb".as_slice()).unwrap();
     assert!(row.cells[0].is_tombstone);
     assert!(row.cells[0].value.is_none());
     assert_eq!(row.cells[0].local_deletion_time, Some(200));
 
     // Row tombstone
     let p = reader.get_partition(b"ccc_row_tombstone").unwrap().unwrap();
-    let row = p.rows.get(&b"ck_row_tomb".to_vec()).unwrap();
+    let row = p.rows.get(b"ck_row_tomb".as_slice()).unwrap();
     assert!(row.is_tombstone);
     assert_eq!(row.local_deletion_time, Some(300));
 
     // TTL
     let p = reader.get_partition(b"ddd_ttl").unwrap().unwrap();
-    let row = p.rows.get(&b"ck_ttl".to_vec()).unwrap();
+    let row = p.rows.get(b"ck_ttl".as_slice()).unwrap();
     assert_eq!(row.cells[0].ttl, 7200);
     assert_eq!(row.cells[0].local_deletion_time, Some(8200));
     assert_eq!(
@@ -257,13 +257,13 @@ fn golden_complex_tombstones_ttls_empty_large() {
 
     // Empty value
     let p = reader.get_partition(b"eee_empty_value").unwrap().unwrap();
-    let row = p.rows.get(&b"ck_empty".to_vec()).unwrap();
+    let row = p.rows.get(b"ck_empty".as_slice()).unwrap();
     assert_eq!(row.cells[0].value.as_deref(), Some(b"".as_slice()));
 
     // Large key (512 bytes of 0x42)
     let large_key = vec![0x42u8; 512];
     let p = reader.get_partition(&large_key).unwrap().unwrap();
-    let row = p.rows.get(&b"ck_large".to_vec()).unwrap();
+    let row = p.rows.get(b"ck_large".as_slice()).unwrap();
     assert_eq!(row.cells[0].value.as_ref().unwrap().len(), 256);
 }
 

@@ -22,7 +22,6 @@ use cassandra_repair::job::run_repair_job;
 use cassandra_repair::merkle::MerkleTree;
 use cassandra_repair::messages::ConsistentSessionState;
 use cassandra_repair::options::{RepairOption, RepairParallelism};
-use cassandra_repair::validator::validate;
 use cassandra_repair::virtual_tables::{InMemoryRepairHistory, RepairHistoryQuery};
 
 fn ep(port: u16) -> Endpoint {

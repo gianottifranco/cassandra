@@ -28,6 +28,76 @@ use byteorder::{BigEndian, ByteOrder};
 pub const SEPARATOR: u8 = 0x40;
 pub const TERMINATOR: u8 = 0x38;
 
+/// End-of-stream marker returned by [`ByteSource::next`].
+pub const BYTE_SOURCE_END: i32 = -1;
+
+/// Cursor over a byte-comparable sequence.
+///
+/// Cassandra's Java `ByteSource` exposes bytes one-at-a-time so trie code can
+/// stream comparisons without allocating whole keys. This Rust equivalent owns
+/// the encoded bytes but preserves the cursor-style API used by trie and range
+/// bound code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteSource {
+    bytes: Vec<u8>,
+    offset: usize,
+}
+
+impl ByteSource {
+    /// Create a source from already encoded bytes.
+    pub fn new(bytes: Vec<u8>) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    /// Create a source by encoding a serialized CQL value.
+    pub fn from_value(cql_type: &CqlType, data: &[u8]) -> Self {
+        Self::new(encode_byte_comparable(cql_type, data))
+    }
+
+    /// Return the next byte, or [`BYTE_SOURCE_END`] once exhausted.
+    pub fn next_byte(&mut self) -> i32 {
+        if self.offset >= self.bytes.len() {
+            return BYTE_SOURCE_END;
+        }
+        let byte = self.bytes[self.offset];
+        self.offset += 1;
+        i32::from(byte)
+    }
+
+    /// Peek at the next byte without advancing.
+    pub fn peek(&self) -> i32 {
+        self.bytes
+            .get(self.offset)
+            .map(|byte| i32::from(*byte))
+            .unwrap_or(BYTE_SOURCE_END)
+    }
+
+    /// Reset this source to the first byte.
+    pub fn reset(&mut self) {
+        self.offset = 0;
+    }
+
+    /// Return true when all bytes have been consumed.
+    pub fn is_exhausted(&self) -> bool {
+        self.offset >= self.bytes.len()
+    }
+
+    /// Remaining encoded bytes.
+    pub fn remaining(&self) -> &[u8] {
+        &self.bytes[self.offset..]
+    }
+
+    /// Full encoded byte sequence.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Consume the source and return the encoded bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+
 /// Encode a serialized CQL value into an order-preserving byte sequence.
 pub fn encode_byte_comparable(cql_type: &CqlType, data: &[u8]) -> Vec<u8> {
     match cql_type {
@@ -52,6 +122,72 @@ pub fn encode_byte_comparable(cql_type: &CqlType, data: &[u8]) -> Vec<u8> {
         // Default: use raw bytes (already byte-ordered for unsigned types)
         _ => data.to_vec(),
     }
+}
+
+/// Concatenate already encoded components using Cassandra-style separators.
+pub fn encode_components(components: &[Vec<u8>]) -> Vec<u8> {
+    let mut result = Vec::new();
+    for (idx, component) in components.iter().enumerate() {
+        if idx > 0 {
+            result.push(SEPARATOR);
+        }
+        result.extend_from_slice(component);
+    }
+    result.push(TERMINATOR);
+    result
+}
+
+/// Encode serialized CQL components using their corresponding types.
+pub fn encode_typed_components(components: &[(&CqlType, &[u8])]) -> Vec<u8> {
+    let encoded = components
+        .iter()
+        .map(|(ty, data)| encode_byte_comparable(ty, data))
+        .collect::<Vec<_>>();
+    encode_components(&encoded)
+}
+
+/// Return a short separator `s` such that `previous < s <= next` when one can
+/// be represented by a strict prefix/range increment.
+///
+/// This is useful for trie summaries and index block separators: it keeps the
+/// separator as short as possible while preserving unsigned lexicographic order.
+pub fn separator_between(previous: &[u8], next: &[u8]) -> Vec<u8> {
+    if previous >= next {
+        return next.to_vec();
+    }
+
+    let common = previous
+        .iter()
+        .zip(next.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    if common == previous.len() {
+        return previous.to_vec();
+    }
+
+    let prev_byte = previous[common];
+    let next_byte = next[common];
+    if prev_byte < 0xff && prev_byte + 1 < next_byte {
+        let mut separator = previous[..common].to_vec();
+        separator.push(prev_byte + 1);
+        separator
+    } else {
+        let mut separator = next[..=common].to_vec();
+        if separator.as_slice() <= previous {
+            separator = next.to_vec();
+        }
+        separator
+    }
+}
+
+/// Return the shortest byte string that sorts strictly after `key`, if one
+/// exists by incrementing a trailing byte and truncating the suffix.
+pub fn successor(key: &[u8]) -> Option<Vec<u8>> {
+    let idx = key.iter().rposition(|byte| *byte != 0xff)?;
+    let mut result = key[..=idx].to_vec();
+    result[idx] += 1;
+    Some(result)
 }
 
 /// XOR the sign bit to make signed integers sort correctly as unsigned bytes.
@@ -287,5 +423,70 @@ mod tests {
 
         assert!(encode_byte_comparable(&ty, &neg) < encode_byte_comparable(&ty, &zero));
         assert!(encode_byte_comparable(&ty, &zero) < encode_byte_comparable(&ty, &later_second));
+    }
+
+    #[test]
+    fn byte_source_streams_encoded_bytes() {
+        let encoded = encode_byte_comparable(&CqlType::Varchar, b"a");
+        let mut source = ByteSource::from_value(&CqlType::Varchar, b"a");
+
+        assert_eq!(source.peek(), i32::from(encoded[0]));
+        assert_eq!(source.next_byte(), i32::from(encoded[0]));
+        assert_eq!(source.remaining(), &encoded[1..]);
+        while source.next_byte() != BYTE_SOURCE_END {}
+        assert!(source.is_exhausted());
+        assert_eq!(source.next_byte(), BYTE_SOURCE_END);
+
+        source.reset();
+        assert_eq!(source.as_bytes(), encoded.as_slice());
+    }
+
+    #[test]
+    fn typed_components_use_separators_and_terminator() {
+        let key = encode_typed_components(&[
+            (&CqlType::Int, &1i32.to_be_bytes()),
+            (&CqlType::Varchar, b"abc"),
+        ]);
+
+        assert!(key.contains(&SEPARATOR));
+        assert_eq!(key.last().copied(), Some(TERMINATOR));
+
+        let first = encode_typed_components(&[
+            (&CqlType::Int, &1i32.to_be_bytes()),
+            (&CqlType::Varchar, b"abc"),
+        ]);
+        let second = encode_typed_components(&[
+            (&CqlType::Int, &2i32.to_be_bytes()),
+            (&CqlType::Varchar, b"abc"),
+        ]);
+        assert!(first < second);
+    }
+
+    #[test]
+    fn separator_between_shortens_index_bounds() {
+        let previous = b"abc123";
+        let next = b"abd999";
+        let separator = separator_between(previous, next);
+
+        assert!(separator.as_slice() > previous.as_slice());
+        assert!(separator.as_slice() <= next.as_slice());
+        assert_eq!(separator, b"abd");
+    }
+
+    #[test]
+    fn separator_between_handles_adjacent_bytes() {
+        let previous = b"abc";
+        let next = b"abd";
+        let separator = separator_between(previous, next);
+
+        assert!(separator.as_slice() > previous.as_slice());
+        assert!(separator.as_slice() <= next.as_slice());
+        assert_eq!(separator, next);
+    }
+
+    #[test]
+    fn successor_increments_last_non_ff_byte() {
+        assert_eq!(successor(&[0x01, 0x02, 0xff]), Some(vec![0x01, 0x03]));
+        assert_eq!(successor(&[0xff, 0xff]), None);
     }
 }

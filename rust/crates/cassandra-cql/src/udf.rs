@@ -99,6 +99,9 @@ impl UdfValue {
         let Some(data) = data else {
             return Ok(Self::Null);
         };
+        if data.is_empty() && is_empty_value_meaningless(cql_type) {
+            return Ok(Self::Null);
+        }
         CqlValue::deserialize_value(cql_type, data)
             .map(Self::from_cql_value)
             .map_err(|err| err.to_string())
@@ -280,6 +283,25 @@ impl UdfValue {
         };
 
         Ok(value)
+    }
+}
+
+fn is_empty_value_meaningless(cql_type: &CqlType) -> bool {
+    match cql_type {
+        CqlType::Reversed(inner) => is_empty_value_meaningless(inner),
+        CqlType::Boolean
+        | CqlType::Int
+        | CqlType::Bigint
+        | CqlType::Counter
+        | CqlType::Float
+        | CqlType::Double
+        | CqlType::Varint
+        | CqlType::Decimal
+        | CqlType::Timestamp
+        | CqlType::Uuid
+        | CqlType::Timeuuid
+        | CqlType::Inet => true,
+        _ => false,
     }
 }
 
@@ -503,6 +525,48 @@ mod tests {
             UdfValue::deserialize_arg(&CqlType::Blob, None).unwrap(),
             UdfValue::Null
         );
+    }
+
+    #[test]
+    fn deserialize_udf_empty_meaningless_arguments_as_null_like_java() {
+        for cql_type in [
+            CqlType::Boolean,
+            CqlType::Int,
+            CqlType::Bigint,
+            CqlType::Counter,
+            CqlType::Float,
+            CqlType::Double,
+            CqlType::Varint,
+            CqlType::Decimal,
+            CqlType::Timestamp,
+            CqlType::Uuid,
+            CqlType::Timeuuid,
+            CqlType::Inet,
+            CqlType::Reversed(Box::new(CqlType::Int)),
+        ] {
+            assert_eq!(
+                UdfValue::deserialize_arg(&cql_type, Some(&[])).unwrap(),
+                UdfValue::Null,
+                "empty {} should compose to null",
+                cql_type.cql_name()
+            );
+        }
+    }
+
+    #[test]
+    fn deserialize_udf_empty_meaningful_arguments_through_codec() {
+        assert_eq!(
+            UdfValue::deserialize_arg(&CqlType::Varchar, Some(&[])).unwrap(),
+            UdfValue::Text(String::new())
+        );
+        assert_eq!(
+            UdfValue::deserialize_arg(&CqlType::Blob, Some(&[])).unwrap(),
+            UdfValue::Blob(Vec::new())
+        );
+        assert!(UdfValue::deserialize_arg(&CqlType::Tinyint, Some(&[])).is_err());
+        assert!(UdfValue::deserialize_arg(&CqlType::Smallint, Some(&[])).is_err());
+        assert!(UdfValue::deserialize_arg(&CqlType::Date, Some(&[])).is_err());
+        assert!(UdfValue::deserialize_arg(&CqlType::Time, Some(&[])).is_err());
     }
 
     #[test]

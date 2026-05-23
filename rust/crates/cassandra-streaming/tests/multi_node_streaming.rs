@@ -6,7 +6,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use cassandra_messaging::{Message, MessagingService, Verb};
+use cassandra_messaging::{MessagingService, Verb};
 use cassandra_streaming::protocol::*;
 use cassandra_streaming::receiver::StreamReceiver;
 use cassandra_streaming::transfer::{ChecksumAlgorithm, ChunkChecksum, StreamTransfer};

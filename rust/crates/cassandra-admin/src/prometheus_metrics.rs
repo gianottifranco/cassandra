@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::too_many_arguments)]
+
 //! Prometheus-native metrics registry and exposition.
 //!
 //! ## Java Oracle

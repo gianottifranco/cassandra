@@ -13,6 +13,13 @@
 //! [0x02][start_len: u32][start][end_len: u32][end][marked_for_delete_at: i64][ldt: i32]
 //! ```
 //!
+//! **Range tombstone marker:**
+//! ```text
+//! [0x04][marker_kind: u8][bound_kind: u8][bound_len: u32][bound]
+//!       [marked_for_delete_at: i64][ldt: i32]
+//!       [boundary_open_marked_for_delete_at: i64][boundary_open_ldt: i32]?
+//! ```
+//!
 //! **Partition deletion:**
 //! ```text
 //! [0x03][marked_for_delete_at: i64][ldt: i32]
@@ -25,11 +32,25 @@ use crc32fast::Hasher;
 
 use cassandra_common::tombstone::{DeletionTime, RangeTombstone};
 
+use crate::rows::unfiltered::{ClusteringBound, ClusteringBoundKind, RangeTombstoneMarker};
+
 /// Marker byte for a range tombstone in Data.db.
 pub const RANGE_TOMBSTONE_MARKER: u8 = 0x02;
 
 /// Marker byte for a partition-level deletion in Data.db.
 pub const PARTITION_DELETION_MARKER: u8 = 0x03;
+
+/// Marker byte for an unfiltered range-tombstone bound marker in Data.db.
+pub const RANGE_TOMBSTONE_BOUND_MARKER: u8 = 0x04;
+
+const RT_MARKER_OPEN: u8 = 0;
+const RT_MARKER_CLOSE: u8 = 1;
+const RT_MARKER_BOUNDARY: u8 = 2;
+
+const BOUND_INCLUSIVE_START: u8 = 0;
+const BOUND_EXCLUSIVE_START: u8 = 1;
+const BOUND_INCLUSIVE_END: u8 = 2;
+const BOUND_EXCLUSIVE_END: u8 = 3;
 
 /// Write a range tombstone to `writer`, updating `crc`. Returns bytes written.
 pub fn write_range_tombstone<W: Write>(
@@ -57,6 +78,61 @@ pub fn write_range_tombstone<W: Write>(
     let ldt_bytes = rt.deletion.local_deletion_time.to_be_bytes();
     write_and_hash(writer, &ldt_bytes, crc)?;
     written += 4;
+
+    Ok(written)
+}
+
+/// Write an unfiltered range-tombstone marker to `writer`, updating `crc`.
+///
+/// This preserves the marker shape (`Open`, `Close`, or `Boundary`) and bound
+/// inclusivity instead of collapsing it into a synthetic inclusive range.
+pub fn write_range_tombstone_marker<W: Write>(
+    writer: &mut W,
+    marker: &RangeTombstoneMarker,
+    crc: &mut Hasher,
+) -> io::Result<u64> {
+    let mut written: u64 = 0;
+
+    write_and_hash(writer, &[RANGE_TOMBSTONE_BOUND_MARKER], crc)?;
+    written += 1;
+
+    match marker {
+        RangeTombstoneMarker::Open { bound, deletion } => {
+            write_and_hash(
+                writer,
+                &[RT_MARKER_OPEN, encode_bound_kind(bound.kind)],
+                crc,
+            )?;
+            written += 2;
+            written += write_bytes_and_hash(writer, &bound.values, crc)?;
+            written += write_deletion_time(writer, *deletion, crc)?;
+        }
+        RangeTombstoneMarker::Close { bound, deletion } => {
+            write_and_hash(
+                writer,
+                &[RT_MARKER_CLOSE, encode_bound_kind(bound.kind)],
+                crc,
+            )?;
+            written += 2;
+            written += write_bytes_and_hash(writer, &bound.values, crc)?;
+            written += write_deletion_time(writer, *deletion, crc)?;
+        }
+        RangeTombstoneMarker::Boundary {
+            bound,
+            close_deletion,
+            open_deletion,
+        } => {
+            write_and_hash(
+                writer,
+                &[RT_MARKER_BOUNDARY, encode_bound_kind(bound.kind)],
+                crc,
+            )?;
+            written += 2;
+            written += write_bytes_and_hash(writer, &bound.values, crc)?;
+            written += write_deletion_time(writer, *close_deletion, crc)?;
+            written += write_deletion_time(writer, *open_deletion, crc)?;
+        }
+    }
 
     Ok(written)
 }
@@ -99,6 +175,31 @@ pub fn read_range_tombstone<R: Read>(reader: &mut R) -> io::Result<RangeTombston
     })
 }
 
+/// Read a range-tombstone marker from `reader` (marker byte already consumed).
+pub fn read_range_tombstone_marker<R: Read>(reader: &mut R) -> io::Result<RangeTombstoneMarker> {
+    let marker_kind = read_u8(reader)?;
+    let bound_kind = decode_bound_kind(read_u8(reader)?)?;
+    let bound = ClusteringBound {
+        kind: bound_kind,
+        values: read_bytes(reader)?,
+    };
+    let deletion = read_deletion_time(reader)?;
+
+    match marker_kind {
+        RT_MARKER_OPEN => Ok(RangeTombstoneMarker::Open { bound, deletion }),
+        RT_MARKER_CLOSE => Ok(RangeTombstoneMarker::Close { bound, deletion }),
+        RT_MARKER_BOUNDARY => Ok(RangeTombstoneMarker::Boundary {
+            bound,
+            close_deletion: deletion,
+            open_deletion: read_deletion_time(reader)?,
+        }),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid range tombstone marker kind: {other}"),
+        )),
+    }
+}
+
 /// Read a partition deletion from `reader` (marker byte already consumed).
 pub fn read_partition_deletion<R: Read>(reader: &mut R) -> io::Result<DeletionTime> {
     let marked_for_delete_at = reader.read_i64::<BigEndian>()?;
@@ -123,11 +224,57 @@ fn write_bytes_and_hash<W: Write>(w: &mut W, data: &[u8], crc: &mut Hasher) -> i
     Ok(4 + data.len() as u64)
 }
 
+fn write_deletion_time<W: Write>(
+    writer: &mut W,
+    deletion: DeletionTime,
+    crc: &mut Hasher,
+) -> io::Result<u64> {
+    let ts_bytes = deletion.marked_for_delete_at.to_be_bytes();
+    write_and_hash(writer, &ts_bytes, crc)?;
+    let ldt_bytes = deletion.local_deletion_time.to_be_bytes();
+    write_and_hash(writer, &ldt_bytes, crc)?;
+    Ok(12)
+}
+
+fn read_u8<R: Read>(reader: &mut R) -> io::Result<u8> {
+    let mut byte = [0u8; 1];
+    reader.read_exact(&mut byte)?;
+    Ok(byte[0])
+}
+
 fn read_bytes<R: Read>(reader: &mut R) -> io::Result<Vec<u8>> {
     let len = reader.read_u32::<BigEndian>()? as usize;
     let mut buf = vec![0u8; len];
     reader.read_exact(&mut buf)?;
     Ok(buf)
+}
+
+fn read_deletion_time<R: Read>(reader: &mut R) -> io::Result<DeletionTime> {
+    let marked_for_delete_at = reader.read_i64::<BigEndian>()?;
+    let local_deletion_time = reader.read_i32::<BigEndian>()?;
+    Ok(DeletionTime::new(marked_for_delete_at, local_deletion_time))
+}
+
+fn encode_bound_kind(kind: ClusteringBoundKind) -> u8 {
+    match kind {
+        ClusteringBoundKind::InclusiveStart => BOUND_INCLUSIVE_START,
+        ClusteringBoundKind::ExclusiveStart => BOUND_EXCLUSIVE_START,
+        ClusteringBoundKind::InclusiveEnd => BOUND_INCLUSIVE_END,
+        ClusteringBoundKind::ExclusiveEnd => BOUND_EXCLUSIVE_END,
+    }
+}
+
+fn decode_bound_kind(kind: u8) -> io::Result<ClusteringBoundKind> {
+    match kind {
+        BOUND_INCLUSIVE_START => Ok(ClusteringBoundKind::InclusiveStart),
+        BOUND_EXCLUSIVE_START => Ok(ClusteringBoundKind::ExclusiveStart),
+        BOUND_INCLUSIVE_END => Ok(ClusteringBoundKind::InclusiveEnd),
+        BOUND_EXCLUSIVE_END => Ok(ClusteringBoundKind::ExclusiveEnd),
+        other => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid range tombstone bound kind: {other}"),
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -171,6 +318,78 @@ mod tests {
         let decoded = read_partition_deletion(&mut cursor).unwrap();
 
         assert_eq!(decoded, dt);
+    }
+
+    #[test]
+    fn range_tombstone_open_marker_round_trip() {
+        let marker = RangeTombstoneMarker::Open {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveStart,
+                values: b"ck1".to_vec(),
+            },
+            deletion: DeletionTime::new(100, 10),
+        };
+
+        let mut buf = Vec::new();
+        let mut crc = Hasher::new();
+        let written = write_range_tombstone_marker(&mut buf, &marker, &mut crc).unwrap();
+        assert_eq!(written, buf.len() as u64);
+        assert_eq!(buf[0], RANGE_TOMBSTONE_BOUND_MARKER);
+
+        let mut cursor = Cursor::new(&buf[1..]);
+        let decoded = read_range_tombstone_marker(&mut cursor).unwrap();
+        assert_eq!(decoded, marker);
+    }
+
+    #[test]
+    fn range_tombstone_close_marker_round_trip() {
+        let marker = RangeTombstoneMarker::Close {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::ExclusiveEnd,
+                values: b"ck9".to_vec(),
+            },
+            deletion: DeletionTime::new(200, 20),
+        };
+
+        let mut buf = Vec::new();
+        let mut crc = Hasher::new();
+        write_range_tombstone_marker(&mut buf, &marker, &mut crc).unwrap();
+
+        let mut cursor = Cursor::new(&buf[1..]);
+        let decoded = read_range_tombstone_marker(&mut cursor).unwrap();
+        assert_eq!(decoded, marker);
+    }
+
+    #[test]
+    fn range_tombstone_boundary_marker_round_trip() {
+        let marker = RangeTombstoneMarker::Boundary {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveEnd,
+                values: b"ck5".to_vec(),
+            },
+            close_deletion: DeletionTime::new(300, 30),
+            open_deletion: DeletionTime::new(400, 40),
+        };
+
+        let mut buf = Vec::new();
+        let mut crc = Hasher::new();
+        write_range_tombstone_marker(&mut buf, &marker, &mut crc).unwrap();
+
+        let mut cursor = Cursor::new(&buf[1..]);
+        let decoded = read_range_tombstone_marker(&mut cursor).unwrap();
+        assert_eq!(decoded, marker);
+    }
+
+    #[test]
+    fn range_tombstone_marker_rejects_invalid_marker_kind() {
+        let mut encoded = vec![9, BOUND_INCLUSIVE_START];
+        encoded.extend_from_slice(&0u32.to_be_bytes());
+        encoded.extend_from_slice(&DeletionTime::new(1, 2).marked_for_delete_at.to_be_bytes());
+        encoded.extend_from_slice(&DeletionTime::new(1, 2).local_deletion_time.to_be_bytes());
+
+        let mut cursor = Cursor::new(encoded);
+        let err = read_range_tombstone_marker(&mut cursor).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]

@@ -24,6 +24,112 @@ use thiserror::Error;
 /// Result type alias used throughout the Cassandra crates.
 pub type CassandraResult<T> = Result<T, CassandraError>;
 
+/// Cassandra exception categories mirroring the Java exception hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CassandraExceptionCategory {
+    Transport,
+    Authentication,
+    RequestValidation,
+    RequestExecution,
+    Server,
+    Internal,
+}
+
+/// Java Cassandra exception kind represented by [`CassandraError`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CassandraExceptionKind {
+    ServerError,
+    ProtocolException,
+    AuthenticationException,
+    UnavailableException,
+    OverloadedException,
+    IsBootstrappingException,
+    TruncateException,
+    WriteTimeoutException,
+    ReadTimeoutException,
+    ReadFailureException,
+    FunctionExecutionException,
+    WriteFailureException,
+    CDCWriteException,
+    SyntaxException,
+    UnauthorizedException,
+    InvalidRequestException,
+    ConfigurationException,
+    AlreadyExistsException,
+    PreparedQueryNotFoundException,
+    InternalError,
+    IoError,
+}
+
+impl CassandraExceptionKind {
+    /// Java exception class name that best matches this error kind.
+    pub fn java_class_name(self) -> &'static str {
+        match self {
+            Self::ServerError => "org.apache.cassandra.exceptions.ServerError",
+            Self::ProtocolException => "org.apache.cassandra.transport.ProtocolException",
+            Self::AuthenticationException => {
+                "org.apache.cassandra.exceptions.AuthenticationException"
+            }
+            Self::UnavailableException => "org.apache.cassandra.exceptions.UnavailableException",
+            Self::OverloadedException => "org.apache.cassandra.exceptions.OverloadedException",
+            Self::IsBootstrappingException => {
+                "org.apache.cassandra.exceptions.IsBootstrappingException"
+            }
+            Self::TruncateException => "org.apache.cassandra.exceptions.TruncateException",
+            Self::WriteTimeoutException => "org.apache.cassandra.exceptions.WriteTimeoutException",
+            Self::ReadTimeoutException => "org.apache.cassandra.exceptions.ReadTimeoutException",
+            Self::ReadFailureException => "org.apache.cassandra.exceptions.ReadFailureException",
+            Self::FunctionExecutionException => {
+                "org.apache.cassandra.exceptions.FunctionExecutionException"
+            }
+            Self::WriteFailureException => "org.apache.cassandra.exceptions.WriteFailureException",
+            Self::CDCWriteException => "org.apache.cassandra.exceptions.CDCWriteException",
+            Self::SyntaxException => "org.apache.cassandra.exceptions.SyntaxException",
+            Self::UnauthorizedException => "org.apache.cassandra.exceptions.UnauthorizedException",
+            Self::InvalidRequestException => {
+                "org.apache.cassandra.exceptions.InvalidRequestException"
+            }
+            Self::ConfigurationException => {
+                "org.apache.cassandra.exceptions.ConfigurationException"
+            }
+            Self::AlreadyExistsException => {
+                "org.apache.cassandra.exceptions.AlreadyExistsException"
+            }
+            Self::PreparedQueryNotFoundException => {
+                "org.apache.cassandra.exceptions.PreparedQueryNotFoundException"
+            }
+            Self::InternalError => "org.apache.cassandra.exceptions.InternalError",
+            Self::IoError => "java.io.IOException",
+        }
+    }
+
+    /// High-level Java exception family.
+    pub fn category(self) -> CassandraExceptionCategory {
+        match self {
+            Self::ProtocolException => CassandraExceptionCategory::Transport,
+            Self::AuthenticationException => CassandraExceptionCategory::Authentication,
+            Self::SyntaxException
+            | Self::UnauthorizedException
+            | Self::InvalidRequestException
+            | Self::ConfigurationException
+            | Self::AlreadyExistsException
+            | Self::PreparedQueryNotFoundException => CassandraExceptionCategory::RequestValidation,
+            Self::UnavailableException
+            | Self::OverloadedException
+            | Self::IsBootstrappingException
+            | Self::TruncateException
+            | Self::WriteTimeoutException
+            | Self::ReadTimeoutException
+            | Self::ReadFailureException
+            | Self::FunctionExecutionException
+            | Self::WriteFailureException
+            | Self::CDCWriteException => CassandraExceptionCategory::RequestExecution,
+            Self::ServerError => CassandraExceptionCategory::Server,
+            Self::InternalError | Self::IoError => CassandraExceptionCategory::Internal,
+        }
+    }
+}
+
 /// Top-level error type for the Cassandra Rust implementation.
 ///
 /// Error variants correspond to CQL protocol error codes where applicable.
@@ -154,6 +260,43 @@ pub enum CassandraError {
 }
 
 impl CassandraError {
+    /// Java Cassandra exception kind represented by this error.
+    pub fn exception_kind(&self) -> CassandraExceptionKind {
+        match self {
+            Self::ServerError(_) => CassandraExceptionKind::ServerError,
+            Self::ProtocolError(_) => CassandraExceptionKind::ProtocolException,
+            Self::AuthenticationError(_) => CassandraExceptionKind::AuthenticationException,
+            Self::Unavailable { .. } => CassandraExceptionKind::UnavailableException,
+            Self::Overloaded => CassandraExceptionKind::OverloadedException,
+            Self::IsBootstrapping => CassandraExceptionKind::IsBootstrappingException,
+            Self::TruncateError(_) => CassandraExceptionKind::TruncateException,
+            Self::WriteTimeout { .. } => CassandraExceptionKind::WriteTimeoutException,
+            Self::ReadTimeout { .. } => CassandraExceptionKind::ReadTimeoutException,
+            Self::ReadFailure { .. } => CassandraExceptionKind::ReadFailureException,
+            Self::FunctionFailure { .. } => CassandraExceptionKind::FunctionExecutionException,
+            Self::WriteFailure { .. } => CassandraExceptionKind::WriteFailureException,
+            Self::CDCWriteFailure => CassandraExceptionKind::CDCWriteException,
+            Self::SyntaxError(_) => CassandraExceptionKind::SyntaxException,
+            Self::Unauthorized(_) => CassandraExceptionKind::UnauthorizedException,
+            Self::InvalidQuery(_) => CassandraExceptionKind::InvalidRequestException,
+            Self::ConfigError(_) => CassandraExceptionKind::ConfigurationException,
+            Self::AlreadyExists { .. } => CassandraExceptionKind::AlreadyExistsException,
+            Self::Unprepared(_) => CassandraExceptionKind::PreparedQueryNotFoundException,
+            Self::Internal(_) => CassandraExceptionKind::InternalError,
+            Self::Io(_) => CassandraExceptionKind::IoError,
+        }
+    }
+
+    /// High-level Java exception family for this error.
+    pub fn exception_category(&self) -> CassandraExceptionCategory {
+        self.exception_kind().category()
+    }
+
+    /// Java exception class name that best matches this error.
+    pub fn java_class_name(&self) -> &'static str {
+        self.exception_kind().java_class_name()
+    }
+
     /// Returns the CQL native protocol error code for this error.
     ///
     /// Returns `None` for internal errors that don't map to protocol codes.
@@ -239,6 +382,122 @@ mod tests {
             Some(0x1500)
         );
         assert_eq!(CassandraError::CDCWriteFailure.error_code(), Some(0x1600));
+    }
+
+    #[test]
+    fn exception_kinds_map_to_java_hierarchy() {
+        let cases = vec![
+            (
+                CassandraError::ProtocolError("bad frame".into()),
+                CassandraExceptionKind::ProtocolException,
+                CassandraExceptionCategory::Transport,
+                "org.apache.cassandra.transport.ProtocolException",
+            ),
+            (
+                CassandraError::AuthenticationError("bad credentials".into()),
+                CassandraExceptionKind::AuthenticationException,
+                CassandraExceptionCategory::Authentication,
+                "org.apache.cassandra.exceptions.AuthenticationException",
+            ),
+            (
+                CassandraError::InvalidQuery("bad query".into()),
+                CassandraExceptionKind::InvalidRequestException,
+                CassandraExceptionCategory::RequestValidation,
+                "org.apache.cassandra.exceptions.InvalidRequestException",
+            ),
+            (
+                CassandraError::WriteTimeout {
+                    consistency: "QUORUM".into(),
+                    received: 1,
+                    block_for: 2,
+                    write_type: "SIMPLE".into(),
+                },
+                CassandraExceptionKind::WriteTimeoutException,
+                CassandraExceptionCategory::RequestExecution,
+                "org.apache.cassandra.exceptions.WriteTimeoutException",
+            ),
+            (
+                CassandraError::ServerError("boom".into()),
+                CassandraExceptionKind::ServerError,
+                CassandraExceptionCategory::Server,
+                "org.apache.cassandra.exceptions.ServerError",
+            ),
+            (
+                CassandraError::Internal("bug".into()),
+                CassandraExceptionKind::InternalError,
+                CassandraExceptionCategory::Internal,
+                "org.apache.cassandra.exceptions.InternalError",
+            ),
+        ];
+
+        for (err, kind, category, java_class_name) in cases {
+            assert_eq!(err.exception_kind(), kind);
+            assert_eq!(err.exception_category(), category);
+            assert_eq!(err.java_class_name(), java_class_name);
+        }
+    }
+
+    #[test]
+    fn all_protocol_errors_have_java_exception_names() {
+        let errors = vec![
+            CassandraError::ServerError("x".into()),
+            CassandraError::ProtocolError("x".into()),
+            CassandraError::AuthenticationError("x".into()),
+            CassandraError::Unavailable {
+                consistency: "ONE".into(),
+                required: 1,
+                alive: 0,
+            },
+            CassandraError::Overloaded,
+            CassandraError::IsBootstrapping,
+            CassandraError::TruncateError("x".into()),
+            CassandraError::WriteTimeout {
+                consistency: "ONE".into(),
+                received: 0,
+                block_for: 1,
+                write_type: "SIMPLE".into(),
+            },
+            CassandraError::ReadTimeout {
+                consistency: "ONE".into(),
+                received: 0,
+                block_for: 1,
+                data_present: false,
+            },
+            CassandraError::ReadFailure {
+                consistency: "ONE".into(),
+                received: 0,
+                block_for: 1,
+                num_failures: 1,
+                data_present: false,
+            },
+            CassandraError::FunctionFailure {
+                keyspace: "ks".into(),
+                function: "f".into(),
+                arg_types: Vec::new(),
+            },
+            CassandraError::WriteFailure {
+                consistency: "ONE".into(),
+                received: 0,
+                block_for: 1,
+                num_failures: 1,
+                write_type: "SIMPLE".into(),
+            },
+            CassandraError::CDCWriteFailure,
+            CassandraError::SyntaxError("x".into()),
+            CassandraError::Unauthorized("x".into()),
+            CassandraError::InvalidQuery("x".into()),
+            CassandraError::ConfigError("x".into()),
+            CassandraError::AlreadyExists {
+                ks: "ks".into(),
+                table: "tbl".into(),
+            },
+            CassandraError::Unprepared(vec![1, 2, 3]),
+        ];
+
+        for err in errors {
+            assert!(err.error_code().is_some(), "{err:?}");
+            assert!(err.java_class_name().starts_with("org.apache.cassandra."));
+        }
     }
 
     #[test]

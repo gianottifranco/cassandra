@@ -89,8 +89,11 @@ memmap2 = "0.9"
 crc32fast = "1"
 
 # Hashing
+md2 = "0.10"
 md-5 = "0.10"
+sha1 = "0.10"
 sha2 = "0.10"
+sha3 = "0.10"
 
 # Random
 rand = "0.8"
@@ -131,6 +134,8 @@ notify = "7"
 hex = "0.4"
 fs2 = "0.4"
 regex = "1"
+num-bigint = "0.4"
+num-traits = "0.2"
 
 # Crypto (encryption-at-rest)
 aes = "0.8"

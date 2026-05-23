@@ -26,13 +26,22 @@ pub mod user_function;
 pub mod user_type;
 pub mod view;
 
-pub use catalog::{SchemaCatalog, SchemaSnapshot};
+pub use catalog::{SchemaCatalog, SchemaMergeConflict, SchemaMergeReport, SchemaSnapshot};
 pub use column::{
     ClusteringOrder, ColumnConstraintMetadata, ColumnKind, ColumnMetadata, ConstraintRelationOp,
+};
+pub use distributed_schema::{
+    DistributedSchema, RemoteSchemaMigration, RemoteSchemaMigrationOutcome,
+    RemoteSchemaMigrationPlan, RemoteSchemaMigrationResult, SchemaMigration, SchemaMigrationError,
+    SchemaMigrationResult,
 };
 pub use dropped_column::DroppedColumn;
 pub use index::{IndexKind, IndexMetadata};
 pub use keyspace::{KeyspaceKind, KeyspaceMetadata, KeyspaceParams, ReplicationParams};
+pub use persistence::{
+    SchemaMigrationJournalRecord, SchemaMigrationJournalStatus, append_migration_record,
+    load_migration_journal,
+};
 pub use schema_change::{SchemaChangeEvent, SchemaChangeListener, SchemaChangeNotifier};
 pub use system_keyspace_manager::SystemKeyspaceManager;
 pub use system_keyspaces::{BootstrapState, SystemColumnSpec, SystemTableDef};

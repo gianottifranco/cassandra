@@ -113,7 +113,7 @@ pub fn run(file: &str, gc_grace_seconds: u64) {
         let mut partition_total = 0u64;
         let mut partition_expired = 0u64;
 
-        for (_ck, row) in &data.rows {
+        for row in data.rows.values() {
             // Check row-level tombstones
             if row.is_tombstone {
                 partition_total += 1;
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn test_parse_descriptor_invalid() {
-        let desc = parse_descriptor("/tmp/not-a-valid-sstable");
+        let _desc = parse_descriptor("/tmp/not-a-valid-sstable");
         // This has 5 parts separated by '-' so it may parse; test the edge case
         // of a truly short name
         let desc2 = parse_descriptor("/tmp/short.db");

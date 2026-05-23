@@ -18,6 +18,7 @@
 //! - [`metrics`] — atomic counters for repair progress
 
 pub mod anti_compaction;
+pub mod asymmetric;
 pub mod consistent_coordinator;
 pub mod consistent_local;
 pub mod coordinator;
@@ -34,6 +35,7 @@ pub mod validator;
 pub mod virtual_tables;
 
 pub use anti_compaction::{AntiCompactionRequest, AntiCompactionResult, RepairedState};
+pub use asymmetric::{DifferenceHolder, EndpointPair, RangeDifference, RangeMap};
 pub use consistent_coordinator::{CoordinatorAction, CoordinatorSession};
 pub use consistent_local::{LocalSession, LocalSessionStore, PendingRepairTracker};
 pub use coordinator::{RepairCoordinator, RepairError, RepairType};

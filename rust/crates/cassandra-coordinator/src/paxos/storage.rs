@@ -118,23 +118,17 @@ impl PaxosStorage {
                 };
 
                 match cell.column.as_str() {
-                    "in_progress_ballot" => {
-                        if val.len() == 16 {
-                            promised_uuid = Some(Uuid::from_slice(val).unwrap_or(Uuid::nil()));
-                        }
+                    "in_progress_ballot" if val.len() == 16 => {
+                        promised_uuid = Some(Uuid::from_slice(val).unwrap_or(Uuid::nil()));
                     }
-                    "proposal_ballot" => {
-                        if val.len() == 16 {
-                            accepted_uuid = Some(Uuid::from_slice(val).unwrap_or(Uuid::nil()));
-                        }
+                    "proposal_ballot" if val.len() == 16 => {
+                        accepted_uuid = Some(Uuid::from_slice(val).unwrap_or(Uuid::nil()));
                     }
                     "proposal" => {
                         accepted_mutation = Some(val.clone());
                     }
-                    "most_recent_commit_at" => {
-                        if val.len() == 16 {
-                            committed_uuid = Some(Uuid::from_slice(val).unwrap_or(Uuid::nil()));
-                        }
+                    "most_recent_commit_at" if val.len() == 16 => {
+                        committed_uuid = Some(Uuid::from_slice(val).unwrap_or(Uuid::nil()));
                     }
                     "most_recent_commit" => {
                         committed_mutation = Some(val.clone());

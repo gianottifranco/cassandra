@@ -226,7 +226,7 @@ pub fn cql_type_name(cql_type: &CqlType) -> String {
 
 // ── Private helpers ──────────────────────────────────────────────────────────
 
-fn codec_to_marshal(_cql_type: &CqlType) -> impl Fn(CodecError) -> MarshalError + '_ {
+fn codec_to_marshal(cql_type: &CqlType) -> impl Fn(CodecError) -> MarshalError + '_ {
     move |e| match e {
         CodecError::InvalidUtf8 => MarshalError::Utf8Error,
         CodecError::InvalidLength { expected, got } => MarshalError::InvalidSize {
@@ -241,6 +241,14 @@ fn codec_to_marshal(_cql_type: &CqlType) -> impl Fn(CodecError) -> MarshalError 
         CodecError::InvalidVector(reason) => MarshalError::InvalidData {
             type_name: "vector".to_string(),
             reason,
+        },
+        CodecError::TrailingBytes { consumed, total } => MarshalError::InvalidData {
+            type_name: cql_type.cql_name(),
+            reason: format!("trailing bytes after {} of {} bytes", consumed, total),
+        },
+        CodecError::OutOfRange { type_name, value } => MarshalError::InvalidData {
+            type_name: type_name.to_string(),
+            reason: format!("value {} out of range", value),
         },
     }
 }

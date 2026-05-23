@@ -16,8 +16,9 @@
 //! messages via the `MessagingService`. Throttling is applied per the
 //! configured delivery rate.
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -26,7 +27,7 @@ use tracing::{debug, info, warn};
 use cassandra_cluster_metadata::Endpoint;
 use cassandra_messaging::{Message, MessagingService, Verb};
 
-use crate::hints::HintedHandoffManager;
+use crate::hints::{Hint, HintedHandoffManager};
 use crate::verb_handlers::hint_handler::HintRequest;
 
 // ─── Delivery Metrics ───────────────────────────────────────────
@@ -76,6 +77,8 @@ pub struct HintDeliveryService {
     max_retries: usize,
     /// Shutdown signal for cancellation-safe delivery.
     shutdown: Arc<Notify>,
+    /// Sticky shutdown flag so notifications cannot be missed.
+    shutdown_requested: Arc<AtomicBool>,
 }
 
 impl HintDeliveryService {
@@ -88,6 +91,7 @@ impl HintDeliveryService {
             metrics: HintDeliveryMetrics::new(),
             max_retries: 3,
             shutdown: Arc::new(Notify::new()),
+            shutdown_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -126,12 +130,59 @@ impl HintDeliveryService {
     /// Signal shutdown for cancellation-safe delivery.
     pub fn shutdown(&self) {
         info!("Hint delivery service shutting down");
+        self.shutdown_requested.store(true, Ordering::SeqCst);
         self.shutdown.notify_waiters();
     }
 
     /// Get a clone of the shutdown notify for external cancellation.
     pub fn shutdown_notify(&self) -> Arc<Notify> {
         self.shutdown.clone()
+    }
+
+    /// Run one scheduler pass over all endpoints that currently have pending
+    /// in-memory hints.
+    pub async fn deliver_pending_hints_once(&self) -> DeliveryResult {
+        let targets: Vec<Endpoint> = self
+            .manager
+            .store()
+            .stats_per_endpoint()
+            .keys()
+            .copied()
+            .collect();
+
+        let mut aggregate = DeliveryResult::default();
+        for target in targets {
+            let result = self.deliver_hints(target).await;
+            aggregate.delivered += result.delivered;
+            aggregate.failed += result.failed;
+        }
+
+        aggregate
+    }
+
+    /// Start periodic hint delivery scheduling.
+    ///
+    /// Each tick scans endpoints with pending hints and attempts delivery.
+    /// Undelivered hints are requeued by `deliver_hints`, so a failed round is
+    /// retried by the next tick.
+    pub fn spawn_periodic_delivery(
+        self: Arc<Self>,
+        interval: Duration,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            loop {
+                if self.is_shutdown_signaled() {
+                    break;
+                }
+                tokio::select! {
+                    () = self.shutdown.notified() => break,
+                    _ = ticker.tick() => {
+                        let _ = self.deliver_pending_hints_once().await;
+                    }
+                }
+            }
+        })
     }
 
     /// Deliver all pending hints for a target endpoint.
@@ -144,6 +195,25 @@ impl HintDeliveryService {
     /// Returns the number of successfully delivered hints.
     pub async fn deliver_hints(&self, target: Endpoint) -> DeliveryResult {
         let hints = self.manager.store().drain_hints(&target);
+        self.deliver_hint_batch(target, hints).await
+    }
+
+    /// Deliver hints for a node that just recovered, applying topology
+    /// ownership filtering before dispatch.
+    pub async fn deliver_hints_for_recovered_node(
+        &self,
+        target: Endpoint,
+        snapshot: &cassandra_cluster_metadata::ClusterSnapshot,
+        snitch: &dyn cassandra_cluster_metadata::Snitch,
+        strategies: &HashMap<String, Box<dyn cassandra_cluster_metadata::ReplicationStrategy>>,
+    ) -> DeliveryResult {
+        let hints = self
+            .manager
+            .on_node_recovered(&target, snapshot, snitch, strategies);
+        self.deliver_hint_batch(target, hints).await
+    }
+
+    async fn deliver_hint_batch(&self, target: Endpoint, hints: Vec<Hint>) -> DeliveryResult {
         if hints.is_empty() {
             return DeliveryResult {
                 delivered: 0,
@@ -172,6 +242,7 @@ impl HintDeliveryService {
 
         let mut delivered = 0u64;
         let mut failed = 0u64;
+        let mut requeue = Vec::new();
 
         // Track in-progress hints.
         let total_hints = hints.len() as u64;
@@ -181,10 +252,13 @@ impl HintDeliveryService {
             .hints_in_progress
             .fetch_add(total_hints, Ordering::Relaxed);
 
-        for hint in hints {
+        let mut pending: VecDeque<Hint> = hints.into();
+        while let Some(hint) = pending.pop_front() {
             // Check shutdown signal.
             if self.is_shutdown_signaled() {
                 debug!("Shutdown signaled, stopping hint delivery");
+                requeue.push(hint);
+                requeue.extend(pending.drain(..));
                 self.manager
                     .store()
                     .metrics
@@ -196,6 +270,8 @@ impl HintDeliveryService {
             // Check pause state.
             if self.manager.store().is_paused() {
                 debug!(target = %target, "Delivery paused, stopping");
+                requeue.push(hint);
+                requeue.extend(pending.drain(..));
                 self.manager
                     .store()
                     .metrics
@@ -220,7 +296,7 @@ impl HintDeliveryService {
             }
 
             let request = HintRequest {
-                mutation: hint.mutation,
+                mutation: hint.mutation.clone(),
                 hint_id: hint.hint_id,
                 created_at: hint.created_at,
             };
@@ -288,6 +364,7 @@ impl HintDeliveryService {
             } else {
                 warn!(target = %target, "Hint delivery failed after retries");
                 failed += 1;
+                requeue.push(hint);
             }
 
             self.manager
@@ -303,6 +380,11 @@ impl HintDeliveryService {
                     tokio::time::sleep(Duration::from_micros(sleep_us as u64)).await;
                 }
             }
+        }
+
+        let requeued = self.manager.store().requeue_hints(target, requeue);
+        if requeued > 0 {
+            debug!(target = %target, requeued, "Requeued undelivered hints");
         }
 
         self.metrics
@@ -337,14 +419,12 @@ impl HintDeliveryService {
 
     /// Check if shutdown has been signaled (non-blocking poll).
     fn is_shutdown_signaled(&self) -> bool {
-        // Use a zero-duration timeout to check without blocking.
-        // We rely on the `notified()` calls in the delivery loop for actual awaiting.
-        false // The actual shutdown check happens via tokio::select! in the loop.
+        self.shutdown_requested.load(Ordering::SeqCst)
     }
 }
 
 /// Result of a hint delivery run.
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct DeliveryResult {
     /// Number of hints successfully delivered.
     pub delivered: u64,
@@ -405,6 +485,7 @@ mod tests {
         assert_eq!(result.failed, 1);
         assert_eq!(svc.metrics.hints_delivery_failed.load(Ordering::Relaxed), 1);
         assert_eq!(svc.metrics.delivery_runs.load(Ordering::Relaxed), 1);
+        assert!(svc.has_hints_for(&target));
     }
 
     // ── WU-11: Delivery enhancements tests ──────────────────────
@@ -440,6 +521,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_pass_attempts_all_targets_and_requeues_failures() {
+        let config = HintConfig {
+            delivery_throttle_bytes_per_sec: 0,
+            ..HintConfig::default()
+        };
+        let manager = Arc::new(HintedHandoffManager::new(config));
+        let messaging = Arc::new(MessagingService::new("127.0.0.1:0".parse().unwrap()));
+        let svc = HintDeliveryService::new(manager, messaging)
+            .with_delivery_timeout(Duration::from_millis(1))
+            .with_max_retries(0);
+        let target_a = Endpoint::new("127.0.0.2:7000".parse().unwrap());
+        let target_b = Endpoint::new("127.0.0.3:7000".parse().unwrap());
+        let mutation =
+            CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000);
+
+        svc.manager().store().store_hint(target_a, mutation.clone());
+        svc.manager().store().store_hint(target_b, mutation);
+
+        let result = svc.deliver_pending_hints_once().await;
+
+        assert_eq!(result.delivered, 0);
+        assert_eq!(result.failed, 2);
+        assert!(svc.has_hints_for(&target_a));
+        assert!(svc.has_hints_for(&target_b));
+        assert_eq!(svc.metrics.delivery_runs.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn periodic_scheduler_stops_on_shutdown() {
+        let config = HintConfig::default();
+        let manager = Arc::new(HintedHandoffManager::new(config));
+        let messaging = Arc::new(MessagingService::new("127.0.0.1:0".parse().unwrap()));
+        let svc = Arc::new(HintDeliveryService::new(manager, messaging));
+
+        let handle = Arc::clone(&svc).spawn_periodic_delivery(Duration::from_millis(5));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        svc.shutdown();
+
+        tokio::time::timeout(Duration::from_secs(1), handle)
+            .await
+            .expect("periodic scheduler should stop")
+            .expect("periodic scheduler task should not panic");
+    }
+
+    #[tokio::test]
     async fn deliver_paused_returns_empty() {
         let (svc, target) = make_service();
         let mutation =
@@ -452,6 +578,45 @@ mod tests {
         // Drain returns empty when paused.
         assert_eq!(result.delivered, 0);
         assert_eq!(result.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn recovered_node_delivery_filters_invalid_topology_hints() {
+        use cassandra_cluster_metadata::{
+            ClusterMetadata, NodeId, NodeInfo, SimpleSnitch, SimpleStrategy,
+        };
+        use cassandra_common::Token;
+        use std::collections::HashMap;
+
+        let (svc, target) = make_service();
+        let mutation =
+            CoordinatedMutation::simple("ks".into(), "tbl".into(), vec![1], vec![], 1000);
+        svc.manager().store().store_hint(target, mutation);
+        assert!(svc.has_hints_for(&target));
+
+        let node = NodeInfo::new(
+            NodeId::random(),
+            Endpoint::new("127.0.0.3:7000".parse().unwrap()),
+            "dc1",
+            "rack1",
+            vec![Token::from_raw(0)],
+        );
+        let cm = ClusterMetadata::new(node);
+        let snapshot = cm.snapshot();
+        let snitch = SimpleSnitch;
+        let mut strategies: HashMap<
+            String,
+            Box<dyn cassandra_cluster_metadata::ReplicationStrategy>,
+        > = HashMap::new();
+        strategies.insert("ks".to_string(), Box::new(SimpleStrategy::new(1)));
+
+        let result = svc
+            .deliver_hints_for_recovered_node(target, &snapshot, &snitch, &strategies)
+            .await;
+
+        assert_eq!(result.delivered, 0);
+        assert_eq!(result.failed, 0);
+        assert!(!svc.has_hints_for(&target));
     }
 
     // ── WU-13: In-progress metrics tests ────────────────────────

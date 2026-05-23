@@ -16,6 +16,10 @@ use byteorder::{BigEndian, ReadBytesExt};
 
 use super::format::{Component, END_OF_PARTITION, INDEX_MAGIC, ROW_MARKER, SSTableDescriptor};
 use super::reader::read_row_from_reader;
+use super::tombstone_serializer::{
+    PARTITION_DELETION_MARKER, RANGE_TOMBSTONE_BOUND_MARKER, read_partition_deletion,
+    read_range_tombstone_marker,
+};
 use crate::memtable::partition::PartitionData;
 
 /// A single scanned partition with its key and data.
@@ -143,6 +147,16 @@ impl SSTableScanner for ForwardScanner {
             let marker = self.reader.read_u8()?;
             if marker == END_OF_PARTITION {
                 break;
+            }
+            if marker == PARTITION_DELETION_MARKER {
+                let deletion = read_partition_deletion(&mut self.reader)?;
+                partition
+                    .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                continue;
+            }
+            if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                let _ = read_range_tombstone_marker(&mut self.reader)?;
+                continue;
             }
             if marker != ROW_MARKER {
                 return Err(io::Error::new(
@@ -315,5 +329,23 @@ mod tests {
         }
 
         assert_eq!(keys, vec![vec![0], vec![1], vec![2]]);
+    }
+
+    #[test]
+    fn scanner_preserves_partition_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(123, 456);
+        let partitions = vec![(b"pk1".to_vec(), pd)];
+        SSTableWriter::new(desc.clone()).write(&partitions).unwrap();
+
+        let mut scanner = ForwardScanner::new(&desc).unwrap();
+        let scanned = scanner.next_partition().unwrap().unwrap();
+        assert_eq!(scanned.key, b"pk1");
+        assert_eq!(scanned.data.tombstone_timestamp, Some(123));
+        assert_eq!(scanned.data.tombstone_local_deletion_time, Some(456));
+        assert!(scanner.next_partition().unwrap().is_none());
     }
 }

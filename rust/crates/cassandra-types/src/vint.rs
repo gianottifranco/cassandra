@@ -178,8 +178,8 @@ fn decode_uvint(data: &[u8]) -> Result<(u64, usize), VintError> {
     let mask: u8 = (1u8.wrapping_shl((8 - size) as u32)).wrapping_sub(1);
     let mut v = (first & mask) as u64;
 
-    for i in 1..size {
-        v = (v << 8) | data[i] as u64;
+    for byte in data.iter().take(size).skip(1) {
+        v = (v << 8) | *byte as u64;
     }
 
     Ok((v, size))

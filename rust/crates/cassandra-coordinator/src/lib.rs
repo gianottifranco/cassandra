@@ -46,6 +46,7 @@ pub mod hints;
 pub mod paxos;
 pub mod read;
 pub mod storage_proxy;
+pub mod thresholds;
 pub mod tracing;
 pub mod tracing_cleanup;
 pub mod tracing_manager;
@@ -65,10 +66,11 @@ pub use hint_segment::{HintSegmentManager, HintSegmentReader, HintSegmentWriter}
 pub use hints::{Hint, HintConfig, HintMetrics, HintStore, HintedHandoffManager};
 pub use paxos::{Ballot, CasResult, PaxosConfig, PaxosCoordinator, PaxosReplica, PaxosState};
 pub use read::{
-    ClusteringSlice, ColumnFilter, CoordinatedRead, DataRange, DataResolver, DataResponse, Digest,
-    DigestMismatch, DigestResolver, PageSizeControl, PagingState, PartitionRangeReadCommand,
-    PartitionResult, ReadCommand, ReadCoordinator, ReadError, ReadExecutionPlan, ReadExecutorType,
-    ReadLimits, ReadMetrics, ReadRepairHandler, ReadRepairMutation, ReadRepairStrategy,
+    AsyncReadRepairScheduler, ClusteringSlice, ColumnFilter, CoordinatedRead, DataRange,
+    DataResolver, DataResponse, Digest, DigestMismatch, DigestResolver, PageSizeControl,
+    PagingState, PartitionRangeReadCommand, PartitionResult, ReadCommand, ReadCoordinator,
+    ReadError, ReadExecutionPlan, ReadExecutorType, ReadLimits, ReadMetrics,
+    ReadRepairExecutionResult, ReadRepairHandler, ReadRepairMutation, ReadRepairStrategy,
     ReadResponse, ReadResult, ResolvedData, ShortReadProtection, ShortReadRetry,
     SinglePartitionReadCommand, SpeculativeRetryPolicy, TombstoneThresholds, TombstoneTracker,
 };
@@ -86,6 +88,10 @@ pub use write_response_handler::{
 
 pub use hint_delivery::{DeliveryResult, HintDeliveryMetrics, HintDeliveryService};
 pub use storage_proxy::{StorageProxy, StorageProxyConfig};
+pub use thresholds::{
+    CoordinatorOperation, CoordinatorThresholdConfig, CoordinatorThresholdTracker,
+    OperationThresholdSnapshot, OperationThresholds, ThresholdEvent, ThresholdOutcome,
+};
 pub use verb_handlers::{
     BatchRemoveVerbHandler, BatchStoreVerbHandler, HintVerbHandler, MutationVerbHandler,
     ReadDataVerbHandler, ReadDigestVerbHandler, ReadRepairVerbHandler, register_all_verb_handlers,

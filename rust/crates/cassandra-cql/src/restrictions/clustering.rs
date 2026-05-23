@@ -229,4 +229,28 @@ mod tests {
         let result = validate_clustering(&relations, &table).unwrap();
         assert_eq!(result.len(), 2);
     }
+
+    #[test]
+    fn multi_column_clustering_restriction_accepted() {
+        let table = table_with_clustering();
+        let relations = vec![rel("(ck1,ck2)", RelationOp::Gt)];
+        let result = validate_clustering(&relations, &table).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].column_name, "(ck1,ck2)");
+        assert!(matches!(
+            result[0].kind,
+            RestrictionKind::Range { op: RelationOp::Gt }
+        ));
+    }
+
+    #[test]
+    fn multi_column_restriction_rejects_non_clustering_column() {
+        let table = table_with_clustering();
+        let relations = vec![rel("(ck1,v)", RelationOp::Eq)];
+        let result = validate_clustering(&relations, &table);
+        assert!(matches!(
+            result,
+            Err(RestrictionError::InvalidClusteringOrder(_))
+        ));
+    }
 }

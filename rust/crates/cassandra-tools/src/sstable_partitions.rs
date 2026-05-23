@@ -104,12 +104,12 @@ pub fn run(file: &str, top: usize) {
     for (pk, data) in &partitions {
         let pk_str = String::from_utf8_lossy(pk).to_string();
         let row_count = data.rows.len();
-        let cell_count: usize = data.rows.iter().map(|(_, row)| row.cells.len()).sum();
+        let cell_count: usize = data.rows.values().map(|row| row.cells.len()).sum();
         partition_sizes.push((pk_str, row_count, cell_count));
     }
 
     // Sort by cell count descending
-    partition_sizes.sort_by(|a, b| b.2.cmp(&a.2));
+    partition_sizes.sort_by_key(|partition| std::cmp::Reverse(partition.2));
 
     // Print top N partitions
     let display_count = top.min(partition_sizes.len());
@@ -136,7 +136,7 @@ pub fn run(file: &str, top: usize) {
     let count = sizes.len();
     let min = *sizes.last().unwrap_or(&0); // sorted descending, last is min
     let max = *sizes.first().unwrap_or(&0);
-    let avg = if count > 0 { total / count } else { 0 };
+    let avg = total.checked_div(count).unwrap_or(0);
 
     let median = if count == 0 {
         0

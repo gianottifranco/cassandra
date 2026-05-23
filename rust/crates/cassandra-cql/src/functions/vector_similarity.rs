@@ -25,6 +25,8 @@ pub fn register_all(registry: &FunctionRegistry) {
 fn execute_similarity(
     args: &[Option<&[u8]>],
     sim_fn: fn(&cassandra_types::vector::VectorValue, &cassandra_types::vector::VectorValue) -> f32,
+    supports_zero_vectors: bool,
+    function_name: &str,
 ) -> Result<Option<Vec<u8>>, String> {
     let a_bytes = match args.first().and_then(|a| *a) {
         Some(b) => b,
@@ -57,8 +59,18 @@ fn execute_similarity(
         ));
     }
 
+    if !supports_zero_vectors && (is_all_zero(&vec_a) || is_all_zero(&vec_b)) {
+        return Err(format!(
+            "Function {function_name} doesn't support all-zero vectors."
+        ));
+    }
+
     let result = sim_fn(&vec_a, &vec_b);
     Ok(Some(result.to_be_bytes().to_vec()))
+}
+
+fn is_all_zero(vector: &cassandra_types::vector::VectorValue) -> bool {
+    vector.values.iter().all(|value| *value == 0.0)
 }
 
 // ── similarity_cosine ────────────────────────────────────────────────────
@@ -79,7 +91,12 @@ impl CqlFunction for SimilarityCosine {
         CqlType::Float
     }
     fn execute(&self, args: &[Option<&[u8]>]) -> Result<Option<Vec<u8>>, String> {
-        execute_similarity(args, cassandra_types::vector::cosine_similarity)
+        execute_similarity(
+            args,
+            cassandra_types::vector::cosine_similarity,
+            false,
+            self.name(),
+        )
     }
 }
 
@@ -101,7 +118,12 @@ impl CqlFunction for SimilarityEuclidean {
         CqlType::Float
     }
     fn execute(&self, args: &[Option<&[u8]>]) -> Result<Option<Vec<u8>>, String> {
-        execute_similarity(args, cassandra_types::vector::euclidean_distance)
+        execute_similarity(
+            args,
+            cassandra_types::vector::euclidean_distance,
+            true,
+            self.name(),
+        )
     }
 }
 
@@ -123,7 +145,12 @@ impl CqlFunction for SimilarityDotProduct {
         CqlType::Float
     }
     fn execute(&self, args: &[Option<&[u8]>]) -> Result<Option<Vec<u8>>, String> {
-        execute_similarity(args, cassandra_types::vector::dot_product)
+        execute_similarity(
+            args,
+            cassandra_types::vector::dot_product,
+            true,
+            self.name(),
+        )
     }
 }
 
@@ -200,6 +227,37 @@ mod tests {
         let b = serialize_vec(&[1.0, 0.0, 0.0]);
         let result = f.execute(&[Some(&a), Some(&b)]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn cosine_rejects_all_zero_vectors_like_java() {
+        let f = SimilarityCosine;
+        let zero = serialize_vec(&[0.0, 0.0]);
+        let non_zero = serialize_vec(&[1.0, 0.0]);
+
+        let left = f.execute(&[Some(&zero), Some(&non_zero)]).unwrap_err();
+        assert!(left.contains("doesn't support all-zero vectors"));
+
+        let right = f.execute(&[Some(&non_zero), Some(&zero)]).unwrap_err();
+        assert!(right.contains("doesn't support all-zero vectors"));
+    }
+
+    #[test]
+    fn euclidean_and_dot_product_accept_all_zero_vectors_like_java() {
+        let zero = serialize_vec(&[0.0, 0.0]);
+        let non_zero = serialize_vec(&[3.0, 4.0]);
+
+        let euclidean = SimilarityEuclidean
+            .execute(&[Some(&zero), Some(&non_zero)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(f32::from_be_bytes(euclidean.try_into().unwrap()), 5.0);
+
+        let dot = SimilarityDotProduct
+            .execute(&[Some(&zero), Some(&non_zero)])
+            .unwrap()
+            .unwrap();
+        assert_eq!(f32::from_be_bytes(dot.try_into().unwrap()), 0.0);
     }
 
     #[test]

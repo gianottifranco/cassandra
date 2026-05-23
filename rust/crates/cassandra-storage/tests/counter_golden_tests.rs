@@ -17,7 +17,7 @@
 //! Golden tests for CounterContext binary format.
 //! Ensures compatibility with Java Apache Cassandra `org.apache.cassandra.db.context.CounterContext`.
 
-use cassandra_storage::counter::{CounterContext, CounterShard};
+use cassandra_storage::counter::CounterContext;
 use uuid::Uuid;
 
 #[test]

@@ -1230,7 +1230,7 @@ mod tests {
         assert_eq!(tc.epoch().0, 1);
 
         // Verify pending ranges exist.
-        let pending = tc.pending_ranges();
+        let _pending = tc.pending_ranges();
         // May or may not have pending ranges depending on ring state.
 
         tc.finish_bootstrap(&mut new_node, vec![Token::from_raw(50)])

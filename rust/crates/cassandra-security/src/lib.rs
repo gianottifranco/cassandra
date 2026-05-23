@@ -129,7 +129,8 @@ pub enum SecurityError {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn crate_compiles() {
-        assert!(true);
+    fn error_display_is_reachable() {
+        let err = crate::SecurityError::AuthError("denied".to_string());
+        assert!(err.to_string().contains("denied"));
     }
 }

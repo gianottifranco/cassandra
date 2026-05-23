@@ -36,6 +36,31 @@ use crate::response;
 use std::collections::HashSet;
 use std::io;
 
+const SUPPORTED_EVENT_TYPES: &[&str] = &["TOPOLOGY_CHANGE", "STATUS_CHANGE", "SCHEMA_CHANGE"];
+const KNOWN_FRAME_FLAGS: u8 =
+    flags::COMPRESSION | flags::TRACING | flags::CUSTOM_PAYLOAD | flags::WARNING | flags::USE_BETA;
+
+fn is_supported_event_type(event_type: &str) -> bool {
+    SUPPORTED_EVENT_TYPES.contains(&event_type)
+}
+
+fn request_flag_error(version: u8, frame_flags: u8) -> Option<String> {
+    let unknown = frame_flags & !KNOWN_FRAME_FLAGS;
+    if unknown != 0 {
+        return Some(format!("Unknown request frame flags: 0x{unknown:02X}"));
+    }
+
+    if frame_flags & flags::WARNING != 0 {
+        return Some("WARNING flag is only valid on response frames".to_string());
+    }
+
+    if version != 5 && frame_flags & flags::USE_BETA != 0 {
+        return Some("USE_BETA flag is only valid with protocol v5-beta".to_string());
+    }
+
+    None
+}
+
 #[cfg(any(feature = "compression-lz4", feature = "compression-snappy"))]
 use crate::compress::Compression;
 
@@ -126,9 +151,50 @@ impl ConnectionContext {
             return Ok(Some(err));
         }
 
+        if let Some(message) = request_flag_error(version, frame.header.flags) {
+            let err = response::error_frame(version, stream_id, 0x000A, &message);
+            return Ok(Some(err));
+        }
+
+        if frame.header.is_response() {
+            let err = response::error_frame(
+                version,
+                stream_id,
+                0x000A, // PROTOCOL_ERROR
+                &format!(
+                    "Received response frame from client with opcode {:?}",
+                    frame.header.opcode
+                ),
+            );
+            return Ok(Some(err));
+        }
+
+        if !frame.header.opcode.is_request() {
+            let err = response::error_frame(
+                version,
+                stream_id,
+                0x000A, // PROTOCOL_ERROR
+                &format!(
+                    "Received response-only opcode {:?} from client",
+                    frame.header.opcode
+                ),
+            );
+            return Ok(Some(err));
+        }
+
         self.protocol_version = version;
 
-        let msg = request::decode_request(frame)?;
+        let msg = match request::decode_request(frame) {
+            Ok(msg) => msg,
+            Err(e) => {
+                return Ok(Some(response::error_frame(
+                    version,
+                    stream_id,
+                    0x000A,
+                    &format!("Invalid request body: {e}"),
+                )));
+            }
+        };
 
         match (&self.state, &msg) {
             // ── New state ──────────────────────────────────────────
@@ -136,6 +202,32 @@ impl ConnectionContext {
                 Ok(Some(response::supported_frame(version, stream_id)))
             }
             (ConnectionState::New, Message::Startup(startup)) => {
+                match startup.cql_version() {
+                    Some(SUPPORTED_CQL_VERSION) => {}
+                    Some(cql_version) => {
+                        return Ok(Some(response::error_frame(
+                            version,
+                            stream_id,
+                            0x000A,
+                            &format!(
+                                "Unsupported CQL_VERSION {}; supported version is {}",
+                                cql_version, SUPPORTED_CQL_VERSION
+                            ),
+                        )));
+                    }
+                    None => {
+                        return Ok(Some(response::error_frame(
+                            version,
+                            stream_id,
+                            0x000A,
+                            &format!(
+                                "Missing required STARTUP option CQL_VERSION; supported version is {}",
+                                SUPPORTED_CQL_VERSION
+                            ),
+                        )));
+                    }
+                }
+
                 // Negotiate compression.
                 #[cfg(any(feature = "compression-lz4", feature = "compression-snappy"))]
                 if let Some(comp_name) = startup.compression() {
@@ -198,6 +290,16 @@ impl ConnectionContext {
 
             // ── Ready state ────────────────────────────────────────
             (ConnectionState::Ready, Message::Register(reg)) => {
+                for event_type in &reg.event_types {
+                    if !is_supported_event_type(event_type) {
+                        return Ok(Some(response::error_frame(
+                            version,
+                            stream_id,
+                            0x000A,
+                            &format!("Unsupported event type for REGISTER: {event_type}"),
+                        )));
+                    }
+                }
                 for event_type in &reg.event_types {
                     self.registered_events.insert(event_type.clone());
                 }
@@ -284,10 +386,14 @@ mod tests {
     use bytes::{Bytes, BytesMut};
 
     fn make_frame(opcode: Opcode, body: &[u8]) -> Frame {
+        make_frame_with_flags(opcode, 0, body)
+    }
+
+    fn make_frame_with_flags(opcode: Opcode, frame_flags: u8, body: &[u8]) -> Frame {
         Frame {
             header: FrameHeader {
                 version: PROTOCOL_V4,
-                flags: 0,
+                flags: frame_flags,
                 stream_id: 0,
                 opcode,
                 length: body.len() as u32,
@@ -297,9 +403,13 @@ mod tests {
     }
 
     fn startup_body() -> Vec<u8> {
-        let mut buf = BytesMut::new();
         let mut opts = std::collections::HashMap::new();
-        opts.insert("CQL_VERSION".to_string(), "3.4.7".to_string());
+        opts.insert("CQL_VERSION".to_string(), SUPPORTED_CQL_VERSION.to_string());
+        startup_body_with_options(opts)
+    }
+
+    fn startup_body_with_options(opts: std::collections::HashMap<String, String>) -> Vec<u8> {
+        let mut buf = BytesMut::new();
         types::write_string_map(&mut buf, &opts);
         buf.to_vec()
     }
@@ -327,6 +437,49 @@ mod tests {
         assert!(resp.is_some());
         assert_eq!(resp.unwrap().header.opcode, Opcode::Ready);
         assert_eq!(ctx.state, ConnectionState::Ready);
+    }
+
+    #[test]
+    fn lifecycle_startup_rejects_missing_cql_version() {
+        let mut ctx = ConnectionContext::new();
+        let body = startup_body_with_options(std::collections::HashMap::new());
+        let frame = make_frame(Opcode::Startup, &body);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+        assert_eq!(ctx.state, ConnectionState::New);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("CQL_VERSION"));
+        assert!(message.contains(SUPPORTED_CQL_VERSION));
+    }
+
+    #[test]
+    fn lifecycle_startup_rejects_unsupported_cql_version() {
+        let mut ctx = ConnectionContext::new();
+        let mut opts = std::collections::HashMap::new();
+        opts.insert("CQL_VERSION".to_string(), "3.0.0".to_string());
+        let body = startup_body_with_options(opts);
+        let frame = make_frame(Opcode::Startup, &body);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+        assert_eq!(ctx.state, ConnectionState::New);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("Unsupported CQL_VERSION"));
+        assert!(message.contains("3.0.0"));
+        assert!(message.contains(SUPPORTED_CQL_VERSION));
     }
 
     #[test]
@@ -368,6 +521,31 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_query_decode_error_returns_protocol_error() {
+        let mut ctx = ConnectionContext::new();
+        ctx.state = ConnectionState::Ready;
+
+        let mut body = BytesMut::new();
+        types::write_long_string(&mut body, "SELECT * FROM t");
+        types::write_consistency(&mut body, crate::types::Consistency::One);
+        types::write_byte(&mut body, 0);
+        types::write_byte(&mut body, 0xCA);
+        let frame = make_frame(Opcode::Query, &body);
+
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resp.header.opcode, Opcode::Error);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("Invalid request body"));
+        assert!(message.contains("trailing bytes"));
+    }
+
+    #[test]
     fn lifecycle_register_events() {
         let mut ctx = ConnectionContext::new();
         ctx.state = ConnectionState::Ready;
@@ -388,6 +566,126 @@ mod tests {
         assert!(resp.is_some());
         assert_eq!(ctx.registered_events.len(), 3);
         assert!(ctx.registered_events.contains("TOPOLOGY_CHANGE"));
+    }
+
+    #[test]
+    fn lifecycle_register_rejects_unknown_event_type() {
+        let mut ctx = ConnectionContext::new();
+        ctx.state = ConnectionState::Ready;
+
+        let mut body = BytesMut::new();
+        types::write_string_list(
+            &mut body,
+            &["SCHEMA_CHANGE".to_string(), "UNKNOWN_EVENT".to_string()],
+        );
+        let frame = make_frame(Opcode::Register, &body);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+        assert!(ctx.registered_events.is_empty());
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("UNKNOWN_EVENT"));
+    }
+
+    #[test]
+    fn lifecycle_rejects_response_opcode_from_client() {
+        let mut ctx = ConnectionContext::new();
+        ctx.state = ConnectionState::Ready;
+
+        let frame = make_frame(Opcode::Ready, &[]);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+        assert_eq!(resp.header.version, PROTOCOL_V4 | RESPONSE_FLAG);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("response-only opcode"));
+        assert!(message.contains("Ready"));
+    }
+
+    #[test]
+    fn lifecycle_rejects_response_direction_frame_from_client() {
+        let mut ctx = ConnectionContext::new();
+        let mut frame = make_frame(Opcode::Startup, &startup_body());
+        frame.header.version |= RESPONSE_FLAG;
+
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("response frame from client"));
+        assert_eq!(ctx.state, ConnectionState::New);
+    }
+
+    #[test]
+    fn lifecycle_rejects_response_warning_flag_from_client() {
+        let mut ctx = ConnectionContext::new();
+        let frame = make_frame_with_flags(Opcode::Options, flags::WARNING, &[]);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("WARNING flag"));
+        assert_eq!(ctx.state, ConnectionState::New);
+    }
+
+    #[test]
+    fn lifecycle_rejects_unknown_request_flag() {
+        let mut ctx = ConnectionContext::new();
+        let frame = make_frame_with_flags(Opcode::Options, 0x20, &[]);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("Unknown request frame flags"));
+        assert!(message.contains("0x20"));
+    }
+
+    #[test]
+    fn lifecycle_rejects_v4_use_beta_flag() {
+        let mut ctx = ConnectionContext::new();
+        let frame = make_frame_with_flags(Opcode::Options, flags::USE_BETA, &[]);
+        let resp = ctx
+            .process_lifecycle(&frame, &AllowAllAuthenticator)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(resp.header.opcode, Opcode::Error);
+
+        let mut body: &[u8] = &resp.body;
+        assert_eq!(types::read_int(&mut body).unwrap(), 0x000A);
+        let message = types::read_string(&mut body).unwrap();
+        assert!(message.contains("USE_BETA"));
+        assert!(message.contains("v5-beta"));
     }
 
     #[test]

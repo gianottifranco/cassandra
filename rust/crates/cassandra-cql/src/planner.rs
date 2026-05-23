@@ -37,12 +37,14 @@ pub enum QueryPlan {
     Grant(GrantPlan),
     Revoke(RevokePlan),
     ListRoles(ListRolesPlan),
+    ListPermissions(ListPermissionsPlan),
     CreateIndex(CreateIndexPlan),
     DropIndex(DropIndexPlan),
     CreateMaterializedView(CreateMaterializedViewPlan),
     DropMaterializedView(DropMaterializedViewPlan),
     AlterMaterializedView(AlterMaterializedViewPlan),
     CreateType(CreateTypePlan),
+    AlterType(AlterTypePlan),
     DropType(DropTypePlan),
     CreateFunction(CreateFunctionPlan),
     DropFunction(DropFunctionPlan),
@@ -69,6 +71,7 @@ impl QueryPlan {
                 | QueryPlan::DropMaterializedView(_)
                 | QueryPlan::AlterMaterializedView(_)
                 | QueryPlan::CreateType(_)
+                | QueryPlan::AlterType(_)
                 | QueryPlan::DropType(_)
                 | QueryPlan::CreateFunction(_)
                 | QueryPlan::DropFunction(_)
@@ -93,6 +96,7 @@ pub struct AlterKeyspacePlan {
     pub name: String,
     pub replication: Option<HashMap<String, String>>,
     pub durable_writes: Option<bool>,
+    pub comment: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +182,7 @@ pub struct InsertPlan {
     pub if_not_exists: bool,
     /// INSERT JSON term, if present.
     pub json: Option<Term>,
+    pub json_default: JsonDefault,
     /// Client-supplied timestamp from USING TIMESTAMP clause.
     pub using_timestamp: Option<i64>,
     /// Client-supplied TTL from USING TTL clause.
@@ -234,14 +239,23 @@ pub struct CreateRolePlan {
     pub is_superuser: bool,
     pub can_login: bool,
     pub password: Option<String>,
+    pub hashed_password: Option<String>,
+    pub datacenter_access: Option<RoleAccess>,
+    pub cidr_access: Option<RoleAccess>,
+    pub options: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct AlterRolePlan {
     pub name: String,
+    pub if_exists: bool,
     pub password: Option<String>,
+    pub hashed_password: Option<String>,
     pub superuser: Option<bool>,
     pub login: Option<bool>,
+    pub datacenter_access: Option<RoleAccess>,
+    pub cidr_access: Option<RoleAccess>,
+    pub options: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -268,6 +282,13 @@ pub struct RevokePlan {
 pub struct ListRolesPlan {
     pub of_role: Option<String>,
     pub no_recursive: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ListPermissionsPlan {
+    pub permissions: Vec<String>,
+    pub resource: Option<Resource>,
+    pub of_role: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -327,6 +348,13 @@ pub struct CreateTypePlan {
     pub name: String,
     pub if_not_exists: bool,
     pub fields: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AlterTypePlan {
+    pub keyspace: String,
+    pub name: String,
+    pub operation: AlterTypeOp,
 }
 
 #[derive(Debug, Clone)]
@@ -454,6 +482,7 @@ pub fn plan(
                 name: ak.name.clone(),
                 replication: ak.replication.clone(),
                 durable_writes: ak.durable_writes,
+                comment: None,
             }))
         }
 
@@ -542,6 +571,93 @@ pub fn plan(
                 operation: at.operation.clone(),
             }))
         }
+
+        Statement::Comment(comment) => match &comment.target {
+            CommentTarget::Keyspace(name) => {
+                if schema.keyspace(name).is_none() {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "Keyspace '{}' does not exist",
+                        name
+                    )));
+                }
+                Ok(QueryPlan::AlterKeyspace(AlterKeyspacePlan {
+                    name: name.clone(),
+                    replication: None,
+                    durable_writes: None,
+                    comment: Some(comment.comment.clone()),
+                }))
+            }
+            CommentTarget::Table { keyspace, table } => {
+                let ks = resolve_keyspace(keyspace.as_deref(), active_keyspace)?;
+                let mut options = HashMap::new();
+                options.insert("comment".to_string(), comment.comment.clone());
+                Ok(QueryPlan::AlterTable(AlterTablePlan {
+                    keyspace: ks,
+                    name: table.clone(),
+                    operation: AlterTableOp::WithOptions(options),
+                }))
+            }
+            CommentTarget::Column {
+                keyspace,
+                table,
+                column,
+            } => {
+                let ks = resolve_keyspace(keyspace.as_deref(), active_keyspace)?;
+                let table_meta = schema.table(&ks, table).ok_or_else(|| {
+                    PlanError::InvalidQuery(format!("Table '{}.{}' does not exist", ks, table))
+                })?;
+                if table_meta.column(column).is_none() {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "Column '{}.{}.{}' does not exist",
+                        ks, table, column
+                    )));
+                }
+                Ok(QueryPlan::AlterTable(AlterTablePlan {
+                    keyspace: ks,
+                    name: table.clone(),
+                    operation: AlterTableOp::CommentColumn(column.clone(), comment.comment.clone()),
+                }))
+            }
+            CommentTarget::Type { keyspace, name } => {
+                let ks = resolve_keyspace(keyspace.as_deref(), active_keyspace)?;
+                if schema.user_type(&ks, name).is_none() {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "Type '{}.{}' does not exist",
+                        ks, name
+                    )));
+                }
+                Ok(QueryPlan::AlterType(AlterTypePlan {
+                    keyspace: ks,
+                    name: name.clone(),
+                    operation: AlterTypeOp::CommentType(comment.comment.clone()),
+                }))
+            }
+            CommentTarget::Field {
+                keyspace,
+                type_name,
+                field,
+            } => {
+                let ks = resolve_keyspace(keyspace.as_deref(), active_keyspace)?;
+                let user_type = schema.user_type(&ks, type_name).ok_or_else(|| {
+                    PlanError::InvalidQuery(format!("Type '{}.{}' does not exist", ks, type_name))
+                })?;
+                if !user_type
+                    .field_names
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(field))
+                {
+                    return Err(PlanError::InvalidQuery(format!(
+                        "Field '{}' does not exist in type '{}.{}'",
+                        field, ks, type_name
+                    )));
+                }
+                Ok(QueryPlan::AlterType(AlterTypePlan {
+                    keyspace: ks,
+                    name: type_name.clone(),
+                    operation: AlterTypeOp::CommentField(field.clone(), comment.comment.clone()),
+                }))
+            }
+        },
 
         Statement::DropTable(dt) => {
             let ks = resolve_keyspace(dt.keyspace.as_deref(), active_keyspace)?;
@@ -637,6 +753,7 @@ pub fn plan(
                 values: i.values.clone(),
                 if_not_exists: i.if_not_exists,
                 json: i.json.clone(),
+                json_default: i.json_default,
                 using_timestamp,
                 using_ttl,
             }))
@@ -659,6 +776,11 @@ pub fn plan(
         Statement::Delete(d) => {
             let ks = resolve_keyspace(d.keyspace.as_deref(), active_keyspace)?;
             let (using_timestamp, using_ttl) = extract_using(&d.using);
+            if using_ttl.is_some() {
+                return Err(PlanError::InvalidQuery(
+                    "USING TTL is not supported for DELETE statements".to_string(),
+                ));
+            }
             Ok(QueryPlan::Delete(DeletePlan {
                 keyspace: ks,
                 table: d.table.clone(),
@@ -679,9 +801,38 @@ pub fn plan(
         }
 
         Statement::Batch(b) => {
+            let (batch_timestamp, batch_ttl) = extract_using(&b.using);
+            if batch_ttl.is_some() {
+                return Err(PlanError::InvalidQuery(
+                    "Global TTL on the BATCH statement is not supported.".to_string(),
+                ));
+            }
+            if batch_timestamp.is_some() {
+                if matches!(b.batch_type, BatchType::Counter) {
+                    return Err(PlanError::InvalidQuery(
+                        "Cannot provide custom timestamp for counter BATCH".to_string(),
+                    ));
+                }
+                if b.statements.iter().any(batch_statement_has_conditions) {
+                    return Err(PlanError::InvalidQuery(
+                        "Cannot provide custom timestamp for conditional BATCH".to_string(),
+                    ));
+                }
+                if b.statements.iter().any(batch_statement_has_timestamp) {
+                    return Err(PlanError::InvalidQuery(
+                        "Timestamp must be set either on BATCH or individual statements"
+                            .to_string(),
+                    ));
+                }
+            }
+
             let mut plans = Vec::with_capacity(b.statements.len());
             for stmt in &b.statements {
-                plans.push(plan(stmt, schema, active_keyspace)?);
+                let mut child = plan(stmt, schema, active_keyspace)?;
+                if let Some(ts) = batch_timestamp {
+                    apply_batch_timestamp(&mut child, ts)?;
+                }
+                plans.push(child);
             }
             Ok(QueryPlan::Batch(BatchPlan {
                 batch_type: b.batch_type,
@@ -695,13 +846,22 @@ pub fn plan(
             is_superuser: cr.superuser.unwrap_or(false),
             can_login: cr.login.unwrap_or(false),
             password: cr.password.clone(),
+            hashed_password: cr.hashed_password.clone(),
+            datacenter_access: cr.datacenter_access.clone(),
+            cidr_access: cr.cidr_access.clone(),
+            options: cr.options.clone(),
         })),
 
         Statement::AlterRole(ar) => Ok(QueryPlan::AlterRole(AlterRolePlan {
             name: ar.name.clone(),
+            if_exists: ar.if_exists,
             password: ar.password.clone(),
+            hashed_password: ar.hashed_password.clone(),
             superuser: ar.superuser,
             login: ar.login,
+            datacenter_access: ar.datacenter_access.clone(),
+            cidr_access: ar.cidr_access.clone(),
+            options: ar.options.clone(),
         })),
 
         Statement::DropRole(dr) => Ok(QueryPlan::DropRole(DropRolePlan {
@@ -724,6 +884,12 @@ pub fn plan(
         Statement::ListRoles(lr) => Ok(QueryPlan::ListRoles(ListRolesPlan {
             of_role: lr.of_role.clone(),
             no_recursive: lr.no_recursive,
+        })),
+
+        Statement::ListPermissions(lp) => Ok(QueryPlan::ListPermissions(ListPermissionsPlan {
+            permissions: lp.permissions.clone(),
+            resource: lp.resource.clone(),
+            of_role: lp.of_role.clone(),
         })),
 
         Statement::CreateIndex(ci) => {
@@ -903,7 +1069,7 @@ pub fn plan(
             let fields = ct
                 .fields
                 .iter()
-                .map(|(name, typ)| (name.clone(), format!("{:?}", typ)))
+                .map(|(name, typ)| (name.clone(), canonical_ast_type_name(typ)))
                 .collect();
             Ok(QueryPlan::CreateType(CreateTypePlan {
                 keyspace: ks,
@@ -932,9 +1098,14 @@ pub fn plan(
             }))
         }
 
-        Statement::AlterType(_at) => Err(PlanError::InvalidQuery(
-            "ALTER TYPE is not yet fully supported".into(),
-        )),
+        Statement::AlterType(at) => {
+            let ks = resolve_keyspace(at.keyspace.as_deref(), active_keyspace)?;
+            Ok(QueryPlan::AlterType(AlterTypePlan {
+                keyspace: ks,
+                name: at.name.clone(),
+                operation: at.operation.clone(),
+            }))
+        }
 
         Statement::CreateFunction(cf) => {
             let ks = resolve_keyspace(cf.keyspace.as_deref(), active_keyspace)?;
@@ -1017,13 +1188,72 @@ pub fn plan(
         }
 
         Statement::Describe(desc) => Ok(QueryPlan::Describe(DescribePlan {
-            target: desc.target.clone(),
+            target: resolve_describe_target(&desc.target, schema, active_keyspace),
         })),
 
         // Statement types not yet fully plannable
         _ => Err(PlanError::InvalidQuery(
             "statement type not yet supported by the planner".into(),
         )),
+    }
+}
+
+fn resolve_describe_target(
+    target: &DescribeTarget,
+    schema: &SchemaSnapshot,
+    active_keyspace: Option<&str>,
+) -> DescribeTarget {
+    let resolve_keyspace = |keyspace: &Option<String>| {
+        keyspace
+            .clone()
+            .or_else(|| active_keyspace.map(str::to_string))
+    };
+    match target {
+        DescribeTarget::Table(keyspace, name) => {
+            DescribeTarget::Table(resolve_keyspace(keyspace), name.clone())
+        }
+        DescribeTarget::Type(keyspace, name) => {
+            DescribeTarget::Type(resolve_keyspace(keyspace), name.clone())
+        }
+        DescribeTarget::Function(keyspace, name) => {
+            DescribeTarget::Function(resolve_keyspace(keyspace), name.clone())
+        }
+        DescribeTarget::Aggregate(keyspace, name) => {
+            DescribeTarget::Aggregate(resolve_keyspace(keyspace), name.clone())
+        }
+        DescribeTarget::Generic(name) => {
+            if schema.keyspace(name).is_some() {
+                return DescribeTarget::Keyspace(name.clone());
+            }
+            let Some(keyspace) = active_keyspace else {
+                return target.clone();
+            };
+            let Some(ks_meta) = schema.keyspace(keyspace) else {
+                return target.clone();
+            };
+            if ks_meta.table(name).is_some() {
+                return DescribeTarget::Table(Some(keyspace.to_string()), name.clone());
+            }
+            if ks_meta.user_type(name).is_some() {
+                return DescribeTarget::Type(Some(keyspace.to_string()), name.clone());
+            }
+            if ks_meta
+                .functions
+                .values()
+                .any(|function| function.name == *name)
+            {
+                return DescribeTarget::Function(Some(keyspace.to_string()), name.clone());
+            }
+            if ks_meta
+                .aggregates
+                .values()
+                .any(|aggregate| aggregate.name == *name)
+            {
+                return DescribeTarget::Aggregate(Some(keyspace.to_string()), name.clone());
+            }
+            target.clone()
+        }
+        _ => target.clone(),
     }
 }
 
@@ -1054,6 +1284,15 @@ fn validate_selector(
         Selector::Function(_, args) => {
             for arg in args {
                 validate_selector(arg, table)?;
+            }
+        }
+        Selector::Cast { selector, target } => {
+            validate_selector(selector, table)?;
+            if target.resolve().is_none() {
+                return Err(PlanError::InvalidQuery(format!(
+                    "Unsupported cast target type '{:?}'",
+                    target
+                )));
             }
         }
         Selector::Alias { selector, .. } => {
@@ -1194,9 +1433,10 @@ fn selector_is_aggregate(
         Selector::Function(name, args) => {
             matches!(
                 name.to_ascii_lowercase().as_str(),
-                "count" | "sum" | "avg" | "min" | "max"
+                "count" | "count_rows" | "countrows" | "sum" | "avg" | "min" | "max"
             ) || selector_matches_user_aggregate(name, args, table, keyspace)
         }
+        Selector::Cast { .. } => false,
         Selector::Alias { selector, .. } => selector_is_aggregate(selector, table, keyspace),
         _ => false,
     }
@@ -1231,17 +1471,26 @@ fn selector_result_type_name(selector: &Selector, table: &TableMetadata) -> Opti
             .map(|column| column.column_type.cql_name()),
         Selector::Alias { selector, .. } => selector_result_type_name(selector, table),
         Selector::Count => Some("bigint".to_string()),
-        Selector::Function(name, _) if name.eq_ignore_ascii_case("count") => {
+        Selector::Function(name, _) if is_count_rows_selector_name(name) => {
             Some("bigint".to_string())
         }
+        Selector::Cast { target, .. } => target.resolve().map(|target| target.cql_name()),
         _ => None,
     }
+}
+
+fn is_count_rows_selector_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "count" | "count_rows" | "countrows"
+    )
 }
 
 fn selector_column_name(selector: &Selector) -> Option<&str> {
     match selector {
         Selector::Column(name) => Some(name.as_str()),
         Selector::Alias { selector, .. } => selector_column_name(selector),
+        Selector::Cast { .. } => None,
         _ => None,
     }
 }
@@ -1265,6 +1514,38 @@ fn extract_using(using: &[UsingClause]) -> (Option<i64>, Option<i32>) {
         }
     }
     (ts, ttl)
+}
+
+fn batch_statement_has_timestamp(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Insert(insert) => extract_using(&insert.using).0.is_some(),
+        Statement::Update(update) => extract_using(&update.using).0.is_some(),
+        Statement::Delete(delete) => extract_using(&delete.using).0.is_some(),
+        _ => false,
+    }
+}
+
+fn batch_statement_has_conditions(stmt: &Statement) -> bool {
+    match stmt {
+        Statement::Insert(insert) => insert.if_not_exists,
+        Statement::Update(update) => update.if_exists || !update.if_conditions.is_empty(),
+        Statement::Delete(delete) => delete.if_exists || !delete.if_conditions.is_empty(),
+        _ => false,
+    }
+}
+
+fn apply_batch_timestamp(plan: &mut QueryPlan, timestamp: i64) -> Result<(), PlanError> {
+    match plan {
+        QueryPlan::Insert(insert) => insert.using_timestamp = Some(timestamp),
+        QueryPlan::Update(update) => update.using_timestamp = Some(timestamp),
+        QueryPlan::Delete(delete) => delete.using_timestamp = Some(timestamp),
+        _ => {
+            return Err(PlanError::InvalidQuery(
+                "Batch statements may only contain INSERT, UPDATE, or DELETE".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn resolve_keyspace(explicit: Option<&str>, active: Option<&str>) -> Result<String, PlanError> {
@@ -1327,7 +1608,20 @@ fn render_term_literal(term: &Term) -> String {
         Term::Literal(Literal::Uuid(value)) => value.clone(),
         Term::Literal(Literal::Boolean(value)) => value.to_string(),
         Term::Literal(Literal::Null) => "null".to_string(),
-        Term::TypeHint(_, inner) => render_term_literal(inner),
+        Term::TypeHint(type_hint, inner) => {
+            format!(
+                "({}) {}",
+                render_ast_type_name(type_hint),
+                render_term_literal(inner)
+            )
+        }
+        Term::CollectionElement { key, value } => {
+            format!(
+                "[{}] {}",
+                render_term_literal(key),
+                render_term_literal(value)
+            )
+        }
         Term::CollectionLiteral(values) => {
             let values = values
                 .iter()
@@ -1478,7 +1772,7 @@ mod tests {
     use crate::parser;
     use cassandra_schema::{
         ColumnMetadata, KeyspaceMetadata, KeyspaceParams, SchemaSnapshot, TableMetadataBuilder,
-        UserAggregate,
+        UserAggregate, UserFunction, UserType,
     };
     use cassandra_types::CqlType;
 
@@ -1511,6 +1805,29 @@ mod tests {
             .with_initcond("0");
         let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default())
             .with_table(table)
+            .with_aggregate(aggregate);
+        let mut snapshot = SchemaSnapshot::empty();
+        snapshot.keyspaces.insert("test_ks".to_string(), ks);
+        snapshot
+    }
+
+    fn schema_with_describe_objects() -> SchemaSnapshot {
+        let table = TableMetadataBuilder::new("test_ks", "events")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular("v", CqlType::Int))
+            .build();
+        let user_type = UserType::new("test_ks", "address").with_field("street", "text");
+        let function =
+            UserFunction::new("test_ks", "normalize_name", "text", "java", "return input;")
+                .with_arg("input", "text");
+        let aggregate = UserAggregate::new("test_ks", "sum_bucket", "int", "plus")
+            .with_arg_type("int")
+            .with_return_type("int")
+            .with_initcond("0");
+        let ks = KeyspaceMetadata::new("test_ks", KeyspaceParams::default())
+            .with_table(table)
+            .with_type(user_type)
+            .with_function(function)
             .with_aggregate(aggregate);
         let mut snapshot = SchemaSnapshot::empty();
         snapshot.keyspaces.insert("test_ks".to_string(), ks);
@@ -1585,6 +1902,48 @@ mod tests {
     }
 
     #[test]
+    fn plan_describe_resolves_generic_schema_objects() {
+        let schema = schema_with_describe_objects();
+
+        let cases = [
+            (
+                "DESCRIBE test_ks",
+                None,
+                DescribeTarget::Keyspace("test_ks".to_string()),
+            ),
+            (
+                "DESCRIBE events",
+                Some("test_ks"),
+                DescribeTarget::Table(Some("test_ks".to_string()), "events".to_string()),
+            ),
+            (
+                "DESCRIBE address",
+                Some("test_ks"),
+                DescribeTarget::Type(Some("test_ks".to_string()), "address".to_string()),
+            ),
+            (
+                "DESCRIBE normalize_name",
+                Some("test_ks"),
+                DescribeTarget::Function(Some("test_ks".to_string()), "normalize_name".to_string()),
+            ),
+            (
+                "DESCRIBE sum_bucket",
+                Some("test_ks"),
+                DescribeTarget::Aggregate(Some("test_ks".to_string()), "sum_bucket".to_string()),
+            ),
+        ];
+
+        for (cql, active_keyspace, expected) in cases {
+            let stmt = parser::parse(cql).unwrap();
+            let planned = plan(&stmt, &schema, active_keyspace).unwrap();
+            let QueryPlan::Describe(describe) = planned else {
+                panic!("expected Describe plan for {cql}");
+            };
+            assert_eq!(describe.target, expected);
+        }
+    }
+
+    #[test]
     fn plan_create_keyspace() {
         let schema = SchemaSnapshot::empty();
         let stmt = parser::parse(
@@ -1597,6 +1956,29 @@ mod tests {
                 assert!(ck.durable_writes);
             }
             _ => panic!("expected CreateKeyspace"),
+        }
+    }
+
+    #[test]
+    fn plan_role_custom_options() {
+        let schema = test_schema();
+        let stmt = parser::parse("CREATE ROLE r WITH OPTIONS = {'a':'b', 'b':1}").unwrap();
+        let planned = plan(&stmt, &schema, None).unwrap();
+        match planned {
+            QueryPlan::CreateRole(plan) => {
+                assert_eq!(plan.options.get("a").map(String::as_str), Some("b"));
+                assert_eq!(plan.options.get("b").map(String::as_str), Some("1"));
+            }
+            _ => panic!("expected CreateRole plan"),
+        }
+
+        let stmt = parser::parse("ALTER ROLE r WITH OPTIONS = {'region':'west'}").unwrap();
+        let planned = plan(&stmt, &schema, None).unwrap();
+        match planned {
+            QueryPlan::AlterRole(plan) => {
+                assert_eq!(plan.options.get("region").map(String::as_str), Some("west"));
+            }
+            _ => panic!("expected AlterRole plan"),
         }
     }
 
@@ -1976,6 +2358,29 @@ mod tests {
     }
 
     #[test]
+    fn plan_delete_rejects_ttl_if_ast_contains_it() {
+        let schema = test_schema();
+        let stmt = Statement::Delete(Delete {
+            columns: Vec::new(),
+            keyspace: Some("test_ks".to_string()),
+            table: "users".to_string(),
+            using: vec![UsingClause::Ttl(Term::Literal(Literal::Integer(60)))],
+            where_clause: vec![Relation {
+                column: "id".to_string(),
+                op: RelationOp::Eq,
+                value: Term::Literal(Literal::Integer(1)),
+            }],
+            if_exists: false,
+            if_conditions: Vec::new(),
+        });
+        let err = plan(&stmt, &schema, Some("test_ks")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("USING TTL is not supported for DELETE")
+        );
+    }
+
+    #[test]
     fn plan_insert_no_using_clause() {
         let schema = test_schema();
         let stmt =
@@ -1988,6 +2393,102 @@ mod tests {
             }
             _ => panic!("expected Insert"),
         }
+    }
+
+    #[test]
+    fn plan_batch_using_timestamp_propagates_to_child_mutations() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "BEGIN BATCH USING TIMESTAMP 42
+                INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com');
+                UPDATE test_ks.users SET email = 'c@d.com' WHERE id = 1;
+                DELETE FROM test_ks.users WHERE id = 2;
+             APPLY BATCH",
+        )
+        .unwrap();
+        let p = plan(&stmt, &schema, Some("test_ks")).unwrap();
+        let QueryPlan::Batch(batch) = p else {
+            panic!("expected Batch");
+        };
+        assert_eq!(batch.plans.len(), 3);
+        assert!(matches!(
+            &batch.plans[0],
+            QueryPlan::Insert(InsertPlan {
+                using_timestamp: Some(42),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &batch.plans[1],
+            QueryPlan::Update(UpdatePlan {
+                using_timestamp: Some(42),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &batch.plans[2],
+            QueryPlan::Delete(DeletePlan {
+                using_timestamp: Some(42),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn plan_batch_rejects_global_ttl_like_java() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "BEGIN BATCH USING TTL 60
+                INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com');
+             APPLY BATCH",
+        )
+        .unwrap();
+        let err = plan(&stmt, &schema, Some("test_ks")).unwrap_err();
+        assert!(err.to_string().contains("Global TTL on the BATCH"));
+    }
+
+    #[test]
+    fn plan_batch_rejects_mixed_global_and_statement_timestamp_like_java() {
+        let schema = test_schema();
+        let stmt = parser::parse(
+            "BEGIN BATCH USING TIMESTAMP 42
+                INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com') USING TIMESTAMP 43;
+             APPLY BATCH",
+        )
+        .unwrap();
+        let err = plan(&stmt, &schema, Some("test_ks")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Timestamp must be set either on BATCH or individual statements")
+        );
+    }
+
+    #[test]
+    fn plan_batch_rejects_global_timestamp_for_conditional_and_counter_batches() {
+        let schema = test_schema();
+        let conditional = parser::parse(
+            "BEGIN BATCH USING TIMESTAMP 42
+                INSERT INTO test_ks.users (id, email) VALUES (1, 'a@b.com') IF NOT EXISTS;
+             APPLY BATCH",
+        )
+        .unwrap();
+        let err = plan(&conditional, &schema, Some("test_ks")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot provide custom timestamp for conditional BATCH")
+        );
+
+        let counter = parser::parse(
+            "BEGIN COUNTER BATCH USING TIMESTAMP 42
+                UPDATE test_ks.users SET email = 'c@d.com' WHERE id = 1;
+             APPLY BATCH",
+        )
+        .unwrap();
+        let err = plan(&counter, &schema, Some("test_ks")).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Cannot provide custom timestamp for counter BATCH")
+        );
     }
 
     // ── WU-14: extract_using helper ──

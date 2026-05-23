@@ -71,6 +71,8 @@ pub struct KeyspaceParams {
     pub replication: ReplicationParams,
     #[serde(default = "default_durable_writes")]
     pub durable_writes: bool,
+    #[serde(default)]
+    pub comment: String,
 }
 
 fn default_durable_writes() -> bool {
@@ -82,6 +84,7 @@ impl Default for KeyspaceParams {
         Self {
             replication: ReplicationParams::simple(1),
             durable_writes: true,
+            comment: String::new(),
         }
     }
 }
@@ -129,6 +132,7 @@ impl KeyspaceMetadata {
             params: KeyspaceParams {
                 replication: ReplicationParams::local(),
                 durable_writes: true,
+                comment: String::new(),
             },
             tables: BTreeMap::new(),
             views: BTreeMap::new(),

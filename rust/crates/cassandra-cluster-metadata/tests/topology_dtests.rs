@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
 use cassandra_cluster_metadata::cluster::ClusterMetadata;
-use cassandra_cluster_metadata::node::{Endpoint, NodeId, NodeInfo, NodeState};
+use cassandra_cluster_metadata::node::{Endpoint, NodeId, NodeInfo};
 use cassandra_cluster_metadata::topology::{
     TopologyCoordinator, TopologyError, TopologyOperation, TopologyState,
 };

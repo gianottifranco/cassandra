@@ -15,6 +15,10 @@ use crc32fast::Hasher;
 use super::bloom::BloomFilter;
 use super::format::*;
 use super::metadata::MetadataSerializer;
+use super::tombstone_serializer::{
+    PARTITION_DELETION_MARKER, RANGE_TOMBSTONE_BOUND_MARKER, read_partition_deletion,
+    read_range_tombstone_marker,
+};
 
 /// Severity of a verification issue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +192,30 @@ impl SSTableVerifier {
 
                 if marker == END_OF_PARTITION {
                     break;
+                }
+
+                if marker == PARTITION_DELETION_MARKER {
+                    if let Err(e) = read_partition_deletion(&mut cursor) {
+                        issues.push(VerificationIssue {
+                            severity: Severity::Error,
+                            component: Component::Data,
+                            message: format!("Data.db partition deletion parse error: {e}"),
+                        });
+                        return;
+                    }
+                    continue;
+                }
+
+                if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                    if let Err(e) = read_range_tombstone_marker(&mut cursor) {
+                        issues.push(VerificationIssue {
+                            severity: Severity::Error,
+                            component: Component::Data,
+                            message: format!("Data.db range tombstone marker parse error: {e}"),
+                        });
+                        return;
+                    }
+                    continue;
                 }
 
                 if marker != ROW_MARKER {
@@ -468,6 +496,25 @@ mod tests {
             .collect();
         assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
         assert!(result.is_valid());
+    }
+
+    #[test]
+    fn verify_accepts_partition_deletion_marker() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(123, 456);
+        SSTableWriter::new(desc.clone())
+            .write(&[(b"pk".to_vec(), pd)])
+            .unwrap();
+
+        let result = SSTableVerifier::verify(&desc);
+        let errors: Vec<_> = result
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .collect();
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
     }
 
     #[test]

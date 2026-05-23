@@ -573,15 +573,9 @@ impl Default for WriteMetrics {
 
 // ─── Write Coordinator ──────────────────────────────────────────
 
-/// The write coordinator.
-///
-/// Routes mutations to the correct replicas based on the partition key,
-/// waits for the required number of acks (per CL), and handles failures
-/// with hint storage.
-///
-/// ## Java Oracle
-///
-/// `org.apache.cassandra.service.StorageProxy.performWrite()`
+// The write coordinator routes mutations to the correct replicas, waits for
+// the required number of acks, and handles failures with hint storage.
+// Java Oracle: `org.apache.cassandra.service.StorageProxy.performWrite()`.
 
 /// Default backpressure threshold for view update backlog.
 ///
@@ -700,6 +694,13 @@ impl WriteCoordinator {
     pub fn with_view_existing_row_reader(mut self, reader: ViewExistingRowReader) -> Self {
         self.view_existing_row_reader = Some(reader);
         self
+    }
+
+    pub fn async_view_fanout_dispatcher(&self) -> AsyncViewFanoutDispatcher {
+        AsyncViewFanoutDispatcher::new(
+            Arc::clone(&self.view_fanout_metrics),
+            Arc::clone(&self.view_update_backlog),
+        )
     }
 
     pub fn set_bootstrapping(&mut self, bootstrapping: bool) {
@@ -960,6 +961,141 @@ impl WriteCoordinator {
             MutationKind::Counter => WriteType::Counter,
             MutationKind::View => WriteType::View,
         }
+    }
+
+    fn coordinated_view_mutation(
+        view_mutation: &cassandra_storage::materialized_views::ViewMutation,
+    ) -> CoordinatedMutation {
+        let cells = view_mutation
+            .columns
+            .iter()
+            .map(|(column, value)| CellMutation {
+                column: column.clone(),
+                value: value.clone(),
+                timestamp: view_mutation.timestamp,
+                ttl: 0,
+                is_tombstone: view_mutation.is_delete || value.is_none(),
+                collection_op: None,
+            })
+            .collect();
+
+        let rows = if view_mutation.is_delete && view_mutation.columns.is_empty() {
+            Vec::new()
+        } else {
+            vec![MutationRow {
+                clustering_key: Vec::new(),
+                cells,
+                is_tombstone: view_mutation.is_delete,
+                range_tombstone: None,
+            }]
+        };
+
+        CoordinatedMutation {
+            keyspace: view_mutation.keyspace.clone(),
+            table: view_mutation.view_table.clone(),
+            partition_key: view_mutation.partition_key.clone(),
+            rows,
+            timestamp: view_mutation.timestamp,
+            kind: MutationKind::View,
+            static_cells: Vec::new(),
+            partition_tombstone: if view_mutation.is_delete {
+                Some(TombstoneMarker {
+                    deletion_time: view_mutation.timestamp,
+                    local_deletion_time: Self::now_in_seconds(),
+                })
+            } else {
+                None
+            },
+        }
+    }
+
+    fn augmented_mutations_from_triggers(
+        &self,
+        mutation: &CoordinatedMutation,
+        trigger_manager: Option<&cassandra_storage::triggers::TriggerManager>,
+    ) -> Result<Vec<CoordinatedMutation>, WriteError> {
+        let mut augmented_mutations = Vec::new();
+        if let Some(tm) = trigger_manager {
+            if tm.has_triggers_for(&mutation.keyspace, &mutation.table) {
+                let mutation_bytes = serde_json::to_vec(mutation).unwrap_or_default();
+                let augmented =
+                    tm.augment_mutation(&mutation.keyspace, &mutation.table, &mutation_bytes);
+                for bytes in augmented {
+                    let augmented_mutation: CoordinatedMutation = serde_json::from_slice(&bytes)
+                        .map_err(|e| {
+                            WriteError::Internal(format!(
+                                "Trigger returned invalid augmented mutation: {e}"
+                            ))
+                        })?;
+                    augmented_mutations.push(augmented_mutation);
+                }
+                debug!(
+                    keyspace = %mutation.keyspace,
+                    table = %mutation.table,
+                    augmented_count = augmented_mutations.len(),
+                    "Trigger augmented mutations decoded"
+                );
+            }
+        }
+
+        Ok(augmented_mutations)
+    }
+
+    fn existing_view_row(
+        &self,
+        mutation: &CoordinatedMutation,
+        view_manager: Option<&cassandra_storage::materialized_views::ViewManager>,
+    ) -> Option<HashMap<String, Option<Vec<u8>>>> {
+        if view_manager.is_some_and(|vm| vm.has_views_for(&mutation.keyspace, &mutation.table)) {
+            self.view_existing_row_reader
+                .as_ref()
+                .and_then(|reader| reader(mutation))
+        } else {
+            None
+        }
+    }
+
+    fn generate_view_updates_for_mutation(
+        &self,
+        mutation: &CoordinatedMutation,
+        view_manager: &cassandra_storage::materialized_views::ViewManager,
+        existing_row: Option<HashMap<String, Option<Vec<u8>>>>,
+    ) -> Option<cassandra_storage::materialized_views::ViewUpdateResult> {
+        if !view_manager.has_views_for(&mutation.keyspace, &mutation.table) {
+            return None;
+        }
+
+        let columns: HashMap<String, Option<Vec<u8>>> = mutation
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter())
+            .chain(mutation.static_cells.iter())
+            .map(|cell| (cell.column.clone(), cell.value.clone()))
+            .collect();
+
+        let is_delete = mutation.partition_tombstone.is_some()
+            || (!mutation.rows.is_empty() && mutation.rows.iter().all(|row| row.is_tombstone));
+
+        Some(if existing_row.is_some() {
+            view_manager.generate_view_updates_with_existing(
+                &mutation.keyspace,
+                &mutation.table,
+                &mutation.partition_key,
+                &columns,
+                mutation.timestamp,
+                is_delete,
+                existing_row,
+            )
+        } else {
+            view_manager.generate_view_updates(
+                &mutation.keyspace,
+                &mutation.table,
+                &mutation.partition_key,
+                &columns,
+                mutation.timestamp,
+                is_delete,
+            )
+        })
     }
 
     /// Evaluate a write plan using actual acknowledgements and hints.
@@ -1445,39 +1581,9 @@ impl WriteCoordinator {
         trigger_manager: Option<&cassandra_storage::triggers::TriggerManager>,
     ) -> Result<(WriteResult, ViewFanoutResult), WriteError> {
         // Step 1: Trigger augmentation (WU-19)
-        let mut augmented_mutations = Vec::new();
-        if let Some(tm) = trigger_manager {
-            if tm.has_triggers_for(&mutation.keyspace, &mutation.table) {
-                let mutation_bytes = serde_json::to_vec(mutation).unwrap_or_default();
-                let augmented =
-                    tm.augment_mutation(&mutation.keyspace, &mutation.table, &mutation_bytes);
-                for bytes in augmented {
-                    let augmented_mutation: CoordinatedMutation = serde_json::from_slice(&bytes)
-                        .map_err(|e| {
-                            WriteError::Internal(format!(
-                                "Trigger returned invalid augmented mutation: {e}"
-                            ))
-                        })?;
-                    augmented_mutations.push(augmented_mutation);
-                }
-                debug!(
-                    keyspace = %mutation.keyspace,
-                    table = %mutation.table,
-                    augmented_count = augmented_mutations.len(),
-                    "Trigger augmented mutations decoded"
-                );
-            }
-        }
-
-        let existing_row = if view_manager
-            .is_some_and(|vm| vm.has_views_for(&mutation.keyspace, &mutation.table))
-        {
-            self.view_existing_row_reader
-                .as_ref()
-                .and_then(|reader| reader(mutation))
-        } else {
-            None
-        };
+        let augmented_mutations =
+            self.augmented_mutations_from_triggers(mutation, trigger_manager)?;
+        let existing_row = self.existing_view_row(mutation, view_manager);
 
         // Step 2: Coordinate the base mutation
         let result = self.coordinate_write(mutation, cl, strategy, snitch)?;
@@ -1488,40 +1594,9 @@ impl WriteCoordinator {
         // Step 3: MV fanout
         let mut fanout = ViewFanoutResult::default();
         if let Some(vm) = view_manager {
-            if vm.has_views_for(&mutation.keyspace, &mutation.table) {
-                let columns: HashMap<String, Option<Vec<u8>>> = mutation
-                    .rows
-                    .iter()
-                    .flat_map(|r| r.cells.iter())
-                    .map(|c| (c.column.clone(), c.value.clone()))
-                    .collect();
-
-                let is_delete = mutation.partition_tombstone.is_some()
-                    || mutation.rows.iter().all(|r| r.is_tombstone);
-
-                // Use the existing-row-aware method when we have prior state,
-                // otherwise fall back to the simple method (WU-18).
-                let view_result = if existing_row.is_some() {
-                    vm.generate_view_updates_with_existing(
-                        &mutation.keyspace,
-                        &mutation.table,
-                        &mutation.partition_key,
-                        &columns,
-                        mutation.timestamp,
-                        is_delete,
-                        existing_row,
-                    )
-                } else {
-                    vm.generate_view_updates(
-                        &mutation.keyspace,
-                        &mutation.table,
-                        &mutation.partition_key,
-                        &columns,
-                        mutation.timestamp,
-                        is_delete,
-                    )
-                };
-
+            if let Some(view_result) =
+                self.generate_view_updates_for_mutation(mutation, vm, existing_row)
+            {
                 fanout.mutations_generated = view_result.mutations.len();
                 self.view_fanout_metrics
                     .view_mutations_generated
@@ -1544,23 +1619,7 @@ impl WriteCoordinator {
 
                 // Apply each view mutation at CL=ONE (best-effort)
                 for vm_mutation in &view_result.mutations {
-                    let view_coordinated = CoordinatedMutation {
-                        keyspace: vm_mutation.keyspace.clone(),
-                        table: vm_mutation.view_table.clone(),
-                        partition_key: vm_mutation.partition_key.clone(),
-                        rows: vec![],
-                        timestamp: vm_mutation.timestamp,
-                        kind: MutationKind::View,
-                        static_cells: vec![],
-                        partition_tombstone: if vm_mutation.is_delete {
-                            Some(TombstoneMarker {
-                                deletion_time: vm_mutation.timestamp,
-                                local_deletion_time: Self::now_in_seconds(),
-                            })
-                        } else {
-                            None
-                        },
-                    };
+                    let view_coordinated = Self::coordinated_view_mutation(vm_mutation);
 
                     match self.coordinate_write(
                         &view_coordinated,
@@ -1591,6 +1650,54 @@ impl WriteCoordinator {
                 // Decrement backlog after view mutations are processed (WU-18)
                 self.view_update_backlog
                     .fetch_sub(view_result.mutations.len() as u64, Ordering::Relaxed);
+            }
+        }
+
+        Ok((result, fanout))
+    }
+
+    /// Coordinate a write and enqueue materialized-view updates for async fanout.
+    ///
+    /// Java separates base mutation acknowledgement from view update execution.
+    /// This entry point coordinates the base mutation and trigger augmentations,
+    /// then schedules generated view mutations on the provided dispatcher for a
+    /// later worker/drain pass instead of applying them inline.
+    pub fn coordinate_write_with_async_view_hooks(
+        &self,
+        mutation: &CoordinatedMutation,
+        cl: ConsistencyLevel,
+        strategy: &dyn ReplicationStrategy,
+        snitch: &dyn Snitch,
+        view_manager: Option<&cassandra_storage::materialized_views::ViewManager>,
+        trigger_manager: Option<&cassandra_storage::triggers::TriggerManager>,
+        dispatcher: &AsyncViewFanoutDispatcher,
+    ) -> Result<(WriteResult, ViewFanoutResult), WriteError> {
+        let augmented_mutations =
+            self.augmented_mutations_from_triggers(mutation, trigger_manager)?;
+        let existing_row = self.existing_view_row(mutation, view_manager);
+
+        let result = self.coordinate_write(mutation, cl, strategy, snitch)?;
+        for augmented in &augmented_mutations {
+            self.coordinate_write(augmented, cl, strategy, snitch)?;
+        }
+
+        let mut fanout = ViewFanoutResult::default();
+        if let Some(vm) = view_manager {
+            if let Some(view_result) =
+                self.generate_view_updates_for_mutation(mutation, vm, existing_row)
+            {
+                fanout.mutations_generated = dispatcher.enqueue(view_result.mutations);
+
+                let backlog = self.view_update_backlog.load(Ordering::Relaxed);
+                if backlog > self.view_update_backlog_threshold {
+                    warn!(
+                        backlog,
+                        threshold = self.view_update_backlog_threshold,
+                        keyspace = %mutation.keyspace,
+                        table = %mutation.table,
+                        "View update backlog exceeds threshold during async fanout scheduling"
+                    );
+                }
             }
         }
 
@@ -2117,6 +2224,110 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+    }
+
+    #[test]
+    fn view_fanout_preserves_generated_columns() {
+        use cassandra_storage::materialized_views::ViewMutation;
+
+        let mut columns = HashMap::new();
+        columns.insert("name".to_string(), Some(b"Alice".to_vec()));
+        columns.insert("email".to_string(), Some(b"alice@example.com".to_vec()));
+
+        let view_mutation = ViewMutation {
+            keyspace: "ks".to_string(),
+            view_table: "users_by_email".to_string(),
+            partition_key: b"alice@example.com".to_vec(),
+            columns,
+            timestamp: 1234,
+            is_delete: false,
+        };
+
+        let coordinated = WriteCoordinator::coordinated_view_mutation(&view_mutation);
+
+        assert_eq!(coordinated.kind, MutationKind::View);
+        assert_eq!(coordinated.keyspace, "ks");
+        assert_eq!(coordinated.table, "users_by_email");
+        assert_eq!(coordinated.partition_key, b"alice@example.com");
+        assert_eq!(coordinated.timestamp, 1234);
+        assert!(coordinated.partition_tombstone.is_none());
+        assert_eq!(coordinated.rows.len(), 1);
+
+        let cells = &coordinated.rows[0].cells;
+        assert_eq!(cells.len(), 2);
+        assert!(
+            cells.iter().any(|cell| {
+                cell.column == "name" && cell.value.as_deref() == Some(&b"Alice"[..])
+            })
+        );
+        assert!(cells.iter().any(|cell| {
+            cell.column == "email" && cell.value.as_deref() == Some(&b"alice@example.com"[..])
+        }));
+    }
+
+    #[test]
+    fn coordinate_write_with_async_view_hooks_enqueues_view_updates() {
+        use cassandra_storage::materialized_views::{MaterializedViewDefinition, ViewManager};
+
+        let (_cm, coordinator) = setup_cluster();
+        let strategy = SimpleStrategy::new(3);
+        let snitch = SimpleSnitch;
+        let vm = ViewManager::new();
+        let dispatcher = coordinator.async_view_fanout_dispatcher();
+
+        vm.register(MaterializedViewDefinition {
+            name: "users_by_name".to_string(),
+            keyspace: "ks".to_string(),
+            base_table: "users".to_string(),
+            view_table: "users_by_name".to_string(),
+            included_columns: vec!["name".to_string()],
+            where_clause: String::new(),
+            include_all_columns: false,
+            view_pk_columns: Vec::new(),
+        })
+        .unwrap();
+
+        let (result, fanout) = coordinator
+            .coordinate_write_with_async_view_hooks(
+                &test_mutation(),
+                ConsistencyLevel::One,
+                &strategy,
+                &snitch,
+                Some(&vm),
+                None,
+                &dispatcher,
+            )
+            .unwrap();
+
+        assert!(result.acks_received >= 1);
+        assert_eq!(fanout.mutations_generated, 1);
+        assert_eq!(fanout.mutations_applied, 0);
+        assert_eq!(dispatcher.pending_count(), 1);
+        assert_eq!(coordinator.view_update_backlog.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            coordinator
+                .view_fanout_metrics
+                .view_mutations_generated
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let drain = dispatcher.drain_with(|view_mutation| {
+            let coordinated = WriteCoordinator::coordinated_view_mutation(view_mutation);
+            assert_eq!(coordinated.kind, MutationKind::View);
+            assert_eq!(coordinated.rows.len(), 1);
+            assert_eq!(coordinated.rows[0].cells.len(), 1);
+            assert_eq!(coordinated.rows[0].cells[0].column, "name");
+            assert_eq!(
+                coordinated.rows[0].cells[0].value.as_deref(),
+                Some(&b"Alice"[..])
+            );
+            Ok(())
+        });
+
+        assert_eq!(drain.mutations_applied, 1);
+        assert_eq!(dispatcher.pending_count(), 0);
+        assert_eq!(coordinator.view_update_backlog.load(Ordering::Relaxed), 0);
     }
 
     #[test]

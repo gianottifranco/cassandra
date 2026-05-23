@@ -24,6 +24,7 @@ pub use noop::NoopCompressor;
 pub use snappy::SnappyCompressor;
 pub use zstd_comp::ZstdCompressor;
 
+use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
 
@@ -31,6 +32,9 @@ use crate::error::IoError;
 
 /// Default recommended buffer size (64 KiB).
 const DEFAULT_BUFFER_SIZE: usize = 64 * 1024;
+pub const ZSTD_DICTIONARY_OPTION: &str = "dictionary";
+pub const ZSTD_DICTIONARY_HEX_OPTION: &str = "dictionary_hex";
+pub const ZSTD_LEVEL_OPTION: &str = "level";
 
 /// Identifies the compression algorithm in use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -58,12 +62,15 @@ impl FromStr for CompressorType {
     type Err = IoError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "lz4" => Ok(CompressorType::Lz4),
-            "snappy" => Ok(CompressorType::Snappy),
-            "zstd" | "zstandard" => Ok(CompressorType::Zstd),
-            "deflate" => Ok(CompressorType::Deflate),
-            "noop" | "none" => Ok(CompressorType::Noop),
+        let simple_name = s.rsplit('.').next().unwrap_or(s).to_ascii_lowercase();
+        match simple_name.as_str() {
+            "lz4" | "lz4compressor" => Ok(CompressorType::Lz4),
+            "snappy" | "snappycompressor" => Ok(CompressorType::Snappy),
+            "zstd" | "zstandard" | "zstdcompressor" | "zstandardcompressor" => {
+                Ok(CompressorType::Zstd)
+            }
+            "deflate" | "deflatecompressor" => Ok(CompressorType::Deflate),
+            "noop" | "none" | "noopcompressor" => Ok(CompressorType::Noop),
             _ => Err(IoError::InvalidFormat(format!(
                 "Unknown compressor type: '{s}'"
             ))),
@@ -102,6 +109,67 @@ pub fn create_compressor(compressor_type: CompressorType) -> Box<dyn ICompressor
         CompressorType::Zstd => Box::new(ZstdCompressor::new()),
         CompressorType::Deflate => Box::new(DeflateCompressor::new()),
         CompressorType::Noop => Box::new(NoopCompressor::new()),
+    }
+}
+
+/// Factory function that creates a compressor from metadata/config options.
+pub fn create_compressor_with_options(
+    compressor_type: CompressorType,
+    options: &HashMap<String, String>,
+) -> Result<Box<dyn ICompressor>, IoError> {
+    match compressor_type {
+        CompressorType::Zstd => {
+            let level = options
+                .get(ZSTD_LEVEL_OPTION)
+                .and_then(|value| value.parse::<i32>().ok())
+                .unwrap_or(3);
+            if let Some(dictionary) = zstd_dictionary_from_options(options)? {
+                Ok(Box::new(ZstdCompressor::with_dictionary(level, dictionary)))
+            } else {
+                Ok(Box::new(ZstdCompressor::with_level(level)))
+            }
+        }
+        other => Ok(create_compressor(other)),
+    }
+}
+
+fn zstd_dictionary_from_options(
+    options: &HashMap<String, String>,
+) -> Result<Option<Vec<u8>>, IoError> {
+    if let Some(hex) = options.get(ZSTD_DICTIONARY_HEX_OPTION) {
+        return decode_hex(hex).map(Some);
+    }
+    Ok(options
+        .get(ZSTD_DICTIONARY_OPTION)
+        .map(|dictionary| dictionary.as_bytes().to_vec())
+        .filter(|dictionary| !dictionary.is_empty()))
+}
+
+fn decode_hex(input: &str) -> Result<Vec<u8>, IoError> {
+    let bytes = input.trim().as_bytes();
+    if bytes.len() % 2 != 0 {
+        return Err(IoError::InvalidFormat(
+            "Zstd dictionary_hex has odd length".into(),
+        ));
+    }
+
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for pair in bytes.chunks_exact(2) {
+        let high = hex_value(pair[0])?;
+        let low = hex_value(pair[1])?;
+        out.push((high << 4) | low);
+    }
+    Ok(out)
+}
+
+fn hex_value(byte: u8) -> Result<u8, IoError> {
+    match byte {
+        b'0'..=b'9' => Ok(byte - b'0'),
+        b'a'..=b'f' => Ok(byte - b'a' + 10),
+        b'A'..=b'F' => Ok(byte - b'A' + 10),
+        _ => Err(IoError::InvalidFormat(format!(
+            "invalid Zstd dictionary_hex byte: {byte:#x}"
+        ))),
     }
 }
 
@@ -152,6 +220,22 @@ mod tests {
             "none".parse::<CompressorType>().unwrap(),
             CompressorType::Noop
         );
+        assert_eq!(
+            "LZ4Compressor".parse::<CompressorType>().unwrap(),
+            CompressorType::Lz4
+        );
+        assert_eq!(
+            "org.apache.cassandra.io.compress.SnappyCompressor"
+                .parse::<CompressorType>()
+                .unwrap(),
+            CompressorType::Snappy
+        );
+        assert_eq!(
+            "org.apache.cassandra.io.compress.ZstdCompressor"
+                .parse::<CompressorType>()
+                .unwrap(),
+            CompressorType::Zstd
+        );
     }
 
     #[test]
@@ -179,6 +263,37 @@ mod tests {
             let decompressed = c.decompress(&compressed, input.len()).unwrap();
             assert_eq!(input.as_slice(), decompressed.as_slice());
         }
+    }
+
+    #[test]
+    fn test_create_zstd_with_dictionary_options() {
+        let mut options = HashMap::new();
+        options.insert(
+            ZSTD_DICTIONARY_OPTION.to_string(),
+            "sstable-prefix".to_string(),
+        );
+        options.insert(ZSTD_LEVEL_OPTION.to_string(), "1".to_string());
+
+        let c = create_compressor_with_options(CompressorType::Zstd, &options).unwrap();
+        let input = b"sstable-prefix-row sstable-prefix-row";
+        let mut compressed = Vec::new();
+        c.compress(input, &mut compressed).unwrap();
+        assert_eq!(c.decompress(&compressed, input.len()).unwrap(), input);
+    }
+
+    #[test]
+    fn test_create_zstd_with_hex_dictionary_options() {
+        let mut options = HashMap::new();
+        options.insert(
+            ZSTD_DICTIONARY_HEX_OPTION.to_string(),
+            "73737461626c65".to_string(),
+        );
+
+        let c = create_compressor_with_options(CompressorType::Zstd, &options).unwrap();
+        let input = b"sstable row sstable row";
+        let mut compressed = Vec::new();
+        c.compress(input, &mut compressed).unwrap();
+        assert_eq!(c.decompress(&compressed, input.len()).unwrap(), input);
     }
 
     #[test]

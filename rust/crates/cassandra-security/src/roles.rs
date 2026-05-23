@@ -31,7 +31,17 @@ pub struct Role {
 /// Network-level access restrictions for a role.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkPermissions {
+    /// If true, the role can access all datacenters.
+    #[serde(default)]
+    pub all_datacenters: bool,
+    /// Specific datacenters the role is allowed to access.
+    #[serde(default)]
+    pub allowed_datacenters: Vec<String>,
+    /// If true, the role can access all CIDR groups.
+    #[serde(default)]
+    pub all_cidrs: bool,
     /// Allowed CIDR ranges for client connections.
+    #[serde(default)]
     pub allowed_cidrs: Vec<String>,
 }
 
@@ -41,6 +51,7 @@ pub struct RoleOptions {
     pub is_superuser: Option<bool>,
     pub can_login: Option<bool>,
     pub password: Option<String>,
+    pub hashed_password: Option<String>,
     pub network_permissions: Option<NetworkPermissions>,
 }
 
@@ -165,6 +176,9 @@ impl RoleManager for InMemoryRoleManager {
         if let Some(ref password) = options.password {
             let hashed = crate::auth::hash_password(password)?;
             entry.hashed_password = Some(hashed);
+        }
+        if let Some(hashed_password) = options.hashed_password {
+            entry.hashed_password = Some(hashed_password);
         }
         if let Some(np) = options.network_permissions {
             entry.network_permissions = Some(np);

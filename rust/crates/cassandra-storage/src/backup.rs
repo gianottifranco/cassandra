@@ -280,7 +280,15 @@ mod tests {
         let f1 = dir.path().join("testfile.db");
         fs::write(&f1, "content").unwrap();
 
-        create_snapshot("snap2", dir.path(), "ks", "t1", &[f1.clone()], None).unwrap();
+        create_snapshot(
+            "snap2",
+            dir.path(),
+            "ks",
+            "t1",
+            std::slice::from_ref(&f1),
+            None,
+        )
+        .unwrap();
 
         // Remove original
         fs::remove_file(&f1).unwrap();

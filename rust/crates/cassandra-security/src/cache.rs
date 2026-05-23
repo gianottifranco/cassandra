@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
+type RefreshLoader<K, V> = dyn Fn(&K) -> Option<V> + Send + Sync;
+
 /// Configuration for an auth cache.
 #[derive(Debug, Clone)]
 pub struct AuthCacheConfig {
@@ -161,7 +163,7 @@ where
 /// A self-refreshing auth cache that can run background updates.
 pub struct RefreshableAuthCache<K, V> {
     cache: Arc<AuthCache<K, V>>,
-    loader: Arc<dyn Fn(&K) -> Option<V> + Send + Sync>,
+    loader: Arc<RefreshLoader<K, V>>,
 }
 
 impl<K, V> RefreshableAuthCache<K, V>
@@ -169,10 +171,7 @@ where
     K: Eq + Hash + Clone + Send + Sync + 'static,
     V: Clone + Send + Sync + 'static,
 {
-    pub fn new(
-        cache: Arc<AuthCache<K, V>>,
-        loader: Arc<dyn Fn(&K) -> Option<V> + Send + Sync>,
-    ) -> Self {
+    pub fn new(cache: Arc<AuthCache<K, V>>, loader: Arc<RefreshLoader<K, V>>) -> Self {
         Self { cache, loader }
     }
 

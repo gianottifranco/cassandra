@@ -171,7 +171,7 @@ where
     let use_version =
         i32::from_be_bytes([accept_buf[4], accept_buf[5], accept_buf[6], accept_buf[7]]);
 
-    if use_version < MIN_MESSAGING_VERSION || use_version > CURRENT_MESSAGING_VERSION {
+    if !(MIN_MESSAGING_VERSION..=CURRENT_MESSAGING_VERSION).contains(&use_version) {
         return Err(HandshakeError::VersionMismatch {
             min_local: MIN_MESSAGING_VERSION,
             max_local: CURRENT_MESSAGING_VERSION,

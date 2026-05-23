@@ -292,9 +292,9 @@ mod tests {
 
     #[tokio::test]
     async fn await_all_aggregates_results() {
-        let (mut f1, tx1) = StreamResultFuture::new(uuid::Uuid::new_v4());
-        let (mut f2, tx2) = StreamResultFuture::new(uuid::Uuid::new_v4());
-        let (mut f3, tx3) = StreamResultFuture::new(uuid::Uuid::new_v4());
+        let (f1, tx1) = StreamResultFuture::new(uuid::Uuid::new_v4());
+        let (f2, tx2) = StreamResultFuture::new(uuid::Uuid::new_v4());
+        let (f3, tx3) = StreamResultFuture::new(uuid::Uuid::new_v4());
 
         tx1.send(StreamSessionState::Complete).unwrap();
         tx2.send(StreamSessionState::Failed).unwrap();

@@ -11,28 +11,33 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use byteorder::{BigEndian, ByteOrder};
+use cassandra_cql::functions::decimal_math::DecimalValue;
+use num_bigint::BigInt;
+use num_traits::Zero;
 use parking_lot::RwLock;
 use tracing::{debug, info};
 
 use cassandra_security::Resource as SecurityResource;
+use cassandra_security::roles::NetworkPermissions;
 use cassandra_security::{Authorizer, Permission, Role, RoleManager, RoleOptions};
 
 use crate::term_binding::typed_term_to_bytes;
 use cassandra_cql::ast::{
-    AlterTableOp, ClusteringOrder as AstClusteringOrder, ColumnConstraint as AstColumnConstraint,
-    ConstraintRelationOp as AstConstraintRelationOp, DescribeTarget, Literal, Relation, RelationOp,
-    SelectColumns, Selector, Term,
+    AlterTableOp, AlterTypeOp, Assignment, AssignmentOp, ClusteringOrder as AstClusteringOrder,
+    ColumnConstraint as AstColumnConstraint, ConstraintRelationOp as AstConstraintRelationOp,
+    DescribeTarget, JsonDefault, Literal, Relation, RelationOp, RoleAccess, SelectColumns,
+    Selector, Term,
 };
 use cassandra_cql::functions::{CqlFunction, FunctionRegistry};
 use cassandra_cql::parser;
 use cassandra_cql::planner::{
-    AlterKeyspacePlan, AlterMaterializedViewPlan, AlterRolePlan, AlterTablePlan, BatchPlan,
-    CreateAggregatePlan, CreateFunctionPlan, CreateIndexPlan, CreateKeyspacePlan,
+    AlterKeyspacePlan, AlterMaterializedViewPlan, AlterRolePlan, AlterTablePlan, AlterTypePlan,
+    BatchPlan, CreateAggregatePlan, CreateFunctionPlan, CreateIndexPlan, CreateKeyspacePlan,
     CreateMaterializedViewPlan, CreateRolePlan, CreateTablePlan, CreateTriggerPlan, CreateTypePlan,
     DeletePlan, DescribePlan, DropAggregatePlan, DropFunctionPlan, DropIndexPlan, DropKeyspacePlan,
     DropMaterializedViewPlan, DropRolePlan, DropTablePlan, DropTriggerPlan, DropTypePlan,
-    GrantPlan, InsertPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan, TruncatePlan,
-    UpdatePlan, UsePlan,
+    GrantPlan, InsertPlan, ListPermissionsPlan, ListRolesPlan, QueryPlan, RevokePlan, SelectPlan,
+    TruncatePlan, UpdatePlan, UsePlan,
 };
 use cassandra_cql::prepared::PreparedCache;
 use cassandra_cql::triggers::{MutationEvent, MutationType, TriggerMutation, TriggerRegistry};
@@ -53,7 +58,9 @@ use cassandra_storage::commitlog::{
 };
 use cassandra_storage::engine::StorageEngine;
 use cassandra_storage::memtable::partition::{Cell, Row};
-use cassandra_types::{CqlType, native::parse_cql_type, type_compat::is_compatible_with};
+use cassandra_types::{
+    CqlType, codec::CqlValue, native::parse_cql_type, type_compat::is_compatible_with,
+};
 
 // ─── Errors ────────────────────────────────────────────────────────────────
 
@@ -1760,12 +1767,14 @@ impl QueryExecutor {
             QueryPlan::Grant(gr) => self.execute_grant(gr),
             QueryPlan::Revoke(rv) => self.execute_revoke(rv),
             QueryPlan::ListRoles(lr) => self.execute_list_roles(lr),
+            QueryPlan::ListPermissions(lp) => self.execute_list_permissions(lp, user),
             QueryPlan::CreateIndex(ci) => self.execute_create_index(ci),
             QueryPlan::DropIndex(di) => self.execute_drop_index(di),
             QueryPlan::CreateMaterializedView(cmv) => self.execute_create_mv(cmv),
             QueryPlan::DropMaterializedView(dmv) => self.execute_drop_mv(dmv),
             QueryPlan::AlterMaterializedView(amv) => self.execute_alter_mv(amv),
             QueryPlan::CreateType(ct) => self.execute_create_type(ct),
+            QueryPlan::AlterType(at) => self.execute_alter_type(at),
             QueryPlan::DropType(dt) => self.execute_drop_type(dt),
             QueryPlan::CreateFunction(cf) => self.execute_create_function(cf),
             QueryPlan::DropFunction(df) => self.execute_drop_function(df),
@@ -1833,6 +1842,7 @@ impl QueryExecutor {
                 strategy_class,
                 options,
             },
+            comment: String::new(),
         };
 
         let ks = KeyspaceMetadata::new(&plan.name, params);
@@ -1878,10 +1888,13 @@ impl QueryExecutor {
         if let Some(dw) = plan.durable_writes {
             params.durable_writes = dw;
         }
+        if let Some(comment) = &plan.comment {
+            params.comment = comment.clone();
+        }
 
         drop(catalog);
 
-        let ks = KeyspaceMetadata::new(&plan.name, params);
+        let ks = existing.clone().with_params(params);
         let mut catalog = self.catalog.write();
         *catalog = catalog.with_keyspace(ks);
 
@@ -1919,6 +1932,7 @@ impl QueryExecutor {
     fn execute_create_table(&self, plan: &CreateTablePlan) -> Result<QueryResult, ExecutorError> {
         use cassandra_schema::TableMetadataBuilder;
 
+        let builtin_registry = FunctionRegistry::with_builtins();
         let mut builder = TableMetadataBuilder::new(&plan.keyspace, &plan.name);
 
         for (i, col) in plan.columns.iter().enumerate() {
@@ -1968,6 +1982,9 @@ impl QueryExecutor {
                 col.masked_with.clone(),
             )
             .with_constraints(col.constraints.clone());
+            if let Some((function_name, args)) = &column.masked_with {
+                validate_stored_cql_column_mask(&builtin_registry, &column, function_name, args)?;
+            }
             builder = builder.add_column(column);
         }
 
@@ -2037,22 +2054,27 @@ impl QueryExecutor {
                     .map(|c| c.position)
                     .max()
                     .map_or(0, |p| p + 1);
-                table.columns.push(
-                    ColumnMetadata::new(
-                        col.name.clone(),
-                        kind,
-                        position,
-                        column_type,
-                        ClusteringOrder::None,
-                        mask_args_to_strings(col.masked_with.as_ref()),
-                    )
-                    .with_constraints(
-                        col.constraints
-                            .iter()
-                            .map(resolve_column_constraint)
-                            .collect(),
-                    ),
+                let builtin_registry = FunctionRegistry::with_builtins();
+                let mut column = ColumnMetadata::new(
+                    col.name.clone(),
+                    kind,
+                    position,
+                    column_type,
+                    ClusteringOrder::None,
+                    None,
+                )
+                .with_constraints(
+                    col.constraints
+                        .iter()
+                        .map(resolve_column_constraint)
+                        .collect(),
                 );
+                if let Some((function_name, args)) = &col.masked_with {
+                    let mask_args =
+                        validate_cql_column_mask(&builtin_registry, &column, function_name, args)?;
+                    column.masked_with = Some((function_name.clone(), mask_args));
+                }
+                table.columns.push(column);
             }
             AlterTableOp::DropColumn(column_name) => {
                 let Some(existing) = table.column(column_name).cloned() else {
@@ -2095,6 +2117,15 @@ impl QueryExecutor {
                     ))
                 })?;
             }
+            AlterTableOp::CommentColumn(column_name, comment) => {
+                let Some(column) = table.columns.iter_mut().find(|c| c.name == *column_name) else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Column '{}' does not exist in {}.{}",
+                        column_name, plan.keyspace, plan.name
+                    )));
+                };
+                column.comment = comment.clone();
+            }
             AlterTableOp::AlterConstraints(column_name, constraints) => {
                 let Some(column) = table.columns.iter_mut().find(|c| c.name == *column_name) else {
                     return Err(ExecutorError::InvalidQuery(format!(
@@ -2120,10 +2151,10 @@ impl QueryExecutor {
                         column_name, plan.keyspace, plan.name
                     )));
                 };
-                column.masked_with = Some((
-                    function_name.clone(),
-                    args.iter().map(term_to_metadata_string).collect(),
-                ));
+                let builtin_registry = FunctionRegistry::with_builtins();
+                let mask_args =
+                    validate_cql_column_mask(&builtin_registry, column, function_name, args)?;
+                column.masked_with = Some((function_name.clone(), mask_args));
             }
             AlterTableOp::DropMask(column_name) => {
                 let Some(column) = table.columns.iter_mut().find(|c| c.name == *column_name) else {
@@ -2547,6 +2578,111 @@ impl QueryExecutor {
         info!(keyspace = %plan.keyspace, type_name = %plan.name, "Created type");
         Ok(QueryResult::SchemaChange {
             change_type: "CREATED".into(),
+            target: "TYPE".into(),
+            keyspace: plan.keyspace.clone(),
+            name: Some(plan.name.clone()),
+        })
+    }
+
+    fn execute_alter_type(&self, plan: &AlterTypePlan) -> Result<QueryResult, ExecutorError> {
+        let catalog = self.catalog.read();
+        let snapshot = catalog.snapshot();
+        let existing_ks = snapshot
+            .keyspace(&plan.keyspace)
+            .ok_or_else(|| ExecutorError::KeyspaceNotFound(plan.keyspace.clone()))?;
+        let mut udt = existing_ks.user_type(&plan.name).cloned().ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Type '{}.{}' does not exist",
+                plan.keyspace, plan.name
+            ))
+        })?;
+
+        match &plan.operation {
+            AlterTypeOp::AddField(field_name, field_type) => {
+                if udt
+                    .field_names
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(field_name))
+                {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Field '{}' already exists in type '{}.{}'",
+                        field_name, plan.keyspace, plan.name
+                    )));
+                }
+                udt.field_names.push(field_name.clone());
+                udt.field_types
+                    .push(canonical_ast_cql_type_name(field_type));
+            }
+            AlterTypeOp::RenameField(from, to) => {
+                let Some(index) = udt
+                    .field_names
+                    .iter()
+                    .position(|existing| existing.eq_ignore_ascii_case(from))
+                else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Field '{}' does not exist in type '{}.{}'",
+                        from, plan.keyspace, plan.name
+                    )));
+                };
+                if !from.eq_ignore_ascii_case(to)
+                    && udt
+                        .field_names
+                        .iter()
+                        .any(|existing| existing.eq_ignore_ascii_case(to))
+                {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Field '{}' already exists in type '{}.{}'",
+                        to, plan.keyspace, plan.name
+                    )));
+                }
+                let old_name = udt.field_names[index].clone();
+                udt.field_names[index] = to.clone();
+                if let Some(comment) = udt.field_comments.remove(&old_name) {
+                    udt.field_comments.insert(to.clone(), comment);
+                }
+            }
+            AlterTypeOp::AlterFieldType(field_name, field_type) => {
+                let Some(index) = udt
+                    .field_names
+                    .iter()
+                    .position(|existing| existing.eq_ignore_ascii_case(field_name))
+                else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Field '{}' does not exist in type '{}.{}'",
+                        field_name, plan.keyspace, plan.name
+                    )));
+                };
+                udt.field_types[index] = canonical_ast_cql_type_name(field_type);
+            }
+            AlterTypeOp::CommentType(comment) => {
+                udt.comment = comment.clone();
+            }
+            AlterTypeOp::CommentField(field_name, comment) => {
+                let Some(existing_field_name) = udt
+                    .field_names
+                    .iter()
+                    .find(|existing| existing.eq_ignore_ascii_case(field_name))
+                    .cloned()
+                else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Field '{}' does not exist in type '{}.{}'",
+                        field_name, plan.keyspace, plan.name
+                    )));
+                };
+                udt.field_comments
+                    .insert(existing_field_name, comment.clone());
+            }
+        }
+
+        let ks = existing_ks.clone().with_type(udt);
+        drop(catalog);
+
+        let mut catalog = self.catalog.write();
+        *catalog = catalog.with_keyspace(ks);
+
+        info!(keyspace = %plan.keyspace, type_name = %plan.name, "Altered type");
+        Ok(QueryResult::SchemaChange {
+            change_type: "UPDATED".into(),
             target: "TYPE".into(),
             keyspace: plan.keyspace.clone(),
             name: Some(plan.name.clone()),
@@ -3104,7 +3240,7 @@ impl QueryExecutor {
 
         // Handle INSERT JSON: parse JSON term into columns/values
         let (effective_columns, effective_values) = if let Some(ref json_term) = plan.json {
-            parse_json_insert(json_term)?
+            parse_json_insert(json_term, table_meta, plan.json_default)?
         } else {
             (plan.columns.clone(), plan.values.clone())
         };
@@ -3114,12 +3250,19 @@ impl QueryExecutor {
         let mut cells = Vec::new();
         let mut static_cells_vec = Vec::new();
         let mut constraint_values: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
+        let builtin_registry = FunctionRegistry::with_builtins();
 
         for (i, col_name) in effective_columns.iter().enumerate() {
             let val_bytes = if i < effective_values.len() {
                 // Use typed binding when the column type is known from schema.
                 if let Some(col_meta) = table_meta.column(col_name) {
-                    typed_term_to_bytes(&effective_values[i], &col_meta.column_type)
+                    term_to_bytes_with_functions(
+                        &effective_values[i],
+                        &col_meta.column_type,
+                        &builtin_registry,
+                        &self.udf_registry,
+                        &plan.keyspace,
+                    )?
                 } else {
                     term_to_bytes(&effective_values[i])
                 }
@@ -3227,9 +3370,10 @@ impl QueryExecutor {
 
         let mut pk_bytes = Vec::new();
         let mut ck_bytes = Vec::new();
+        let builtin_registry = FunctionRegistry::with_builtins();
 
         for rel in &plan.where_clause {
-            let val = term_to_bytes(&rel.value);
+            let val = relation_value_to_bytes(table_meta, rel);
             if pk_names.contains(&rel.column.as_str()) {
                 if let Some(v) = val {
                     pk_bytes.extend_from_slice(&v);
@@ -3241,31 +3385,47 @@ impl QueryExecutor {
             }
         }
 
-        // WU-16: collection assignment operators are preserved in the planned
-        // assignment and converted to the latest serialized cell value here.
-        // Collection-element storage remains encoded in the cell payload.
+        let existing_partition = self
+            .engine
+            .read_partition(&plan.keyspace, &plan.table, &pk_bytes);
+        let existing_row = existing_partition
+            .as_ref()
+            .and_then(|partition| partition.rows.get(&ck_bytes));
+
         let mut constraint_values: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
         let cells: Vec<Cell> = plan
             .assignments
             .iter()
             .map(|a| {
-                let value = table_meta
-                    .column(&a.column)
-                    .and_then(|col_meta| typed_term_to_bytes(&a.value, &col_meta.column_type))
-                    .or_else(|| term_to_bytes(&a.value));
+                let value = if let Some(col_meta) = table_meta.column(&a.column) {
+                    let current = existing_row.and_then(|row| {
+                        current_live_cell_value(row, &a.column, now_secs)
+                            .map(|bytes| bytes.to_vec())
+                    });
+                    assignment_value_to_bytes(
+                        a,
+                        &col_meta.column_type,
+                        current.as_deref(),
+                        &builtin_registry,
+                        &self.udf_registry,
+                        &plan.keyspace,
+                    )?
+                } else {
+                    term_to_bytes(&a.value)
+                };
                 if table_meta.column(&a.column).is_some() {
                     constraint_values.insert(a.column.clone(), value.clone());
                 }
-                Cell {
+                Ok(Cell {
                     column: a.column.clone(),
                     value,
                     timestamp: now,
                     ttl,
                     local_deletion_time,
                     is_tombstone: false,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ExecutorError>>()?;
 
         validate_write_constraints(table_meta, &constraint_values, false)?;
 
@@ -3325,7 +3485,7 @@ impl QueryExecutor {
         let mut has_ck_range = false;
 
         for rel in &plan.where_clause {
-            let val = term_to_bytes(&rel.value);
+            let val = relation_value_to_bytes(table_meta, rel);
             if pk_names.contains(&rel.column.as_str()) {
                 if let Some(v) = val {
                     pk_bytes.extend_from_slice(&v);
@@ -3708,45 +3868,6 @@ impl QueryExecutor {
                 .collect::<Result<Vec<_>, _>>()?,
         };
 
-        // Determine if DDM must be applied (User lacks UNMASK permission)
-        // By default, if user is not available or authorizer triggers, we mask.
-        // For phase 7, if Authorizer traits properly resolve "has_permission", we use them.
-        let mut apply_masking = false;
-
-        if let Some(username) = user {
-            use cassandra_security::authz::Permission;
-            let resource = cassandra_security::authz::Resource::Table {
-                keyspace: plan.keyspace.clone(),
-                table: plan.table.clone(),
-            };
-            if self
-                .authorizer
-                .authorize(username, &resource, Permission::Unmask)
-                .is_err()
-            {
-                apply_masking = true;
-            }
-        } else {
-            // Unauthenticated requests should definitely be masked if there are policies
-            apply_masking = true;
-        }
-
-        // Setup ephemeral masking registry for this query
-        let mut masking_registry = cassandra_security::masking::MaskingRegistry::new();
-        if apply_masking {
-            for col in &table_meta.columns {
-                if let Some((func, args)) = &col.masked_with {
-                    masking_registry.add_policy(cassandra_security::masking::ColumnMaskingConfig {
-                        keyspace: plan.keyspace.clone(),
-                        table: plan.table.clone(),
-                        column: col.name.clone(),
-                        function_name: func.clone(),
-                        function_args: args.clone(),
-                    });
-                }
-            }
-        }
-
         // WU-04: Extract clustering column names for slice filtering
         let ck_names: Vec<String> = table_meta
             .clustering_columns()
@@ -3761,6 +3882,38 @@ impl QueryExecutor {
             .filter(|c| c.kind == ColumnKind::Static)
             .map(|c| c.name.clone())
             .collect();
+
+        let table_resource = SecurityResource::Table {
+            keyspace: plan.keyspace.clone(),
+            table: plan.table.clone(),
+        };
+        let user_has_unmask = user.is_some_and(|username| {
+            self.authorizer
+                .authorize(username, &table_resource, Permission::Unmask)
+                .is_ok()
+        });
+        if let Some(username) = user {
+            if !user_has_unmask {
+                let restricted_masked_columns =
+                    masked_restricted_columns(table_meta, &plan.where_clause, &pk_names);
+                if !restricted_masked_columns.is_empty()
+                    && self
+                        .authorizer
+                        .authorize(username, &table_resource, Permission::SelectMasked)
+                        .is_err()
+                {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "User {} has no UNMASK nor SELECT_MASKED permission on table {}.{}, cannot query masked columns [{}]",
+                        username,
+                        plan.keyspace,
+                        plan.table,
+                        restricted_masked_columns.join(", ")
+                    )));
+                }
+            }
+        }
+        // Unauthenticated requests are masked; users with UNMASK see clear values.
+        let apply_masking = user.is_none() || !user_has_unmask;
 
         drop(catalog);
 
@@ -3817,9 +3970,9 @@ impl QueryExecutor {
                 if apply_masking {
                     if let Some(v) = &value {
                         if let Some(masked) =
-                            masking_registry.apply_mask(&plan.keyspace, &plan.table, column_name, v)
+                            apply_cql_column_mask(table_meta, &builtin_registry, column_name, v)
                         {
-                            value = Some(masked);
+                            value = masked;
                         }
                     }
                 }
@@ -3886,7 +4039,18 @@ impl QueryExecutor {
             let group_key = plan
                 .group_by
                 .iter()
-                .map(|column| column_value(column, partition_key, row, static_row))
+                .map(|column| {
+                    raw_column_value(
+                        &pk_names,
+                        &ck_names,
+                        &static_col_names,
+                        column,
+                        partition_key,
+                        row,
+                        static_row,
+                        now_secs,
+                    )
+                })
                 .collect::<Vec<_>>();
 
             let values = selectors
@@ -4162,7 +4326,7 @@ impl QueryExecutor {
             let live: Vec<&Row> = pd.live_rows(now_secs);
 
             // WU-04: Filter by clustering restrictions
-            let live: Vec<&Row> = if !ck_names.is_empty() {
+            let mut live: Vec<&Row> = if !ck_names.is_empty() {
                 let mut ck_lower: Option<Vec<u8>> = None;
                 let mut ck_upper: Option<Vec<u8>> = None;
                 let mut ck_lower_inclusive = true;
@@ -4224,6 +4388,14 @@ impl QueryExecutor {
                 live
             };
 
+            if plan
+                .order_by
+                .iter()
+                .any(|(_, ord)| matches!(ord, AstClusteringOrder::Desc))
+            {
+                live.reverse();
+            }
+
             let static_row = pd.rows.get(&Vec::new());
             for row in live {
                 if !row_matches_where(&pk_bytes, row, static_row) {
@@ -4237,15 +4409,6 @@ impl QueryExecutor {
                 } else {
                     result_rows.push(make_result_row(&pk_bytes, row, static_row)?);
                 }
-            }
-
-            // WU-05: Reverse order if ORDER BY DESC
-            if plan
-                .order_by
-                .iter()
-                .any(|(_, ord)| matches!(ord, AstClusteringOrder::Desc))
-            {
-                result_rows.reverse();
             }
         }
 
@@ -4368,7 +4531,7 @@ impl QueryExecutor {
         let ck_names: Vec<&str> = ck_cols.iter().map(|c| c.name.as_str()).collect();
 
         let (effective_columns, effective_values) = if let Some(ref json_term) = plan.json {
-            parse_json_insert(json_term)?
+            parse_json_insert(json_term, table_meta, plan.json_default)?
         } else {
             (plan.columns.clone(), plan.values.clone())
         };
@@ -4376,11 +4539,18 @@ impl QueryExecutor {
         let mut pk_bytes = Vec::new();
         let mut ck_bytes = Vec::new();
         let mut cells = Vec::new();
+        let builtin_registry = FunctionRegistry::with_builtins();
 
         for (i, col_name) in effective_columns.iter().enumerate() {
             let val_bytes = if i < effective_values.len() {
                 if let Some(col_meta) = table_meta.column(col_name) {
-                    typed_term_to_bytes(&effective_values[i], &col_meta.column_type)
+                    term_to_bytes_with_functions(
+                        &effective_values[i],
+                        &col_meta.column_type,
+                        &builtin_registry,
+                        &self.udf_registry,
+                        &plan.keyspace,
+                    )?
                 } else {
                     term_to_bytes(&effective_values[i])
                 }
@@ -4449,9 +4619,10 @@ impl QueryExecutor {
 
         let mut pk_bytes = Vec::new();
         let mut ck_bytes = Vec::new();
+        let builtin_registry = FunctionRegistry::with_builtins();
 
         for rel in &plan.where_clause {
-            let val = term_to_bytes(&rel.value);
+            let val = relation_value_to_bytes(table_meta, rel);
             if pk_names.contains(&rel.column.as_str()) {
                 if let Some(v) = val {
                     pk_bytes.extend_from_slice(&v);
@@ -4466,15 +4637,28 @@ impl QueryExecutor {
         let cells: Vec<Cell> = plan
             .assignments
             .iter()
-            .map(|a| Cell {
-                column: a.column.clone(),
-                value: term_to_bytes(&a.value),
-                timestamp: now,
-                ttl: 0,
-                local_deletion_time: None,
-                is_tombstone: false,
+            .map(|a| {
+                let value = if let Some(col_meta) = table_meta.column(&a.column) {
+                    term_to_bytes_with_functions(
+                        &a.value,
+                        &col_meta.column_type,
+                        &builtin_registry,
+                        &self.udf_registry,
+                        &plan.keyspace,
+                    )?
+                } else {
+                    term_to_bytes(&a.value)
+                };
+                Ok(Cell {
+                    column: a.column.clone(),
+                    value,
+                    timestamp: now,
+                    ttl: 0,
+                    local_deletion_time: None,
+                    is_tombstone: false,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, ExecutorError>>()?;
 
         drop(catalog);
 
@@ -4525,7 +4709,7 @@ impl QueryExecutor {
         let mut has_ck_range = false;
 
         for rel in &plan.where_clause {
-            let val = term_to_bytes(&rel.value);
+            let val = relation_value_to_bytes(table_meta, rel);
             if pk_names.contains(&rel.column.as_str()) {
                 if let Some(v) = val {
                     pk_bytes.extend_from_slice(&v);
@@ -4653,10 +4837,13 @@ impl QueryExecutor {
             )));
         }
 
-        let hashed_password = plan
-            .password
-            .as_deref()
-            .map(|p| cassandra_security::auth::hash_password(p).unwrap());
+        let hashed_password = match plan.hashed_password.clone() {
+            Some(hashed_password) => Some(hashed_password),
+            None => plan
+                .password
+                .as_deref()
+                .map(|p| cassandra_security::auth::hash_password(p).unwrap()),
+        };
 
         self.role_manager.create_role(Role {
             name: plan.name.clone(),
@@ -4664,7 +4851,10 @@ impl QueryExecutor {
             can_login: plan.can_login,
             hashed_password,
             member_of: vec![],
-            network_permissions: None,
+            network_permissions: role_network_permissions(
+                plan.datacenter_access.as_ref(),
+                plan.cidr_access.as_ref(),
+            ),
         });
 
         info!(role = %plan.name, "Created role");
@@ -4672,11 +4862,19 @@ impl QueryExecutor {
     }
 
     fn execute_alter_role(&self, plan: &AlterRolePlan) -> Result<QueryResult, ExecutorError> {
+        if !self.role_manager.role_exists(&plan.name) && plan.if_exists {
+            return Ok(QueryResult::Void);
+        }
+
         let opts = RoleOptions {
             is_superuser: plan.superuser,
             can_login: plan.login,
             password: plan.password.clone(),
-            network_permissions: None,
+            hashed_password: plan.hashed_password.clone(),
+            network_permissions: role_network_permissions(
+                plan.datacenter_access.as_ref(),
+                plan.cidr_access.as_ref(),
+            ),
         };
 
         self.role_manager
@@ -4787,6 +4985,74 @@ impl QueryExecutor {
         })
     }
 
+    fn execute_list_permissions(
+        &self,
+        plan: &ListPermissionsPlan,
+        user: Option<&str>,
+    ) -> Result<QueryResult, ExecutorError> {
+        let role = plan
+            .of_role
+            .as_deref()
+            .or(user)
+            .unwrap_or("cassandra")
+            .to_string();
+        let resource = match &plan.resource {
+            Some(resource) => ast_resource_to_security(resource)?,
+            None => SecurityResource::Root,
+        };
+        let requested = requested_permissions(&plan.permissions)?;
+        let mut permissions = self.authorizer.list_permissions(&role, &resource);
+        permissions.retain(|(permission, _)| {
+            requested
+                .as_ref()
+                .is_none_or(|requested| requested.contains(permission))
+        });
+        permissions.sort_by(|(left_perm, left_res), (right_perm, right_res)| {
+            left_res
+                .to_string()
+                .cmp(&right_res.to_string())
+                .then_with(|| left_perm.to_string().cmp(&right_perm.to_string()))
+        });
+
+        let columns = vec![
+            ResultColumn {
+                keyspace: "system_auth".to_string(),
+                table: "role_permissions".to_string(),
+                name: "role".to_string(),
+                cql_type: CqlType::Varchar,
+            },
+            ResultColumn {
+                keyspace: "system_auth".to_string(),
+                table: "role_permissions".to_string(),
+                name: "resource".to_string(),
+                cql_type: CqlType::Varchar,
+            },
+            ResultColumn {
+                keyspace: "system_auth".to_string(),
+                table: "role_permissions".to_string(),
+                name: "permission".to_string(),
+                cql_type: CqlType::Varchar,
+            },
+        ];
+        let rows = permissions
+            .into_iter()
+            .map(|(permission, resource)| {
+                vec![
+                    Some(role.clone().into_bytes()),
+                    Some(resource.to_string().into_bytes()),
+                    Some(permission.to_string().into_bytes()),
+                ]
+            })
+            .collect();
+
+        Ok(QueryResult::Rows {
+            columns,
+            rows,
+            paging_state: None,
+            warnings: Vec::new(),
+        })
+    }
+
     // ─── DESCRIBE ─────────────────────────────────────────────────────────
 
     fn execute_describe(&self, plan: &DescribePlan) -> Result<QueryResult, ExecutorError> {
@@ -4799,52 +5065,108 @@ impl QueryExecutor {
             }
             DescribeTarget::FullSchema => {
                 let mut output = String::new();
-                for (ks_name, ks_meta) in &snapshot.keyspaces {
-                    output.push_str(&format!(
-                        "CREATE KEYSPACE {} WITH replication = {{}};\n\n",
-                        ks_name
-                    ));
-                    for (table_name, _table_meta) in &ks_meta.tables {
-                        output.push_str(&format!(
-                            "CREATE TABLE {}.{} (...);\n\n",
-                            ks_name, table_name
-                        ));
+                for ks_meta in snapshot.keyspaces.values() {
+                    output.push_str(&Self::render_keyspace_ddl(ks_meta));
+                    output.push_str("\n\n");
+                    for user_type in ks_meta.types.values() {
+                        output.push_str(&Self::render_type_ddl(user_type));
+                        output.push_str("\n\n");
+                    }
+                    for function in ks_meta.functions.values() {
+                        output.push_str(&Self::render_function_ddl(function));
+                        output.push_str("\n\n");
+                    }
+                    for aggregate in ks_meta.aggregates.values() {
+                        output.push_str(&Self::render_aggregate_ddl(aggregate));
+                        output.push_str("\n\n");
+                    }
+                    for table_meta in ks_meta.tables.values() {
+                        output.push_str(&Self::render_table_ddl(table_meta));
+                        output.push_str("\n\n");
                     }
                 }
                 output
             }
             DescribeTarget::Keyspace(name) => {
-                if snapshot.keyspace(name).is_some() {
-                    format!("CREATE KEYSPACE {} WITH replication = {{}};", name)
-                } else {
+                let Some(ks_meta) = snapshot.keyspace(name) else {
                     return Err(ExecutorError::InvalidQuery(format!(
                         "Keyspace '{}' not found",
                         name
                     )));
+                };
+                let mut output = Self::render_keyspace_ddl(ks_meta);
+                for user_type in ks_meta.types.values() {
+                    output.push_str("\n\n");
+                    output.push_str(&Self::render_type_ddl(user_type));
                 }
+                for function in ks_meta.functions.values() {
+                    output.push_str("\n\n");
+                    output.push_str(&Self::render_function_ddl(function));
+                }
+                for aggregate in ks_meta.aggregates.values() {
+                    output.push_str("\n\n");
+                    output.push_str(&Self::render_aggregate_ddl(aggregate));
+                }
+                for table_meta in ks_meta.tables.values() {
+                    output.push_str("\n\n");
+                    output.push_str(&Self::render_table_ddl(table_meta));
+                }
+                output
             }
             DescribeTarget::Table(ks_opt, table_name) => {
                 let ks = ks_opt.as_deref().unwrap_or("system");
-                if snapshot.table(ks, table_name).is_some() {
-                    format!("CREATE TABLE {}.{} (...);", ks, table_name)
-                } else {
+                let Some(table_meta) = snapshot.table(ks, table_name) else {
                     return Err(ExecutorError::TableNotFound(
                         ks.to_string(),
                         table_name.clone(),
                     ));
-                }
+                };
+                Self::render_table_ddl(table_meta)
             }
             DescribeTarget::Type(ks_opt, name) => {
                 let ks = ks_opt.as_deref().unwrap_or("system");
-                format!("CREATE TYPE {}.{} (...);", ks, name)
+                let Some(user_type) = snapshot.keyspace(ks).and_then(|keyspace| {
+                    keyspace
+                        .types
+                        .values()
+                        .find(|user_type| user_type.name == *name)
+                }) else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Type '{}.{}' not found",
+                        ks, name
+                    )));
+                };
+                Self::render_type_ddl(user_type)
             }
             DescribeTarget::Function(ks_opt, name) => {
                 let ks = ks_opt.as_deref().unwrap_or("system");
-                format!("CREATE FUNCTION {}.{} (...);", ks, name)
+                let Some(function) = snapshot.keyspace(ks).and_then(|keyspace| {
+                    keyspace
+                        .functions
+                        .values()
+                        .find(|function| function.name == *name)
+                }) else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Function '{}.{}' not found",
+                        ks, name
+                    )));
+                };
+                Self::render_function_ddl(function)
             }
             DescribeTarget::Aggregate(ks_opt, name) => {
                 let ks = ks_opt.as_deref().unwrap_or("system");
-                format!("CREATE AGGREGATE {}.{} (...);", ks, name)
+                let Some(aggregate) = snapshot.keyspace(ks).and_then(|keyspace| {
+                    keyspace
+                        .aggregates
+                        .values()
+                        .find(|aggregate| aggregate.name == *name)
+                }) else {
+                    return Err(ExecutorError::InvalidQuery(format!(
+                        "Aggregate '{}.{}' not found",
+                        ks, name
+                    )));
+                };
+                Self::render_aggregate_ddl(aggregate)
             }
             DescribeTarget::Generic(name) => {
                 format!("DESCRIBE {};", name)
@@ -4866,6 +5188,217 @@ impl QueryExecutor {
             paging_state: None,
             warnings: Vec::new(),
         })
+    }
+
+    fn render_keyspace_ddl(keyspace: &KeyspaceMetadata) -> String {
+        let mut replication = Vec::new();
+        replication.push(format!(
+            "'class': '{}'",
+            Self::short_strategy_name(&keyspace.params.replication.strategy_class)
+        ));
+        for (key, value) in &keyspace.params.replication.options {
+            replication.push(format!("'{}': '{}'", key, value));
+        }
+        let mut ddl = format!(
+            "CREATE KEYSPACE {} WITH replication = {{{}}} AND durable_writes = {};",
+            keyspace.name,
+            replication.join(", "),
+            keyspace.params.durable_writes
+        );
+        if !keyspace.params.comment.is_empty() {
+            ddl.push_str(&format!(
+                "\nCOMMENT ON KEYSPACE {} IS '{}';",
+                keyspace.name,
+                keyspace.params.comment.replace('\'', "''")
+            ));
+        }
+        ddl
+    }
+
+    fn render_table_ddl(table: &TableMetadata) -> String {
+        let mut lines = Vec::new();
+        let mut columns = table.columns.clone();
+        columns.sort_by(|left, right| {
+            Self::column_render_rank(left.kind)
+                .cmp(&Self::column_render_rank(right.kind))
+                .then_with(|| left.position.cmp(&right.position))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+        for column in columns {
+            let static_suffix = if column.kind == ColumnKind::Static {
+                " static"
+            } else {
+                ""
+            };
+            lines.push(format!(
+                "    {} {}{}",
+                column.name,
+                column.column_type.cql_name(),
+                static_suffix
+            ));
+        }
+        lines.push(format!(
+            "    PRIMARY KEY ({})",
+            Self::render_primary_key(table)
+        ));
+
+        let mut ddl = format!(
+            "CREATE TABLE {}.{} (\n{}\n)",
+            table.keyspace,
+            table.name,
+            lines.join(",\n")
+        );
+        let clustering_order = Self::render_clustering_order(table);
+        if !clustering_order.is_empty() {
+            ddl.push_str(&format!(" WITH CLUSTERING ORDER BY ({})", clustering_order));
+        }
+        ddl.push(';');
+        for column in table
+            .columns
+            .iter()
+            .filter(|column| !column.comment.is_empty())
+        {
+            ddl.push_str(&format!(
+                "\nCOMMENT ON COLUMN {}.{}.{} IS '{}';",
+                table.keyspace,
+                table.name,
+                column.name,
+                column.comment.replace('\'', "''")
+            ));
+        }
+        ddl
+    }
+
+    fn render_type_ddl(user_type: &UserType) -> String {
+        let fields = user_type
+            .field_names
+            .iter()
+            .zip(user_type.field_types.iter())
+            .map(|(name, cql_type)| format!("    {} {}", name, cql_type))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        let mut ddl = format!(
+            "CREATE TYPE {}.{} (\n{}\n);",
+            user_type.keyspace, user_type.name, fields
+        );
+        if !user_type.comment.is_empty() {
+            ddl.push_str(&format!(
+                "\nCOMMENT ON TYPE {}.{} IS '{}';",
+                user_type.keyspace,
+                user_type.name,
+                user_type.comment.replace('\'', "''")
+            ));
+        }
+        for field_name in &user_type.field_names {
+            if let Some(comment) = user_type.field_comments.get(field_name) {
+                if !comment.is_empty() {
+                    ddl.push_str(&format!(
+                        "\nCOMMENT ON FIELD {}.{}.{} IS '{}';",
+                        user_type.keyspace,
+                        user_type.name,
+                        field_name,
+                        comment.replace('\'', "''")
+                    ));
+                }
+            }
+        }
+        ddl
+    }
+
+    fn render_function_ddl(function: &UserFunction) -> String {
+        let args = function
+            .arg_names
+            .iter()
+            .zip(function.arg_types.iter())
+            .map(|(name, cql_type)| format!("{} {}", name, cql_type))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let null_clause = if function.called_on_null_input {
+            "CALLED ON NULL INPUT"
+        } else {
+            "RETURNS NULL ON NULL INPUT"
+        };
+        format!(
+            "CREATE FUNCTION {}.{}({})\n    {} RETURNS {}\n    LANGUAGE {}\n    AS '{}';",
+            function.keyspace,
+            function.name,
+            args,
+            null_clause,
+            function.return_type,
+            function.language,
+            function.body.replace('\'', "''")
+        )
+    }
+
+    fn render_aggregate_ddl(aggregate: &UserAggregate) -> String {
+        let mut ddl = format!(
+            "CREATE AGGREGATE {}.{}({})\n    SFUNC {}\n    STYPE {}",
+            aggregate.keyspace,
+            aggregate.name,
+            aggregate.arg_types.join(", "),
+            aggregate.sfunc,
+            aggregate.state_type
+        );
+        if let Some(finalfunc) = &aggregate.finalfunc {
+            ddl.push_str(&format!("\n    FINALFUNC {}", finalfunc));
+        }
+        if !aggregate.return_type.is_empty() && aggregate.return_type != aggregate.state_type {
+            ddl.push_str(&format!("\n    RETURNS {}", aggregate.return_type));
+        }
+        if let Some(initcond) = &aggregate.initcond {
+            ddl.push_str(&format!("\n    INITCOND {}", initcond));
+        }
+        ddl.push(';');
+        ddl
+    }
+
+    fn column_render_rank(kind: ColumnKind) -> u8 {
+        match kind {
+            ColumnKind::PartitionKey => 0,
+            ColumnKind::Clustering => 1,
+            ColumnKind::Static => 2,
+            ColumnKind::Regular => 3,
+        }
+    }
+
+    fn render_primary_key(table: &TableMetadata) -> String {
+        let partition_key = table.partition_key_columns();
+        let clustering = table.clustering_columns();
+        let partition = if partition_key.len() > 1 {
+            format!(
+                "({})",
+                partition_key
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        } else {
+            partition_key
+                .first()
+                .map(|column| column.name.clone())
+                .unwrap_or_default()
+        };
+        let mut parts = vec![partition];
+        parts.extend(clustering.iter().map(|column| column.name.clone()));
+        parts.join(", ")
+    }
+
+    fn render_clustering_order(table: &TableMetadata) -> String {
+        table
+            .clustering_columns()
+            .into_iter()
+            .filter_map(|column| match column.clustering_order {
+                ClusteringOrder::Asc => Some(format!("{} ASC", column.name)),
+                ClusteringOrder::Desc => Some(format!("{} DESC", column.name)),
+                ClusteringOrder::None => None,
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    fn short_strategy_name(strategy: &str) -> &str {
+        strategy.rsplit('.').next().unwrap_or(strategy)
     }
 
     fn resolve_user_aggregate_selector(
@@ -5083,6 +5616,12 @@ fn result_column_for_selector(
             name: "count".to_string(),
             cql_type: CqlType::Bigint,
         }),
+        Selector::Cast { target, .. } => Some(ResultColumn {
+            keyspace: keyspace.to_string(),
+            table: table_name.to_string(),
+            name: selector_output_name(selector),
+            cql_type: target.resolve()?,
+        }),
         Selector::WritetimeOrTtl(kind, _) => Some(ResultColumn {
             keyspace: keyspace.to_string(),
             table: table_name.to_string(),
@@ -5142,6 +5681,9 @@ fn selector_output_name(selector: &Selector) -> String {
         Selector::Alias { alias, .. } => alias.clone(),
         Selector::Count => "count".to_string(),
         Selector::Function(name, args) => {
+            if is_count_rows_name(name) && args.is_empty() {
+                return "count".to_string();
+            }
             let args = if args.is_empty() {
                 "*".to_string()
             } else {
@@ -5151,6 +5693,13 @@ fn selector_output_name(selector: &Selector) -> String {
                     .join(", ")
             };
             format!("{}({})", name.to_ascii_lowercase(), args)
+        }
+        Selector::Cast { selector, target } => {
+            let target = target
+                .resolve()
+                .map(|target| target.cql_name())
+                .unwrap_or_else(|| "unknown".to_string());
+            format!("cast({} as {})", selector_output_name(selector), target)
         }
         Selector::WritetimeOrTtl(kind, col) => format!("{}({})", kind, col),
     }
@@ -5186,6 +5735,7 @@ fn selector_result_type(
         Selector::Column(name) => table.column(name).map(|c| c.column_type.clone()),
         Selector::Alias { selector, .. } => selector_result_type(selector, table),
         Selector::Count => Some(CqlType::Bigint),
+        Selector::Cast { target, .. } => target.resolve(),
         Selector::WritetimeOrTtl(kind, _) => {
             if kind.eq_ignore_ascii_case("ttl") {
                 Some(CqlType::Int)
@@ -5193,7 +5743,7 @@ fn selector_result_type(
                 Some(CqlType::Bigint)
             }
         }
-        Selector::Function(name, _) if name.eq_ignore_ascii_case("count") => Some(CqlType::Bigint),
+        Selector::Function(name, _) if is_count_rows_selector_name(name) => Some(CqlType::Bigint),
         Selector::Function(name, args) if is_aggregate_name(name) => {
             let arg_type = args
                 .first()
@@ -5229,6 +5779,7 @@ fn selector_result_type_with_functions(
         Selector::Alias { selector, .. } => {
             selector_result_type_with_functions(selector, table, keyspace_meta, registry)
         }
+        Selector::Cast { target, .. } => target.resolve(),
         _ => selector_result_type(selector, table),
     }
 }
@@ -5273,6 +5824,23 @@ where
             udf_registry,
             user_function,
             builtin_function,
+        ),
+        Selector::Cast { selector, target } => cast_selector_value(
+            selector,
+            target,
+            partition_key,
+            row,
+            static_row,
+            column_value,
+            pk_names,
+            ck_names,
+            static_col_names,
+            now_secs,
+            table,
+            registry,
+            keyspace,
+            keyspace_meta,
+            udf_registry,
         ),
         Selector::Function(_, args) => {
             let Some(function) = user_function else {
@@ -5418,6 +5986,23 @@ where
             keyspace_meta,
             udf_registry,
         ),
+        Selector::Cast { selector, target } => cast_selector_value(
+            selector,
+            target,
+            partition_key,
+            row,
+            static_row,
+            column_value,
+            pk_names,
+            ck_names,
+            static_col_names,
+            now_secs,
+            table,
+            registry,
+            keyspace,
+            keyspace_meta,
+            udf_registry,
+        ),
         Selector::Function(name, args) if !is_builtin_aggregate_name(name) => {
             let arg_types = args
                 .iter()
@@ -5535,6 +6120,74 @@ where
     }
 }
 
+fn cast_selector_value<F>(
+    selector: &Selector,
+    target: &cassandra_cql::ast::CqlTypeName,
+    partition_key: &[u8],
+    row: &Row,
+    static_row: Option<&Row>,
+    column_value: &F,
+    pk_names: &[String],
+    ck_names: &[String],
+    static_col_names: &[String],
+    now_secs: i32,
+    table: &cassandra_schema::table::TableMetadata,
+    registry: &FunctionRegistry,
+    keyspace: &str,
+    keyspace_meta: &KeyspaceMetadata,
+    udf_registry: &UdfRegistry,
+) -> Result<Option<Vec<u8>>, ExecutorError>
+where
+    F: Fn(&str, &[u8], &Row, Option<&Row>) -> Option<Vec<u8>>,
+{
+    let source_type = selector_result_type_with_functions(selector, table, keyspace_meta, registry)
+        .ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Unsupported CAST source selector '{}'",
+                selector_output_name(selector)
+            ))
+        })?;
+    let target_type = target.resolve().ok_or_else(|| {
+        ExecutorError::InvalidQuery(format!("Unsupported CAST target type '{:?}'", target))
+    })?;
+    let value = select_scalar_argument_value(
+        selector,
+        partition_key,
+        row,
+        static_row,
+        column_value,
+        pk_names,
+        ck_names,
+        static_col_names,
+        now_secs,
+        table,
+        registry,
+        keyspace,
+        keyspace_meta,
+        udf_registry,
+    )?;
+    if source_type == target_type {
+        return Ok(value);
+    }
+    let Some(function) = registry.resolve_with_return("cast", &[source_type], &target_type) else {
+        return Err(ExecutorError::InvalidQuery(format!(
+            "Unsupported CAST from {} to {}",
+            selector_result_type_with_functions(selector, table, keyspace_meta, registry)
+                .map(|ty| ty.cql_name())
+                .unwrap_or_else(|| "unknown".to_string()),
+            target_type.cql_name()
+        )));
+    };
+    let arg_refs = [value.as_deref()];
+    function.execute(&arg_refs).map_err(|e| {
+        ExecutorError::InvalidQuery(format!(
+            "Failed to execute CAST to {}: {}",
+            target_type.cql_name(),
+            e
+        ))
+    })
+}
+
 fn writetime_or_ttl_value(
     kind: &str,
     column: &str,
@@ -5586,10 +6239,8 @@ fn cell_for_column<'a>(
 
 fn aggregate_output_type(name: &str, arg_type: Option<&CqlType>) -> CqlType {
     match name.to_ascii_lowercase().as_str() {
-        "count" => CqlType::Bigint,
-        "avg" => CqlType::Double,
-        "sum" if arg_type.is_some_and(is_integral_type) => CqlType::Bigint,
-        "sum" => CqlType::Double,
+        "count" | "count_rows" | "countrows" => CqlType::Bigint,
+        "sum" | "avg" => arg_type.cloned().unwrap_or(CqlType::Blob),
         "min" | "max" => arg_type.cloned().unwrap_or(CqlType::Blob),
         _ => CqlType::Blob,
     }
@@ -5600,12 +6251,83 @@ fn function_signature(name: &str, arg_types: &[CqlType]) -> String {
     format!("{}({})", name, arg_type_names.join(", "))
 }
 
+fn role_network_permissions(
+    datacenter_access: Option<&RoleAccess>,
+    cidr_access: Option<&RoleAccess>,
+) -> Option<NetworkPermissions> {
+    if datacenter_access.is_none() && cidr_access.is_none() {
+        return None;
+    }
+
+    let (all_datacenters, allowed_datacenters) = match datacenter_access {
+        Some(RoleAccess::All) => (true, Vec::new()),
+        Some(RoleAccess::Restricted(values)) => (false, values.clone()),
+        None => (true, Vec::new()),
+    };
+    let (all_cidrs, allowed_cidrs) = match cidr_access {
+        Some(RoleAccess::All) => (true, Vec::new()),
+        Some(RoleAccess::Restricted(values)) => (false, values.clone()),
+        None => (true, Vec::new()),
+    };
+
+    Some(NetworkPermissions {
+        all_datacenters,
+        allowed_datacenters,
+        all_cidrs,
+        allowed_cidrs,
+    })
+}
+
 fn udf_arg_signature(arg_types: &[CqlType]) -> Vec<(String, String)> {
     arg_types
         .iter()
         .enumerate()
         .map(|(idx, arg_type)| (format!("arg{}", idx), arg_type.cql_name()))
         .collect()
+}
+
+fn canonical_ast_cql_type_name(cql_type: &cassandra_cql::ast::CqlTypeName) -> String {
+    cql_type
+        .resolve()
+        .map(|resolved| resolved.cql_name())
+        .unwrap_or_else(|| canonical_cql_type_name(&render_ast_cql_type_name(cql_type)))
+}
+
+fn render_ast_cql_type_name(cql_type: &cassandra_cql::ast::CqlTypeName) -> String {
+    match cql_type {
+        cassandra_cql::ast::CqlTypeName::Simple(name) => name.clone(),
+        cassandra_cql::ast::CqlTypeName::List(inner) => {
+            format!("list<{}>", render_ast_cql_type_name(inner))
+        }
+        cassandra_cql::ast::CqlTypeName::Set(inner) => {
+            format!("set<{}>", render_ast_cql_type_name(inner))
+        }
+        cassandra_cql::ast::CqlTypeName::Map(key, value) => {
+            format!(
+                "map<{}, {}>",
+                render_ast_cql_type_name(key),
+                render_ast_cql_type_name(value)
+            )
+        }
+        cassandra_cql::ast::CqlTypeName::Tuple(types) => {
+            let inner = types
+                .iter()
+                .map(render_ast_cql_type_name)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("tuple<{}>", inner)
+        }
+        cassandra_cql::ast::CqlTypeName::Frozen(inner) => {
+            format!("frozen<{}>", render_ast_cql_type_name(inner))
+        }
+        cassandra_cql::ast::CqlTypeName::Vector(inner, dimensions) => {
+            format!(
+                "vector<{}, {}>",
+                render_ast_cql_type_name(inner),
+                dimensions
+            )
+        }
+    }
 }
 
 fn cql_type_name_is_compatible(new_type: &str, existing_type: &str) -> bool {
@@ -5708,7 +6430,18 @@ fn term_matches_cql_type(term: &Term, cql_type: &CqlType) -> bool {
         Term::Literal(Literal::Blob(_)) => matches!(cql_type, CqlType::Blob),
         Term::Literal(Literal::Uuid(_)) => matches!(cql_type, CqlType::Uuid | CqlType::Timeuuid),
         Term::Literal(Literal::Boolean(_)) => matches!(cql_type, CqlType::Boolean),
-        Term::TypeHint(_, inner) => term_matches_cql_type(inner, cql_type),
+        Term::TypeHint(type_hint, inner) => type_hint.resolve().is_some_and(|hinted_type| {
+            is_compatible_with(&hinted_type, cql_type) && term_matches_cql_type(inner, &hinted_type)
+        }),
+        Term::CollectionElement { key, value } => match cql_type {
+            CqlType::List(inner, _) => {
+                term_matches_cql_type(key, &CqlType::Int) && term_matches_cql_type(value, inner)
+            }
+            CqlType::Map(key_type, value_type, _) => {
+                term_matches_cql_type(key, key_type) && term_matches_cql_type(value, value_type)
+            }
+            _ => false,
+        },
         Term::CollectionLiteral(values) => match cql_type {
             CqlType::List(inner, _) | CqlType::Set(inner, _) => values
                 .iter()
@@ -5805,15 +6538,15 @@ fn aggregate_initial_states(
                 };
             }
             match aggregate_selector_name(selector).as_deref() {
-                Some("count") => AggregateState::Count { count: 0 },
-                Some("sum") => AggregateState::Sum {
-                    total: 0.0,
+                Some("count") => AggregateState::Count {
                     count: 0,
-                    integral: arg_type.as_ref().is_some_and(is_integral_type),
+                    count_non_null: count_selector_counts_non_null(selector),
+                },
+                Some("sum") => AggregateState::Sum {
+                    accumulator: SumAccumulator::new(arg_type.unwrap_or(CqlType::Blob)),
                 },
                 Some("avg") => AggregateState::Avg {
-                    total: 0.0,
-                    count: 0,
+                    accumulator: AvgAccumulator::new(arg_type.unwrap_or(CqlType::Blob)),
                 },
                 Some("min") => AggregateState::MinMax {
                     value: None,
@@ -5837,15 +6570,13 @@ enum AggregateState {
     },
     Count {
         count: i64,
+        count_non_null: bool,
     },
     Sum {
-        total: f64,
-        count: i64,
-        integral: bool,
+        accumulator: SumAccumulator,
     },
     Avg {
-        total: f64,
-        count: i64,
+        accumulator: AvgAccumulator,
     },
     MinMax {
         value: Option<Vec<u8>>,
@@ -5868,14 +6599,28 @@ impl AggregateState {
                     *stored = Some(value.clone());
                 }
             }
-            AggregateState::Count { count } => {
-                *count += 1;
-            }
-            AggregateState::Sum { total, count, .. } | AggregateState::Avg { total, count } => {
-                let value = values.first().and_then(|value| value.as_ref());
-                if let Some(value) = value.and_then(|v| numeric_value(v)) {
-                    *total += value;
+            AggregateState::Count {
+                count,
+                count_non_null,
+            } => {
+                if !*count_non_null || values.iter().any(Option::is_some) {
                     *count += 1;
+                }
+            }
+            AggregateState::Sum { accumulator } => {
+                let value = values.first().and_then(|value| value.as_ref());
+                if let Some(value) = value {
+                    accumulator
+                        .add(value)
+                        .map_err(ExecutorError::InvalidQuery)?;
+                }
+            }
+            AggregateState::Avg { accumulator } => {
+                let value = values.first().and_then(|value| value.as_ref());
+                if let Some(value) = value {
+                    accumulator
+                        .add(value)
+                        .map_err(ExecutorError::InvalidQuery)?;
                 }
             }
             AggregateState::MinMax {
@@ -5936,27 +6681,15 @@ impl AggregateState {
     fn finalize(self) -> Result<Option<Vec<u8>>, ExecutorError> {
         match self {
             AggregateState::PassThrough { value } => Ok(value),
-            AggregateState::Count { count } => Ok(Some(count.to_be_bytes().to_vec())),
-            AggregateState::Sum {
-                total,
-                count,
-                integral,
-            } => {
-                if count == 0 {
-                    Ok(None)
-                } else if integral {
-                    Ok(Some((total as i64).to_be_bytes().to_vec()))
-                } else {
-                    Ok(Some(total.to_be_bytes().to_vec()))
-                }
-            }
-            AggregateState::Avg { total, count } => {
-                if count == 0 {
-                    Ok(None)
-                } else {
-                    Ok(Some((total / count as f64).to_be_bytes().to_vec()))
-                }
-            }
+            AggregateState::Count { count, .. } => Ok(Some(count.to_be_bytes().to_vec())),
+            AggregateState::Sum { accumulator } => accumulator
+                .finalize()
+                .map(Some)
+                .map_err(ExecutorError::InvalidQuery),
+            AggregateState::Avg { accumulator } => accumulator
+                .finalize()
+                .map(Some)
+                .map_err(ExecutorError::InvalidQuery),
             AggregateState::MinMax { value, .. } => Ok(value),
             AggregateState::UserDefined {
                 state, return_type, ..
@@ -5978,24 +6711,314 @@ impl AggregateState {
     }
 }
 
-fn numeric_value(value: &[u8]) -> Option<f64> {
-    match value.len() {
-        1 => Some(i8::from_be_bytes([value[0]]) as f64),
-        2 => Some(i16::from_be_bytes(value.try_into().ok()?) as f64),
-        4 => Some(i32::from_be_bytes(value.try_into().ok()?) as f64),
-        8 => Some(i64::from_be_bytes(value.try_into().ok()?) as f64),
-        _ => None,
+enum SumAccumulator {
+    Tinyint(i8),
+    Smallint(i16),
+    Int(i32),
+    Bigint(i64),
+    Counter(i64),
+    Float(KahanAccumulator),
+    Double(KahanAccumulator),
+    Varint(BigInt),
+    Decimal(DecimalValue),
+    Unsupported(CqlType),
+}
+
+impl SumAccumulator {
+    fn new(cql_type: CqlType) -> Self {
+        match cql_type {
+            CqlType::Tinyint => Self::Tinyint(0),
+            CqlType::Smallint => Self::Smallint(0),
+            CqlType::Int => Self::Int(0),
+            CqlType::Bigint => Self::Bigint(0),
+            CqlType::Counter => Self::Counter(0),
+            CqlType::Float => Self::Float(KahanAccumulator::default()),
+            CqlType::Double => Self::Double(KahanAccumulator::default()),
+            CqlType::Varint => Self::Varint(BigInt::zero()),
+            CqlType::Decimal => Self::Decimal(DecimalValue::from_i64(0)),
+            other => Self::Unsupported(other),
+        }
     }
+
+    fn add(&mut self, value: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Tinyint(total) => *total = total.wrapping_add(read_i8_value(value)?),
+            Self::Smallint(total) => *total = total.wrapping_add(read_i16_value(value)?),
+            Self::Int(total) => *total = total.wrapping_add(read_i32_value(value)?),
+            Self::Bigint(total) | Self::Counter(total) => {
+                *total = total.wrapping_add(read_i64_value(value)?)
+            }
+            Self::Float(total) => total.add(read_f32_value(value)? as f64),
+            Self::Double(total) => total.add(read_f64_value(value)?),
+            Self::Varint(total) => *total += BigInt::from_signed_bytes_be(value),
+            Self::Decimal(total) => *total = total.add(&DecimalValue::from_bytes(value)?),
+            Self::Unsupported(cql_type) => {
+                return Err(format!("unsupported sum type {}", cql_type.cql_name()));
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(self) -> Result<Vec<u8>, String> {
+        Ok(match self {
+            Self::Tinyint(total) => vec![total as u8],
+            Self::Smallint(total) => total.to_be_bytes().to_vec(),
+            Self::Int(total) => total.to_be_bytes().to_vec(),
+            Self::Bigint(total) | Self::Counter(total) => total.to_be_bytes().to_vec(),
+            Self::Float(total) => (total.compute() as f32).to_be_bytes().to_vec(),
+            Self::Double(total) => total.compute().to_be_bytes().to_vec(),
+            Self::Varint(total) => total.to_signed_bytes_be(),
+            Self::Decimal(total) => total.to_bytes(),
+            Self::Unsupported(cql_type) => {
+                return Err(format!("unsupported sum type {}", cql_type.cql_name()));
+            }
+        })
+    }
+}
+
+enum AvgAccumulator {
+    Tinyint { sum: BigInt, count: i64 },
+    Smallint { sum: BigInt, count: i64 },
+    Int { sum: BigInt, count: i64 },
+    Bigint { sum: BigInt, count: i64 },
+    Counter { sum: BigInt, count: i64 },
+    Float { sum: KahanAccumulator, count: i64 },
+    Double { sum: KahanAccumulator, count: i64 },
+    Varint { sum: BigInt, count: i64 },
+    Decimal { avg: DecimalValue, count: i64 },
+    Unsupported(CqlType),
+}
+
+impl AvgAccumulator {
+    fn new(cql_type: CqlType) -> Self {
+        match cql_type {
+            CqlType::Tinyint => Self::Tinyint {
+                sum: BigInt::zero(),
+                count: 0,
+            },
+            CqlType::Smallint => Self::Smallint {
+                sum: BigInt::zero(),
+                count: 0,
+            },
+            CqlType::Int => Self::Int {
+                sum: BigInt::zero(),
+                count: 0,
+            },
+            CqlType::Bigint => Self::Bigint {
+                sum: BigInt::zero(),
+                count: 0,
+            },
+            CqlType::Counter => Self::Counter {
+                sum: BigInt::zero(),
+                count: 0,
+            },
+            CqlType::Float => Self::Float {
+                sum: KahanAccumulator::default(),
+                count: 0,
+            },
+            CqlType::Double => Self::Double {
+                sum: KahanAccumulator::default(),
+                count: 0,
+            },
+            CqlType::Varint => Self::Varint {
+                sum: BigInt::zero(),
+                count: 0,
+            },
+            CqlType::Decimal => Self::Decimal {
+                avg: DecimalValue::from_i64(0),
+                count: 0,
+            },
+            other => Self::Unsupported(other),
+        }
+    }
+
+    fn add(&mut self, value: &[u8]) -> Result<(), String> {
+        match self {
+            Self::Tinyint { sum, count } => {
+                *sum += BigInt::from(read_i8_value(value)?);
+                *count += 1;
+            }
+            Self::Smallint { sum, count } => {
+                *sum += BigInt::from(read_i16_value(value)?);
+                *count += 1;
+            }
+            Self::Int { sum, count } => {
+                *sum += BigInt::from(read_i32_value(value)?);
+                *count += 1;
+            }
+            Self::Bigint { sum, count } | Self::Counter { sum, count } => {
+                *sum += BigInt::from(read_i64_value(value)?);
+                *count += 1;
+            }
+            Self::Float { sum, count } => {
+                sum.add(read_f32_value(value)? as f64);
+                *count += 1;
+            }
+            Self::Double { sum, count } => {
+                sum.add(read_f64_value(value)?);
+                *count += 1;
+            }
+            Self::Varint { sum, count } => {
+                *sum += BigInt::from_signed_bytes_be(value);
+                *count += 1;
+            }
+            Self::Decimal { avg, count } => {
+                *count += 1;
+                let number = DecimalValue::from_bytes(value)?;
+                let delta = number.subtract(avg);
+                *avg = avg.add(&delta.divide_i64_half_even_same_scale(*count)?);
+            }
+            Self::Unsupported(cql_type) => {
+                return Err(format!("unsupported avg type {}", cql_type.cql_name()));
+            }
+        }
+        Ok(())
+    }
+
+    fn finalize(self) -> Result<Vec<u8>, String> {
+        Ok(match self {
+            Self::Tinyint { sum, count } => vec![bigint_avg(&sum, count) as i8 as u8],
+            Self::Smallint { sum, count } => {
+                (bigint_avg(&sum, count) as i16).to_be_bytes().to_vec()
+            }
+            Self::Int { sum, count } => (bigint_avg(&sum, count) as i32).to_be_bytes().to_vec(),
+            Self::Bigint { sum, count } | Self::Counter { sum, count } => {
+                (bigint_avg(&sum, count) as i64).to_be_bytes().to_vec()
+            }
+            Self::Float { sum, count } => {
+                let value = if count == 0 {
+                    0.0
+                } else {
+                    sum.compute() / count as f64
+                };
+                (value as f32).to_be_bytes().to_vec()
+            }
+            Self::Double { sum, count } => {
+                let value = if count == 0 {
+                    0.0
+                } else {
+                    sum.compute() / count as f64
+                };
+                value.to_be_bytes().to_vec()
+            }
+            Self::Varint { sum, count } => {
+                if count == 0 {
+                    BigInt::zero().to_signed_bytes_be()
+                } else {
+                    (sum / BigInt::from(count)).to_signed_bytes_be()
+                }
+            }
+            Self::Decimal { avg, .. } => avg.to_bytes(),
+            Self::Unsupported(cql_type) => {
+                return Err(format!("unsupported avg type {}", cql_type.cql_name()));
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct KahanAccumulator {
+    sum: f64,
+    compensation: f64,
+    simple_sum: f64,
+}
+
+impl KahanAccumulator {
+    fn add(&mut self, value: f64) {
+        self.simple_sum += value;
+        let tmp = value - self.compensation;
+        let rounded = self.sum + tmp;
+        self.compensation = (rounded - self.sum) - tmp;
+        self.sum = rounded;
+    }
+
+    fn compute(self) -> f64 {
+        let result = self.sum + self.compensation;
+        if result.is_nan() && self.simple_sum.is_infinite() {
+            self.simple_sum
+        } else {
+            result
+        }
+    }
+}
+
+fn bigint_avg(sum: &BigInt, count: i64) -> i128 {
+    if count == 0 {
+        return 0;
+    }
+    let quotient = sum / BigInt::from(count);
+    let bytes = quotient.to_signed_bytes_be();
+    let sign = if bytes.first().is_some_and(|b| b & 0x80 != 0) {
+        0xFF
+    } else {
+        0x00
+    };
+    let mut padded = [sign; 16];
+    let take = bytes.len().min(16);
+    padded[16 - take..].copy_from_slice(&bytes[bytes.len() - take..]);
+    i128::from_be_bytes(padded)
+}
+
+fn read_i8_value(value: &[u8]) -> Result<i8, String> {
+    if value.len() != 1 {
+        return Err(format!("invalid tinyint bytes: got {}", value.len()));
+    }
+    Ok(value[0] as i8)
+}
+
+fn read_i16_value(value: &[u8]) -> Result<i16, String> {
+    let bytes: [u8; 2] = value
+        .try_into()
+        .map_err(|_| format!("invalid smallint bytes: got {}", value.len()))?;
+    Ok(i16::from_be_bytes(bytes))
+}
+
+fn read_i32_value(value: &[u8]) -> Result<i32, String> {
+    let bytes: [u8; 4] = value
+        .try_into()
+        .map_err(|_| format!("invalid int bytes: got {}", value.len()))?;
+    Ok(i32::from_be_bytes(bytes))
+}
+
+fn read_i64_value(value: &[u8]) -> Result<i64, String> {
+    let bytes: [u8; 8] = value
+        .try_into()
+        .map_err(|_| format!("invalid bigint bytes: got {}", value.len()))?;
+    Ok(i64::from_be_bytes(bytes))
+}
+
+fn read_f32_value(value: &[u8]) -> Result<f32, String> {
+    let bytes: [u8; 4] = value
+        .try_into()
+        .map_err(|_| format!("invalid float bytes: got {}", value.len()))?;
+    Ok(f32::from_be_bytes(bytes))
+}
+
+fn read_f64_value(value: &[u8]) -> Result<f64, String> {
+    let bytes: [u8; 8] = value
+        .try_into()
+        .map_err(|_| format!("invalid double bytes: got {}", value.len()))?;
+    Ok(f64::from_be_bytes(bytes))
 }
 
 fn aggregate_selector_name(selector: &Selector) -> Option<String> {
     match selector {
         Selector::Count => Some("count".to_string()),
+        Selector::Function(name, _) if is_count_rows_name(name) => Some("count".to_string()),
         Selector::Function(name, _) if is_builtin_aggregate_name(name) => {
             Some(name.to_ascii_lowercase())
         }
         Selector::Alias { selector, .. } => aggregate_selector_name(selector),
+        Selector::Cast { .. } => None,
         _ => None,
+    }
+}
+
+fn count_selector_counts_non_null(selector: &Selector) -> bool {
+    match selector {
+        Selector::Function(name, args) if name.eq_ignore_ascii_case("count") => !args.is_empty(),
+        Selector::Alias { selector, .. } => count_selector_counts_non_null(selector),
+        _ => false,
     }
 }
 
@@ -6020,6 +7043,22 @@ where
 {
     match selector {
         Selector::Column(name) => Ok(vec![column_value(name, partition_key, row, static_row)]),
+        Selector::Cast { .. } => Ok(vec![aggregate_argument_value(
+            selector,
+            partition_key,
+            row,
+            static_row,
+            column_value,
+            pk_names,
+            ck_names,
+            static_col_names,
+            now_secs,
+            table,
+            registry,
+            keyspace,
+            keyspace_meta,
+            udf_registry,
+        )?]),
         Selector::Alias { selector, .. } => selector_aggregate_values(
             selector,
             partition_key,
@@ -6117,6 +7156,22 @@ where
                 udf_registry,
             )
         }
+        Selector::Cast { .. } => select_scalar_argument_value(
+            selector,
+            partition_key,
+            row,
+            static_row,
+            column_value,
+            pk_names,
+            ck_names,
+            static_col_names,
+            now_secs,
+            table,
+            registry,
+            keyspace,
+            keyspace_meta,
+            udf_registry,
+        ),
         Selector::WritetimeOrTtl(kind, column) => Ok(writetime_or_ttl_value(
             kind,
             column,
@@ -6135,6 +7190,7 @@ fn user_aggregate_selector_parts(selector: &Selector) -> Option<(&str, &[Selecto
     match selector {
         Selector::Function(name, args) => Some((name.as_str(), args.as_slice())),
         Selector::Alias { selector, .. } => user_aggregate_selector_parts(selector),
+        Selector::Cast { .. } => None,
         _ => None,
     }
 }
@@ -6143,6 +7199,7 @@ fn user_function_selector_parts(selector: &Selector) -> Option<(&str, &[Selector
     match selector {
         Selector::Function(name, args) => Some((name.as_str(), args.as_slice())),
         Selector::Alias { selector, .. } => user_function_selector_parts(selector),
+        Selector::Cast { .. } => None,
         _ => None,
     }
 }
@@ -6174,7 +7231,18 @@ fn is_aggregate_name(name: &str) -> bool {
 fn is_builtin_aggregate_name(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "count" | "sum" | "avg" | "min" | "max"
+        "count" | "count_rows" | "countrows" | "sum" | "avg" | "min" | "max"
+    )
+}
+
+fn is_count_rows_selector_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("count") || is_count_rows_name(name)
+}
+
+fn is_count_rows_name(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "count_rows" | "countrows"
     )
 }
 
@@ -6197,15 +7265,250 @@ fn current_timestamp_micros() -> i64 {
         .as_micros() as i64
 }
 
-fn mask_args_to_strings(
-    masked_with: Option<&(String, Vec<Term>)>,
-) -> Option<(String, Vec<String>)> {
-    masked_with.map(|(function_name, args)| {
-        (
-            function_name.clone(),
-            args.iter().map(term_to_metadata_string).collect(),
-        )
-    })
+fn apply_cql_column_mask(
+    table: &TableMetadata,
+    registry: &FunctionRegistry,
+    column_name: &str,
+    value: &[u8],
+) -> Option<Option<Vec<u8>>> {
+    let column = table.column(column_name)?;
+    let (function_name, args) = column.masked_with.as_ref()?;
+    let arg_types = mask_function_arg_types(function_name, &column.column_type, args)?;
+    let mut arg_values = vec![Some(value.to_vec())];
+    for (arg, arg_type) in args.iter().zip(arg_types.iter().skip(1)) {
+        arg_values.push(mask_metadata_arg_to_bytes(arg, arg_type)?);
+    }
+    let function = registry.resolve(function_name, &arg_types)?;
+    let arg_refs = arg_values
+        .iter()
+        .map(|value| value.as_deref())
+        .collect::<Vec<_>>();
+    if function.return_type() != column.column_type {
+        return None;
+    }
+    function.execute(&arg_refs).ok()
+}
+
+fn masked_restricted_columns(
+    table: &TableMetadata,
+    relations: &[Relation],
+    partition_key_columns: &[String],
+) -> Vec<String> {
+    let mut columns = Vec::new();
+    for relation in relations {
+        if relation.column.eq_ignore_ascii_case("token") {
+            for column_name in partition_key_columns {
+                if table_column(table, column_name)
+                    .is_some_and(|column| column.masked_with.is_some())
+                {
+                    columns.push(column_name.clone());
+                }
+            }
+        } else if table_column(table, &relation.column)
+            .is_some_and(|column| column.masked_with.is_some())
+        {
+            columns.push(relation.column.clone());
+        }
+    }
+    columns.sort();
+    columns.dedup();
+    columns
+}
+
+fn validate_cql_column_mask(
+    registry: &FunctionRegistry,
+    column: &ColumnMetadata,
+    function_name: &str,
+    args: &[Term],
+) -> Result<Vec<String>, ExecutorError> {
+    let metadata_args = args.iter().map(term_to_metadata_string).collect::<Vec<_>>();
+    let arg_types = mask_function_arg_types(function_name, &column.column_type, &metadata_args)
+        .ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Invalid arguments for mask {} on column '{}' of type {}",
+                function_name,
+                column.name,
+                column.column_type.cql_name()
+            ))
+        })?;
+    for (arg, arg_type) in args.iter().zip(arg_types.iter().skip(1)) {
+        let bytes = mask_argument_to_bytes(arg, arg_type, registry).map_err(|err| {
+            ExecutorError::InvalidQuery(format!(
+                "Invalid mask argument for {} on column '{}': {}",
+                function_name, column.name, err
+            ))
+        })?;
+        if bytes.is_none() && !term_is_null(arg) {
+            return Err(ExecutorError::InvalidQuery(format!(
+                "Invalid mask argument {:?} for expected type {}",
+                arg,
+                arg_type.cql_name()
+            )));
+        }
+    }
+    validate_stored_cql_column_mask(registry, column, function_name, &metadata_args)?;
+    Ok(metadata_args)
+}
+
+fn validate_stored_cql_column_mask(
+    registry: &FunctionRegistry,
+    column: &ColumnMetadata,
+    function_name: &str,
+    args: &[String],
+) -> Result<(), ExecutorError> {
+    let arg_types =
+        mask_function_arg_types(function_name, &column.column_type, args).ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Invalid arguments for mask {} on column '{}' of type {}",
+                function_name,
+                column.name,
+                column.column_type.cql_name()
+            ))
+        })?;
+    let mut validation_args = vec![Some(b"validation".to_vec())];
+    for (arg, arg_type) in args.iter().zip(arg_types.iter().skip(1)) {
+        let bytes = mask_metadata_arg_to_bytes(arg, arg_type).ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Invalid mask argument {:?} for expected type {}",
+                arg,
+                arg_type.cql_name()
+            ))
+        })?;
+        validation_args.push(bytes);
+    }
+
+    let Some(function) = registry.resolve(function_name, &arg_types) else {
+        return Err(ExecutorError::InvalidQuery(format!(
+            "Unknown mask function {} for arguments ({})",
+            function_name,
+            arg_types
+                .iter()
+                .map(CqlType::cql_name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    };
+    if function.return_type() != column.column_type {
+        return Err(ExecutorError::InvalidQuery(format!(
+            "Mask function {} returns {}, but column '{}' has type {}",
+            function_name,
+            function.return_type().cql_name(),
+            column.name,
+            column.column_type.cql_name()
+        )));
+    }
+    let arg_refs = validation_args
+        .iter()
+        .map(|value| value.as_deref())
+        .collect::<Vec<_>>();
+    function.execute(&arg_refs).map_err(|err| {
+        ExecutorError::InvalidQuery(format!(
+            "Invalid mask argument for {} on column '{}': {}",
+            function_name, column.name, err
+        ))
+    })?;
+    Ok(())
+}
+
+fn mask_argument_to_bytes(
+    arg: &Term,
+    arg_type: &CqlType,
+    registry: &FunctionRegistry,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    if term_is_null(arg) {
+        return Ok(None);
+    }
+    let empty_udfs = UdfRegistry::new();
+    if !mask_argument_matches_cql_type(arg, arg_type, registry, &empty_udfs) {
+        return Ok(None);
+    }
+    term_to_bytes_with_functions(arg, arg_type, registry, &empty_udfs, "")
+}
+
+fn mask_argument_matches_cql_type(
+    arg: &Term,
+    arg_type: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+) -> bool {
+    match arg {
+        Term::FunctionCall(_, _) => infer_term_type_with_functions(arg, registry, udf_registry, "")
+            .is_some_and(|actual| is_compatible_with(&actual, arg_type)),
+        _ => term_matches_cql_type(arg, arg_type),
+    }
+}
+
+fn term_is_null(term: &Term) -> bool {
+    match term {
+        Term::Literal(Literal::Null) => true,
+        Term::TypeHint(_, inner) => term_is_null(inner),
+        _ => false,
+    }
+}
+
+fn mask_function_arg_types(
+    function_name: &str,
+    column_type: &CqlType,
+    args: &[String],
+) -> Option<Vec<CqlType>> {
+    let mut arg_types = vec![column_type.clone()];
+    match function_name.to_ascii_lowercase().as_str() {
+        "mask_default" | "mask_null" if args.is_empty() => Some(arg_types),
+        "mask_hash" if args.is_empty() => Some(arg_types),
+        "mask_hash" if args.len() == 1 => {
+            arg_types.push(CqlType::Varchar);
+            Some(arg_types)
+        }
+        "mask_inner" | "mask_outer" if args.len() == 2 || args.len() == 3 => {
+            arg_types.push(CqlType::Int);
+            arg_types.push(CqlType::Int);
+            if args.len() == 3 {
+                arg_types.push(CqlType::Varchar);
+            }
+            Some(arg_types)
+        }
+        "mask_replace" if args.len() == 1 => {
+            arg_types.push(column_type.clone());
+            Some(arg_types)
+        }
+        _ => None,
+    }
+}
+
+fn mask_metadata_arg_to_bytes(arg: &str, cql_type: &CqlType) -> Option<Option<Vec<u8>>> {
+    if arg.eq_ignore_ascii_case("null") {
+        return Some(None);
+    }
+    let bytes = match cql_type {
+        CqlType::Ascii | CqlType::Varchar => arg.as_bytes().to_vec(),
+        CqlType::Boolean => vec![if arg.parse::<bool>().ok()? { 1 } else { 0 }],
+        CqlType::Tinyint => vec![arg.parse::<i8>().ok()? as u8],
+        CqlType::Smallint => arg.parse::<i16>().ok()?.to_be_bytes().to_vec(),
+        CqlType::Int => arg.parse::<i32>().ok()?.to_be_bytes().to_vec(),
+        CqlType::Bigint | CqlType::Counter | CqlType::Timestamp | CqlType::Time => {
+            arg.parse::<i64>().ok()?.to_be_bytes().to_vec()
+        }
+        CqlType::Float => arg.parse::<f32>().ok()?.to_be_bytes().to_vec(),
+        CqlType::Double => arg.parse::<f64>().ok()?.to_be_bytes().to_vec(),
+        CqlType::Varint => arg.parse::<BigInt>().ok()?.to_signed_bytes_be(),
+        CqlType::Decimal => cassandra_types::bigint::string_to_decimal(arg).ok()?,
+        CqlType::Blob => parse_blob_metadata_arg(arg)?,
+        CqlType::Uuid | CqlType::Timeuuid => parse_uuid_bytes(arg)?,
+        CqlType::Date => arg.parse::<u32>().ok()?.to_be_bytes().to_vec(),
+        _ => return None,
+    };
+    Some(Some(bytes))
+}
+
+fn parse_blob_metadata_arg(arg: &str) -> Option<Vec<u8>> {
+    let hex = arg.strip_prefix("0x").or_else(|| arg.strip_prefix("0X"))?;
+    if hex.len() % 2 != 0 {
+        return None;
+    }
+    (0..hex.len())
+        .step_by(2)
+        .map(|idx| u8::from_str_radix(&hex[idx..idx + 2], 16).ok())
+        .collect()
 }
 
 fn term_to_metadata_string(term: &Term) -> String {
@@ -6723,8 +8026,600 @@ fn term_to_bytes(term: &Term) -> Option<Vec<u8>> {
         Term::Literal(lit) => literal_to_bytes(lit),
         Term::BindMarker(_) => None,
         Term::FunctionCall(_, _) => None,
-        Term::TypeHint(_, inner) => term_to_bytes(inner),
+        Term::TypeHint(type_hint, inner) => type_hint
+            .resolve()
+            .and_then(|hinted_type| typed_term_to_bytes(inner, &hinted_type))
+            .or_else(|| term_to_bytes(inner)),
+        Term::CollectionElement { .. } => None,
         Term::CollectionLiteral(_) | Term::MapLiteral(_) | Term::TupleLiteral(_) => None,
+    }
+}
+
+fn relation_value_to_bytes(table: &TableMetadata, relation: &Relation) -> Option<Vec<u8>> {
+    table
+        .column(&relation.column)
+        .and_then(|column| typed_term_to_bytes(&relation.value, &column.column_type))
+        .or_else(|| term_to_bytes(&relation.value))
+}
+
+fn current_live_cell_value<'a>(row: &'a Row, column: &str, now_secs: i32) -> Option<&'a [u8]> {
+    row.cells
+        .iter()
+        .rev()
+        .find(|cell| cell.column == column && cell.is_live_at(now_secs))
+        .and_then(|cell| cell.value.as_deref())
+}
+
+fn assignment_value_to_bytes(
+    assignment: &Assignment,
+    target: &CqlType,
+    current: Option<&[u8]>,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    match &assignment.op {
+        AssignmentOp::Set => term_to_bytes_with_functions(
+            &assignment.value,
+            target,
+            registry,
+            udf_registry,
+            keyspace,
+        ),
+        AssignmentOp::CollectionAppend
+        | AssignmentOp::CollectionPrepend
+        | AssignmentOp::CollectionRemove
+        | AssignmentOp::MapPut { .. } => apply_collection_assignment(
+            assignment,
+            target,
+            current,
+            registry,
+            udf_registry,
+            keyspace,
+        ),
+    }
+}
+
+fn apply_collection_assignment(
+    assignment: &Assignment,
+    target: &CqlType,
+    current: Option<&[u8]>,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let mut current_value = decode_existing_collection(current, target)?;
+    match &assignment.op {
+        AssignmentOp::CollectionAppend => match (target, &mut current_value) {
+            (CqlType::List(_, _), CqlValue::List(values)) => {
+                let mut delta = collection_delta_values(
+                    &assignment.value,
+                    target,
+                    registry,
+                    udf_registry,
+                    keyspace,
+                )?;
+                values.append(&mut delta);
+            }
+            (CqlType::Set(_, _), CqlValue::Set(values)) => {
+                let delta = collection_delta_values(
+                    &assignment.value,
+                    target,
+                    registry,
+                    udf_registry,
+                    keyspace,
+                )?;
+                append_unique(values, delta);
+            }
+            (CqlType::Map(_, _, _), CqlValue::Map(entries)) => {
+                let delta =
+                    map_delta_entries(&assignment.value, target, registry, udf_registry, keyspace)?;
+                upsert_map_entries(entries, delta);
+            }
+            _ => invalid_collection_assignment(assignment, target)?,
+        },
+        AssignmentOp::CollectionPrepend => match (target, &mut current_value) {
+            (CqlType::List(_, _), CqlValue::List(values)) => {
+                let mut delta = collection_delta_values(
+                    &assignment.value,
+                    target,
+                    registry,
+                    udf_registry,
+                    keyspace,
+                )?;
+                delta.append(values);
+                *values = delta;
+            }
+            (CqlType::Set(_, _), CqlValue::Set(values)) => {
+                let delta = collection_delta_values(
+                    &assignment.value,
+                    target,
+                    registry,
+                    udf_registry,
+                    keyspace,
+                )?;
+                append_unique(values, delta);
+            }
+            (CqlType::Map(_, _, _), CqlValue::Map(entries)) => {
+                let delta =
+                    map_delta_entries(&assignment.value, target, registry, udf_registry, keyspace)?;
+                upsert_map_entries(entries, delta);
+            }
+            _ => invalid_collection_assignment(assignment, target)?,
+        },
+        AssignmentOp::CollectionRemove => match (target, &mut current_value) {
+            (CqlType::List(_, _), CqlValue::List(values))
+            | (CqlType::Set(_, _), CqlValue::Set(values)) => {
+                let delta = collection_delta_values(
+                    &assignment.value,
+                    target,
+                    registry,
+                    udf_registry,
+                    keyspace,
+                )?;
+                values.retain(|value| !delta.iter().any(|candidate| candidate == value));
+            }
+            (CqlType::Map(key_type, _, _), CqlValue::Map(entries)) => {
+                let keys = map_removal_keys(
+                    &assignment.value,
+                    key_type,
+                    registry,
+                    udf_registry,
+                    keyspace,
+                )?;
+                entries.retain(|(key, _)| !keys.iter().any(|candidate| candidate == key));
+            }
+            _ => invalid_collection_assignment(assignment, target)?,
+        },
+        AssignmentOp::MapPut { key } => {
+            let CqlType::Map(key_type, value_type, _) = target else {
+                invalid_collection_assignment(assignment, target)?;
+                unreachable!();
+            };
+            let CqlValue::Map(entries) = &mut current_value else {
+                invalid_collection_assignment(assignment, target)?;
+                unreachable!();
+            };
+            let key =
+                term_to_cql_value_with_functions(key, key_type, registry, udf_registry, keyspace)?;
+            let value = term_to_cql_value_with_functions(
+                &assignment.value,
+                value_type,
+                registry,
+                udf_registry,
+                keyspace,
+            )?;
+            upsert_map_entries(entries, vec![(key, value)]);
+        }
+        AssignmentOp::Set => unreachable!("set assignments are handled before collection updates"),
+    }
+    Ok(Some(current_value.serialize_value()))
+}
+
+fn invalid_collection_assignment(
+    assignment: &Assignment,
+    target: &CqlType,
+) -> Result<(), ExecutorError> {
+    Err(ExecutorError::InvalidQuery(format!(
+        "Collection assignment is not valid for column '{}' of type {}",
+        assignment.column,
+        target.cql_name()
+    )))
+}
+
+fn decode_existing_collection(
+    current: Option<&[u8]>,
+    target: &CqlType,
+) -> Result<CqlValue, ExecutorError> {
+    if let Some(bytes) = current {
+        return CqlValue::deserialize_value(target, bytes).map_err(|err| {
+            ExecutorError::InvalidQuery(format!(
+                "Invalid existing collection value for {}: {}",
+                target.cql_name(),
+                err
+            ))
+        });
+    }
+    match target {
+        CqlType::List(_, _) => Ok(CqlValue::List(Vec::new())),
+        CqlType::Set(_, _) => Ok(CqlValue::Set(Vec::new())),
+        CqlType::Map(_, _, _) => Ok(CqlValue::Map(Vec::new())),
+        _ => Err(ExecutorError::InvalidQuery(format!(
+            "Collection assignment is not valid for type {}",
+            target.cql_name()
+        ))),
+    }
+}
+
+fn collection_delta_values(
+    term: &Term,
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Vec<CqlValue>, ExecutorError> {
+    match term_to_cql_value_with_functions(term, target, registry, udf_registry, keyspace)? {
+        CqlValue::List(values) | CqlValue::Set(values) => Ok(values),
+        other => Err(ExecutorError::InvalidQuery(format!(
+            "Expected collection delta for {}, got {:?}",
+            target.cql_name(),
+            other
+        ))),
+    }
+}
+
+fn map_delta_entries(
+    term: &Term,
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Vec<(CqlValue, CqlValue)>, ExecutorError> {
+    match term_to_cql_value_with_functions(term, target, registry, udf_registry, keyspace)? {
+        CqlValue::Map(entries) => Ok(entries),
+        other => Err(ExecutorError::InvalidQuery(format!(
+            "Expected map delta for {}, got {:?}",
+            target.cql_name(),
+            other
+        ))),
+    }
+}
+
+fn map_removal_keys(
+    term: &Term,
+    key_type: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Vec<CqlValue>, ExecutorError> {
+    match term {
+        Term::CollectionLiteral(values) | Term::TupleLiteral(values) => values
+            .iter()
+            .map(|value| {
+                term_to_cql_value_with_functions(value, key_type, registry, udf_registry, keyspace)
+            })
+            .collect(),
+        Term::MapLiteral(entries) => entries
+            .iter()
+            .map(|(key, _)| {
+                term_to_cql_value_with_functions(key, key_type, registry, udf_registry, keyspace)
+            })
+            .collect(),
+        _ => Ok(vec![term_to_cql_value_with_functions(
+            term,
+            key_type,
+            registry,
+            udf_registry,
+            keyspace,
+        )?]),
+    }
+}
+
+fn term_to_cql_value_with_functions(
+    term: &Term,
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<CqlValue, ExecutorError> {
+    let bytes = term_to_bytes_with_functions(term, target, registry, udf_registry, keyspace)?
+        .ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!("Invalid value for type {}", target.cql_name()))
+        })?;
+    CqlValue::deserialize_value(target, &bytes).map_err(|err| {
+        ExecutorError::InvalidQuery(format!(
+            "Invalid value for type {}: {}",
+            target.cql_name(),
+            err
+        ))
+    })
+}
+
+fn append_unique(values: &mut Vec<CqlValue>, delta: Vec<CqlValue>) {
+    for value in delta {
+        if !values.iter().any(|existing| existing == &value) {
+            values.push(value);
+        }
+    }
+}
+
+fn upsert_map_entries(entries: &mut Vec<(CqlValue, CqlValue)>, delta: Vec<(CqlValue, CqlValue)>) {
+    for (key, value) in delta {
+        if let Some((_, existing_value)) = entries
+            .iter_mut()
+            .find(|(existing_key, _)| existing_key == &key)
+        {
+            *existing_value = value;
+        } else {
+            entries.push((key, value));
+        }
+    }
+}
+
+fn term_to_bytes_with_functions(
+    term: &Term,
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    match term {
+        Term::FunctionCall(name, args) => {
+            evaluate_function_term(name, args, target, registry, udf_registry, keyspace)
+        }
+        Term::CollectionLiteral(values) => collection_term_to_bytes_with_functions(
+            values,
+            target,
+            registry,
+            udf_registry,
+            keyspace,
+        ),
+        Term::MapLiteral(values) => {
+            map_term_to_bytes_with_functions(values, target, registry, udf_registry, keyspace)
+        }
+        Term::TupleLiteral(values) => {
+            tuple_term_to_bytes_with_functions(values, target, registry, udf_registry, keyspace)
+        }
+        Term::TypeHint(type_hint, inner) => {
+            let hinted_type = type_hint.resolve().ok_or_else(|| {
+                ExecutorError::InvalidQuery(format!("Unsupported type hint '{:?}'", type_hint))
+            })?;
+            term_to_bytes_with_functions(inner, &hinted_type, registry, udf_registry, keyspace)
+        }
+        _ => Ok(typed_term_to_bytes(term, target).or_else(|| term_to_bytes(term))),
+    }
+}
+
+fn collection_term_to_bytes_with_functions(
+    values: &[Term],
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let (CqlType::List(inner, _) | CqlType::Set(inner, _)) = target else {
+        return Ok(typed_term_to_bytes(
+            &Term::CollectionLiteral(values.to_vec()),
+            target,
+        ));
+    };
+
+    let mut buf = Vec::new();
+    push_i32(&mut buf, values.len() as i32);
+    for value in values {
+        let bytes = term_to_bytes_with_functions(value, inner, registry, udf_registry, keyspace)?
+            .ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Invalid collection element for target type {}",
+                target.cql_name()
+            ))
+        })?;
+        push_i32(&mut buf, bytes.len() as i32);
+        buf.extend_from_slice(&bytes);
+    }
+    Ok(Some(buf))
+}
+
+fn map_term_to_bytes_with_functions(
+    values: &[(Term, Term)],
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let CqlType::Map(key_type, value_type, _) = target else {
+        return Ok(typed_term_to_bytes(
+            &Term::MapLiteral(values.to_vec()),
+            target,
+        ));
+    };
+
+    let mut buf = Vec::new();
+    push_i32(&mut buf, values.len() as i32);
+    for (key, value) in values {
+        let key_bytes =
+            term_to_bytes_with_functions(key, key_type, registry, udf_registry, keyspace)?
+                .ok_or_else(|| {
+                    ExecutorError::InvalidQuery(format!(
+                        "Invalid map key for target type {}",
+                        target.cql_name()
+                    ))
+                })?;
+        push_i32(&mut buf, key_bytes.len() as i32);
+        buf.extend_from_slice(&key_bytes);
+
+        let value_bytes =
+            term_to_bytes_with_functions(value, value_type, registry, udf_registry, keyspace)?
+                .ok_or_else(|| {
+                    ExecutorError::InvalidQuery(format!(
+                        "Invalid map value for target type {}",
+                        target.cql_name()
+                    ))
+                })?;
+        push_i32(&mut buf, value_bytes.len() as i32);
+        buf.extend_from_slice(&value_bytes);
+    }
+    Ok(Some(buf))
+}
+
+fn tuple_term_to_bytes_with_functions(
+    values: &[Term],
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let CqlType::Tuple(field_types) = target else {
+        return Ok(typed_term_to_bytes(
+            &Term::TupleLiteral(values.to_vec()),
+            target,
+        ));
+    };
+    if values.len() != field_types.len() {
+        return Ok(None);
+    }
+
+    let mut buf = Vec::new();
+    for (value, field_type) in values.iter().zip(field_types) {
+        match term_to_bytes_with_functions(value, field_type, registry, udf_registry, keyspace)? {
+            Some(bytes) => {
+                push_i32(&mut buf, bytes.len() as i32);
+                buf.extend_from_slice(&bytes);
+            }
+            None => push_i32(&mut buf, -1),
+        }
+    }
+    Ok(Some(buf))
+}
+
+fn push_i32(buf: &mut Vec<u8>, value: i32) {
+    let mut bytes = [0u8; 4];
+    BigEndian::write_i32(&mut bytes, value);
+    buf.extend_from_slice(&bytes);
+}
+
+fn evaluate_function_term(
+    name: &str,
+    args: &[Term],
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_term_type_with_functions(arg, registry, udf_registry, keyspace))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            ExecutorError::InvalidQuery(format!(
+                "Cannot infer argument types for function term '{}'",
+                name
+            ))
+        })?;
+    if let Some(function) = registry.resolve_with_return(name, &arg_types, target) {
+        let expected_types = function.arg_types();
+        if expected_types.len() != args.len() {
+            return Err(ExecutorError::InvalidQuery(format!(
+                "Unsupported variadic function term '{}'",
+                name
+            )));
+        }
+        let arg_values = args
+            .iter()
+            .zip(expected_types.iter())
+            .map(|(arg, arg_type)| {
+                term_to_bytes_with_functions(arg, arg_type, registry, udf_registry, keyspace)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let arg_refs = arg_values
+            .iter()
+            .map(|value| value.as_deref())
+            .collect::<Vec<_>>();
+        return function.execute(&arg_refs).map_err(|err| {
+            ExecutorError::InvalidQuery(format!(
+                "Failed to execute function term '{}': {}",
+                name, err
+            ))
+        });
+    }
+
+    evaluate_udf_function_term(
+        name,
+        args,
+        &arg_types,
+        target,
+        registry,
+        udf_registry,
+        keyspace,
+    )
+}
+
+fn evaluate_udf_function_term(
+    name: &str,
+    args: &[Term],
+    arg_types: &[CqlType],
+    target: &CqlType,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Result<Option<Vec<u8>>, ExecutorError> {
+    let arg_signature = udf_arg_signature(arg_types);
+    let Some((metadata, executor)) = udf_registry.get(keyspace, name, &arg_signature) else {
+        return Err(ExecutorError::InvalidQuery(format!(
+            "Unsupported function term '{}' for target type {}",
+            name,
+            target.cql_name()
+        )));
+    };
+    let return_type = parse_cql_type(&metadata.return_type).ok_or_else(|| {
+        ExecutorError::InvalidQuery(format!(
+            "Unsupported UDF return type '{}' for function term '{}'",
+            metadata.return_type, name
+        ))
+    })?;
+    if !is_compatible_with(&return_type, target) {
+        return Err(ExecutorError::InvalidQuery(format!(
+            "UDF term '{}' returns {}, incompatible with target type {}",
+            name,
+            return_type.cql_name(),
+            target.cql_name()
+        )));
+    }
+
+    let mut udf_args = Vec::with_capacity(args.len());
+    for (arg, arg_type) in args.iter().zip(arg_types) {
+        let bytes = term_to_bytes_with_functions(arg, arg_type, registry, udf_registry, keyspace)?;
+        udf_args.push(
+            UdfValue::deserialize_arg(arg_type, bytes.as_deref()).map_err(|err| {
+                ExecutorError::InvalidQuery(format!(
+                    "Failed to deserialize argument for UDF term '{}': {}",
+                    name, err
+                ))
+            })?,
+        );
+    }
+    let result = executor.execute(&udf_args).map_err(|err| {
+        ExecutorError::InvalidQuery(format!("Failed to execute UDF term '{}': {}", name, err))
+    })?;
+    result.serialize_return(target).map_err(|err| {
+        ExecutorError::InvalidQuery(format!("Failed to serialize UDF term '{}': {}", name, err))
+    })
+}
+
+fn infer_term_type_with_functions(
+    term: &Term,
+    registry: &FunctionRegistry,
+    udf_registry: &UdfRegistry,
+    keyspace: &str,
+) -> Option<CqlType> {
+    match term {
+        Term::Literal(Literal::String(_)) => Some(CqlType::Varchar),
+        Term::Literal(Literal::Integer(_)) => Some(CqlType::Int),
+        Term::Literal(Literal::Float(_)) => Some(CqlType::Double),
+        Term::Literal(Literal::Boolean(_)) => Some(CqlType::Boolean),
+        Term::Literal(Literal::Blob(_)) => Some(CqlType::Blob),
+        Term::Literal(Literal::Uuid(_)) => Some(CqlType::Uuid),
+        Term::Literal(Literal::Null) => None,
+        Term::TypeHint(type_hint, _) => type_hint.resolve(),
+        Term::FunctionCall(name, args) => {
+            let arg_types = args
+                .iter()
+                .map(|arg| infer_term_type_with_functions(arg, registry, udf_registry, keyspace))
+                .collect::<Option<Vec<_>>>()?;
+            registry
+                .resolve(name, &arg_types)
+                .map(|function| function.return_type())
+                .or_else(|| {
+                    udf_registry
+                        .get(keyspace, name, &udf_arg_signature(&arg_types))
+                        .and_then(|(metadata, _)| parse_cql_type(&metadata.return_type))
+                })
+        }
+        Term::BindMarker(_)
+        | Term::CollectionElement { .. }
+        | Term::CollectionLiteral(_)
+        | Term::MapLiteral(_)
+        | Term::TupleLiteral(_) => None,
     }
 }
 
@@ -6794,8 +8689,11 @@ fn row_matches_relations(
     now_secs: i32,
 ) -> bool {
     relations.iter().all(|rel| {
-        if rel.column.eq_ignore_ascii_case("token") || rel.column.starts_with('(') {
-            return true;
+        if rel.column.eq_ignore_ascii_case("token") {
+            return token_relation_matches(rel, partition_key);
+        }
+        if rel.column.starts_with('(') {
+            return tuple_relation_matches(table_meta, rel, row);
         }
         let current = raw_column_value(
             pk_names,
@@ -6809,6 +8707,197 @@ fn row_matches_relations(
         );
         relation_matches(table_meta, rel, current.as_deref())
     })
+}
+
+fn token_relation_matches(rel: &Relation, partition_key: &[u8]) -> bool {
+    let current = cassandra_common::murmur3::murmur3_token(partition_key);
+    let expected_values = token_expected_values(rel);
+    match rel.op {
+        RelationOp::Eq => expected_values
+            .first()
+            .is_some_and(|expected| current == *expected),
+        RelationOp::Neq => expected_values
+            .first()
+            .is_none_or(|expected| current != *expected),
+        RelationOp::Lt | RelationOp::Gt | RelationOp::Lte | RelationOp::Gte => {
+            let Some(expected) = expected_values.first() else {
+                return false;
+            };
+            match rel.op {
+                RelationOp::Lt => current < *expected,
+                RelationOp::Gt => current > *expected,
+                RelationOp::Lte => current <= *expected,
+                RelationOp::Gte => current >= *expected,
+                _ => false,
+            }
+        }
+        RelationOp::In => expected_values.iter().any(|expected| current == *expected),
+        RelationOp::Contains | RelationOp::ContainsKey | RelationOp::Like => false,
+    }
+}
+
+fn token_expected_values(rel: &Relation) -> Vec<i64> {
+    match (&rel.op, &rel.value) {
+        (RelationOp::In, Term::CollectionLiteral(terms) | Term::TupleLiteral(terms)) => {
+            terms.iter().filter_map(term_to_i64).collect()
+        }
+        _ => term_to_i64(&rel.value).into_iter().collect(),
+    }
+}
+
+fn tuple_relation_matches(table_meta: &TableMetadata, rel: &Relation, row: &Row) -> bool {
+    let Some(columns) = relation_tuple_columns(&rel.column) else {
+        return true;
+    };
+    let Some(current) = clustering_tuple_bytes(table_meta, &columns, row) else {
+        return false;
+    };
+    let expected_values = tuple_expected_values(table_meta, &columns, rel);
+
+    match rel.op {
+        RelationOp::Eq => expected_values
+            .first()
+            .is_some_and(|expected| current.as_slice() == expected.as_slice()),
+        RelationOp::Neq => expected_values
+            .first()
+            .is_none_or(|expected| current.as_slice() != expected.as_slice()),
+        RelationOp::Lt | RelationOp::Gt | RelationOp::Lte | RelationOp::Gte => {
+            let Some(expected) = expected_values.first() else {
+                return false;
+            };
+            match rel.op {
+                RelationOp::Lt => current.as_slice() < expected.as_slice(),
+                RelationOp::Gt => current.as_slice() > expected.as_slice(),
+                RelationOp::Lte => current.as_slice() <= expected.as_slice(),
+                RelationOp::Gte => current.as_slice() >= expected.as_slice(),
+                _ => false,
+            }
+        }
+        RelationOp::In => expected_values
+            .iter()
+            .any(|expected| current.as_slice() == expected.as_slice()),
+        RelationOp::Contains | RelationOp::ContainsKey | RelationOp::Like => false,
+    }
+}
+
+fn relation_tuple_columns(column: &str) -> Option<Vec<String>> {
+    let inner = column.trim().strip_prefix('(')?.strip_suffix(')')?;
+    let columns: Vec<String> = inner
+        .split(',')
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect();
+    if columns.len() > 1 {
+        Some(columns)
+    } else {
+        None
+    }
+}
+
+fn tuple_expected_values(
+    table_meta: &TableMetadata,
+    columns: &[String],
+    rel: &Relation,
+) -> Vec<Vec<u8>> {
+    match (&rel.op, &rel.value) {
+        (RelationOp::In, Term::CollectionLiteral(terms)) => terms
+            .iter()
+            .filter_map(|term| tuple_term_bytes(table_meta, columns, term))
+            .collect(),
+        _ => tuple_term_bytes(table_meta, columns, &rel.value)
+            .into_iter()
+            .collect(),
+    }
+}
+
+fn tuple_term_bytes(
+    table_meta: &TableMetadata,
+    columns: &[String],
+    term: &Term,
+) -> Option<Vec<u8>> {
+    let Term::TupleLiteral(values) = term else {
+        return None;
+    };
+    if values.len() != columns.len() {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    for (column, value) in columns.iter().zip(values) {
+        let col_type = &table_column(table_meta, column)?.column_type;
+        bytes.extend(typed_term_to_bytes(value, col_type).or_else(|| term_to_bytes(value))?);
+    }
+    Some(bytes)
+}
+
+fn table_column<'a>(
+    table_meta: &'a TableMetadata,
+    column: &str,
+) -> Option<&'a cassandra_schema::ColumnMetadata> {
+    table_meta
+        .columns
+        .iter()
+        .find(|metadata| metadata.name.eq_ignore_ascii_case(column))
+}
+
+fn clustering_tuple_bytes(
+    table_meta: &TableMetadata,
+    columns: &[String],
+    row: &Row,
+) -> Option<Vec<u8>> {
+    let clustering_columns = table_meta.clustering_columns();
+    if columns.iter().any(|requested| {
+        !clustering_columns
+            .iter()
+            .any(|column| column.name.eq_ignore_ascii_case(requested))
+    }) {
+        return None;
+    }
+
+    let requested_all = clustering_columns.len() == columns.len()
+        && clustering_columns
+            .iter()
+            .zip(columns)
+            .all(|(column, requested)| column.name.eq_ignore_ascii_case(requested));
+    if requested_all {
+        return Some(row.clustering_key.clone());
+    }
+
+    let mut offset = 0usize;
+    let mut segments: Vec<(&str, &[u8])> = Vec::new();
+    for column in clustering_columns {
+        let width = fixed_width_cql_type(&column.column_type)?;
+        let end = offset.checked_add(width)?;
+        let bytes = row.clustering_key.get(offset..end)?;
+        segments.push((&column.name, bytes));
+        offset = end;
+    }
+    if offset != row.clustering_key.len() {
+        return None;
+    }
+
+    let mut selected = Vec::new();
+    for requested in columns {
+        let (_, bytes) = segments
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(requested))?;
+        selected.extend_from_slice(bytes);
+    }
+    Some(selected)
+}
+
+fn fixed_width_cql_type(cql_type: &CqlType) -> Option<usize> {
+    match cql_type {
+        CqlType::Boolean | CqlType::Tinyint => Some(1),
+        CqlType::Smallint => Some(2),
+        CqlType::Int | CqlType::Float | CqlType::Date => Some(4),
+        CqlType::Bigint
+        | CqlType::Counter
+        | CqlType::Double
+        | CqlType::Timestamp
+        | CqlType::Time => Some(8),
+        CqlType::Uuid | CqlType::Timeuuid => Some(16),
+        _ => None,
+    }
 }
 
 fn relation_matches(table_meta: &TableMetadata, rel: &Relation, current: Option<&[u8]>) -> bool {
@@ -6873,22 +8962,34 @@ fn relation_matches(table_meta: &TableMetadata, rel: &Relation, current: Option<
 }
 
 fn relation_expected_values(table_meta: &TableMetadata, rel: &Relation) -> Vec<Option<Vec<u8>>> {
-    let column_type = table_meta.column(&rel.column).map(|col| &col.column_type);
+    let operand_type = relation_operand_type(table_meta, rel);
 
     match (&rel.op, &rel.value) {
         (RelationOp::In, Term::CollectionLiteral(terms) | Term::TupleLiteral(terms)) => terms
             .iter()
             .map(|term| {
-                column_type
+                operand_type
                     .and_then(|cql_type| typed_term_to_bytes(term, cql_type))
                     .or_else(|| term_to_bytes(term))
             })
             .collect(),
         _ => vec![
-            column_type
+            operand_type
                 .and_then(|cql_type| typed_term_to_bytes(&rel.value, cql_type))
                 .or_else(|| term_to_bytes(&rel.value)),
         ],
+    }
+}
+
+fn relation_operand_type<'a>(table_meta: &'a TableMetadata, rel: &Relation) -> Option<&'a CqlType> {
+    let column_type = &table_column(table_meta, &rel.column)?.column_type;
+    match (&rel.op, column_type) {
+        (RelationOp::Contains, CqlType::List(inner, _) | CqlType::Set(inner, _)) => {
+            Some(inner.as_ref())
+        }
+        (RelationOp::Contains, CqlType::Map(_, value, _)) => Some(value.as_ref()),
+        (RelationOp::ContainsKey, CqlType::Map(key, _, _)) => Some(key.as_ref()),
+        _ => Some(column_type),
     }
 }
 
@@ -6939,7 +9040,6 @@ fn term_to_i64(term: &Term) -> Option<i64> {
 fn is_count_selector(selector: &Selector) -> bool {
     match selector {
         Selector::Count => true,
-        Selector::Function(name, _) => name.eq_ignore_ascii_case("count"),
         Selector::Alias { selector, .. } => is_count_selector(selector),
         _ => false,
     }
@@ -7026,6 +9126,20 @@ fn parse_permission(p: &str) -> Result<Permission, ExecutorError> {
             p
         ))),
     }
+}
+
+fn requested_permissions(permissions: &[String]) -> Result<Option<Vec<Permission>>, ExecutorError> {
+    if permissions
+        .iter()
+        .any(|permission| permission.eq_ignore_ascii_case("all"))
+    {
+        return Ok(None);
+    }
+    permissions
+        .iter()
+        .map(|permission| parse_permission(permission))
+        .collect::<Result<Vec<_>, _>>()
+        .map(Some)
 }
 
 fn ast_resource_to_security(
@@ -7123,33 +9237,17 @@ fn wrap_select_json(
     let json_rows: Vec<Vec<Option<Vec<u8>>>> = rows
         .iter()
         .map(|row| {
-            let mut obj = String::from("{");
-            for (i, (col, val)) in columns.iter().zip(row.iter()).enumerate() {
-                if i > 0 {
-                    obj.push_str(", ");
-                }
-                obj.push('"');
-                obj.push_str(&col.name);
-                obj.push_str("\": ");
-                match val {
-                    Some(bytes) => {
-                        if let Ok(s) = std::str::from_utf8(bytes) {
-                            obj.push('"');
-                            obj.push_str(s);
-                            obj.push('"');
-                        } else {
-                            obj.push_str("\"0x");
-                            for b in bytes {
-                                obj.push_str(&format!("{:02x}", b));
-                            }
-                            obj.push('"');
-                        }
-                    }
-                    None => obj.push_str("null"),
-                }
+            let mut obj = serde_json::Map::new();
+            for (col, val) in columns.iter().zip(row.iter()) {
+                let json_value = match val {
+                    Some(bytes) => cql_bytes_to_json_value(&col.cql_type, bytes),
+                    None => serde_json::Value::Null,
+                };
+                obj.insert(col.name.clone(), json_value);
             }
-            obj.push('}');
-            vec![Some(obj.into_bytes())]
+            vec![Some(
+                serde_json::Value::Object(obj).to_string().into_bytes(),
+            )]
         })
         .collect();
 
@@ -7162,7 +9260,11 @@ fn wrap_select_json(
 }
 
 /// Parse a JSON string term into column names and values for INSERT JSON.
-fn parse_json_insert(json_term: &Term) -> Result<(Vec<String>, Vec<Term>), ExecutorError> {
+fn parse_json_insert(
+    json_term: &Term,
+    table_meta: &TableMetadata,
+    json_default: JsonDefault,
+) -> Result<(Vec<String>, Vec<Term>), ExecutorError> {
     let json_str = match json_term {
         Term::Literal(Literal::String(s)) => s.clone(),
         _ => {
@@ -7172,148 +9274,174 @@ fn parse_json_insert(json_term: &Term) -> Result<(Vec<String>, Vec<Term>), Execu
         }
     };
 
-    let trimmed = json_str.trim();
-    if !trimmed.starts_with('{') || !trimmed.ends_with('}') {
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).map_err(|err| {
+        ExecutorError::InvalidQuery(format!("Invalid INSERT JSON object: {}", err))
+    })?;
+    let serde_json::Value::Object(object) = parsed else {
         return Err(ExecutorError::InvalidQuery(
             "INSERT JSON value must be a JSON object".into(),
         ));
+    };
+
+    let mut columns = Vec::with_capacity(object.len());
+    let mut values = Vec::with_capacity(object.len());
+    for (column, value) in object {
+        columns.push(column);
+        values.push(json_value_to_term(value)?);
     }
-
-    let inner = &trimmed[1..trimmed.len() - 1];
-    let mut columns = Vec::new();
-    let mut values = Vec::new();
-
-    let mut chars = inner.chars().peekable();
-    loop {
-        while chars.peek().map_or(false, |c| c.is_whitespace()) {
-            chars.next();
-        }
-        if chars.peek().is_none() {
-            break;
-        }
-
-        if chars.next() != Some('"') {
-            return Err(ExecutorError::InvalidQuery(
-                "Expected quoted key in JSON object".into(),
-            ));
-        }
-        let mut key = String::new();
-        loop {
-            match chars.next() {
-                Some('"') => break,
-                Some(c) => key.push(c),
-                None => {
-                    return Err(ExecutorError::InvalidQuery(
-                        "Unterminated key in JSON".into(),
-                    ));
-                }
+    if json_default == JsonDefault::Null {
+        for column in &table_meta.columns {
+            if !columns
+                .iter()
+                .any(|present| present.eq_ignore_ascii_case(&column.name))
+            {
+                columns.push(column.name.clone());
+                values.push(Term::Literal(Literal::Null));
             }
-        }
-
-        while chars.peek().map_or(false, |c| c.is_whitespace()) {
-            chars.next();
-        }
-        if chars.next() != Some(':') {
-            return Err(ExecutorError::InvalidQuery(
-                "Expected ':' after key in JSON".into(),
-            ));
-        }
-        while chars.peek().map_or(false, |c| c.is_whitespace()) {
-            chars.next();
-        }
-
-        let term = match chars.peek() {
-            Some('"') => {
-                chars.next();
-                let mut val = String::new();
-                loop {
-                    match chars.next() {
-                        Some('\\') => {
-                            if let Some(c) = chars.next() {
-                                val.push(c);
-                            }
-                        }
-                        Some('"') => break,
-                        Some(c) => val.push(c),
-                        None => {
-                            return Err(ExecutorError::InvalidQuery(
-                                "Unterminated string in JSON".into(),
-                            ));
-                        }
-                    }
-                }
-                Term::Literal(Literal::String(val))
-            }
-            Some('n') => {
-                for expected in ['n', 'u', 'l', 'l'] {
-                    if chars.next() != Some(expected) {
-                        return Err(ExecutorError::InvalidQuery("Invalid JSON value".into()));
-                    }
-                }
-                Term::Literal(Literal::Null)
-            }
-            Some('t') => {
-                for expected in ['t', 'r', 'u', 'e'] {
-                    if chars.next() != Some(expected) {
-                        return Err(ExecutorError::InvalidQuery("Invalid JSON value".into()));
-                    }
-                }
-                Term::Literal(Literal::Boolean(true))
-            }
-            Some('f') => {
-                for expected in ['f', 'a', 'l', 's', 'e'] {
-                    if chars.next() != Some(expected) {
-                        return Err(ExecutorError::InvalidQuery("Invalid JSON value".into()));
-                    }
-                }
-                Term::Literal(Literal::Boolean(false))
-            }
-            Some(c) if c.is_ascii_digit() || *c == '-' => {
-                let mut num_str = String::new();
-                let mut is_float = false;
-                while let Some(&c) = chars.peek() {
-                    if c.is_ascii_digit() || c == '-' || c == '+' || c == 'e' || c == 'E' {
-                        num_str.push(c);
-                        chars.next();
-                    } else if c == '.' {
-                        is_float = true;
-                        num_str.push(c);
-                        chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                if is_float {
-                    let f: f64 = num_str.parse().map_err(|_| {
-                        ExecutorError::InvalidQuery(format!("Invalid float: {}", num_str))
-                    })?;
-                    Term::Literal(Literal::Float(f))
-                } else {
-                    let n: i64 = num_str.parse().map_err(|_| {
-                        ExecutorError::InvalidQuery(format!("Invalid integer: {}", num_str))
-                    })?;
-                    Term::Literal(Literal::Integer(n))
-                }
-            }
-            _ => {
-                return Err(ExecutorError::InvalidQuery(
-                    "Unexpected character in JSON value".into(),
-                ));
-            }
-        };
-
-        columns.push(key);
-        values.push(term);
-
-        while chars.peek().map_or(false, |c| c.is_whitespace()) {
-            chars.next();
-        }
-        if chars.peek() == Some(&',') {
-            chars.next();
         }
     }
 
     Ok((columns, values))
+}
+
+fn json_value_to_term(value: serde_json::Value) -> Result<Term, ExecutorError> {
+    Ok(match value {
+        serde_json::Value::Null => Term::Literal(Literal::Null),
+        serde_json::Value::Bool(value) => Term::Literal(Literal::Boolean(value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Term::Literal(Literal::Integer(value))
+            } else {
+                let value = value.as_f64().ok_or_else(|| {
+                    ExecutorError::InvalidQuery(format!("Invalid JSON number: {}", value))
+                })?;
+                Term::Literal(Literal::Float(value))
+            }
+        }
+        serde_json::Value::String(value) => Term::Literal(Literal::String(value)),
+        serde_json::Value::Array(values) => Term::CollectionLiteral(
+            values
+                .into_iter()
+                .map(json_value_to_term)
+                .collect::<Result<Vec<_>, _>>()?,
+        ),
+        serde_json::Value::Object(values) => Term::MapLiteral(
+            values
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok((
+                        Term::Literal(Literal::String(key)),
+                        json_value_to_term(value)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, ExecutorError>>()?,
+        ),
+    })
+}
+
+fn cql_bytes_to_json_value(cql_type: &CqlType, bytes: &[u8]) -> serde_json::Value {
+    match CqlValue::deserialize_value(cql_type, bytes) {
+        Ok(value) => cql_value_to_json(value),
+        Err(_) => serde_json::Value::String(hex_bytes(bytes)),
+    }
+}
+
+fn cql_value_to_json(value: CqlValue) -> serde_json::Value {
+    match value {
+        CqlValue::Null => serde_json::Value::Null,
+        CqlValue::Ascii(value) | CqlValue::Varchar(value) => serde_json::Value::String(value),
+        CqlValue::Int(value) => serde_json::json!(value),
+        CqlValue::Smallint(value) => serde_json::json!(value),
+        CqlValue::Tinyint(value) => serde_json::json!(value),
+        CqlValue::Bigint(value)
+        | CqlValue::Counter(value)
+        | CqlValue::Timestamp(value)
+        | CqlValue::Time(value) => serde_json::json!(value),
+        CqlValue::Boolean(value) => serde_json::json!(value),
+        CqlValue::Float(value) => serde_json::Number::from_f64(value as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::String(value.to_string())),
+        CqlValue::Double(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or_else(|| serde_json::Value::String(value.to_string())),
+        CqlValue::Blob(bytes) | CqlValue::Varint(bytes) => {
+            serde_json::Value::String(hex_bytes(&bytes))
+        }
+        CqlValue::Decimal { unscaled, scale } => serde_json::Value::String(format!(
+            "{}e-{}",
+            BigInt::from_signed_bytes_be(&unscaled),
+            scale
+        )),
+        CqlValue::Uuid(bytes) | CqlValue::Timeuuid(bytes) => {
+            serde_json::Value::String(uuid::Uuid::from_bytes(bytes).to_string())
+        }
+        CqlValue::Inet(addr) => serde_json::Value::String(addr.to_string()),
+        CqlValue::Date(value) => serde_json::json!(value),
+        CqlValue::Duration {
+            months,
+            days,
+            nanoseconds,
+        } => serde_json::Value::String(format!("{months}mo{days}d{nanoseconds}ns")),
+        CqlValue::Empty => serde_json::Value::String(String::new()),
+        CqlValue::List(values) | CqlValue::Set(values) => {
+            serde_json::Value::Array(values.into_iter().map(cql_value_to_json).collect())
+        }
+        CqlValue::Map(entries) => {
+            let mut obj = serde_json::Map::new();
+            for (key, value) in entries {
+                obj.insert(json_object_key(key), cql_value_to_json(value));
+            }
+            serde_json::Value::Object(obj)
+        }
+        CqlValue::Tuple(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(|value| {
+                    value
+                        .map(cql_value_to_json)
+                        .unwrap_or(serde_json::Value::Null)
+                })
+                .collect(),
+        ),
+        CqlValue::Udt(fields) => {
+            let mut obj = serde_json::Map::new();
+            for (name, value) in fields {
+                obj.insert(
+                    name,
+                    value
+                        .map(cql_value_to_json)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            serde_json::Value::Object(obj)
+        }
+        CqlValue::Vector(vector) => serde_json::Value::Array(
+            vector
+                .values
+                .into_iter()
+                .map(|value| {
+                    serde_json::Number::from_f64(value as f64)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or_else(|| serde_json::Value::String(value.to_string()))
+                })
+                .collect(),
+        ),
+    }
+}
+
+fn json_object_key(value: CqlValue) -> String {
+    match cql_value_to_json(value) {
+        serde_json::Value::String(value) => value,
+        other => other.to_string(),
+    }
+}
+
+fn hex_bytes(bytes: &[u8]) -> String {
+    let mut value = String::from("0x");
+    for byte in bytes {
+        value.push_str(&format!("{byte:02x}"));
+    }
+    value
 }
 
 #[cfg(test)]
@@ -7321,7 +9449,7 @@ mod tests {
     use super::*;
     use cassandra_cql::ast::{ColumnDef, CqlTypeName, Relation};
     use cassandra_schema::{ColumnMetadata, TableMetadataBuilder};
-    use cassandra_security::{AllowAllAuthorizer, InMemoryRoleManager};
+    use cassandra_security::{AllowAllAuthorizer, CassandraAuthorizer, InMemoryRoleManager};
     use cassandra_storage::commitlog::CommitLogConfig;
     use cassandra_storage::engine::EngineConfig;
     use std::sync::atomic::Ordering;
@@ -7335,6 +9463,10 @@ mod tests {
         Term::Literal(Literal::String(value.to_string()))
     }
 
+    fn blob_term(value: &[u8]) -> Term {
+        Term::Literal(Literal::Blob(value.to_vec()))
+    }
+
     #[test]
     fn vector_literal_bytes_are_big_endian_f32() {
         let bytes = vector_literal_to_bytes(&[1.0, -2.5, 3.25]);
@@ -7343,6 +9475,156 @@ mod tests {
             .flat_map(f32::to_be_bytes)
             .collect::<Vec<_>>();
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn token_relation_filters_partition_key_bytes() {
+        let token = cassandra_common::murmur3::murmur3_token(&1i32.to_be_bytes());
+        let rel = Relation {
+            column: "token".to_string(),
+            op: RelationOp::Eq,
+            value: int_term(token),
+        };
+
+        assert!(token_relation_matches(&rel, &1i32.to_be_bytes()));
+        assert!(!token_relation_matches(&rel, &2i32.to_be_bytes()));
+    }
+
+    #[test]
+    fn tuple_relation_filters_clustering_bytes() {
+        let table = TableMetadataBuilder::new("ks", "tuple_events")
+            .add_column(ColumnMetadata::partition_key("pk", 0, CqlType::Int))
+            .add_column(ColumnMetadata::clustering(
+                "ck1",
+                0,
+                CqlType::Int,
+                ClusteringOrder::Asc,
+            ))
+            .add_column(ColumnMetadata::clustering(
+                "ck2",
+                1,
+                CqlType::Int,
+                ClusteringOrder::Asc,
+            ))
+            .build();
+        let row = Row {
+            clustering_key: [1i32.to_be_bytes(), 2i32.to_be_bytes()].concat(),
+            cells: Vec::new(),
+            is_tombstone: false,
+            local_deletion_time: None,
+        };
+
+        let eq = Relation {
+            column: "(ck1,ck2)".to_string(),
+            op: RelationOp::Eq,
+            value: Term::TupleLiteral(vec![int_term(1), int_term(2)]),
+        };
+        let gt = Relation {
+            column: "(ck1,ck2)".to_string(),
+            op: RelationOp::Gt,
+            value: Term::TupleLiteral(vec![int_term(1), int_term(1)]),
+        };
+        let lt = Relation {
+            column: "(ck1,ck2)".to_string(),
+            op: RelationOp::Lt,
+            value: Term::TupleLiteral(vec![int_term(1), int_term(1)]),
+        };
+
+        assert!(tuple_relation_matches(&table, &eq, &row));
+        assert!(tuple_relation_matches(&table, &gt, &row));
+        assert!(!tuple_relation_matches(&table, &lt, &row));
+    }
+
+    #[test]
+    fn contains_relations_use_collection_element_types() {
+        let table = TableMetadataBuilder::new("ks", "collections")
+            .add_column(ColumnMetadata::partition_key("pk", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular(
+                "tags",
+                CqlType::List(Box::new(CqlType::Int), false),
+            ))
+            .add_column(ColumnMetadata::regular(
+                "attrs",
+                CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
+            ))
+            .build();
+        let tags = typed_term_to_bytes(
+            &Term::CollectionLiteral(vec![int_term(7), int_term(9)]),
+            &CqlType::List(Box::new(CqlType::Int), false),
+        )
+        .unwrap();
+        let attrs = typed_term_to_bytes(
+            &Term::MapLiteral(vec![(text_term("k"), int_term(11))]),
+            &CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
+        )
+        .unwrap();
+
+        assert!(relation_matches(
+            &table,
+            &Relation {
+                column: "tags".to_string(),
+                op: RelationOp::Contains,
+                value: int_term(7),
+            },
+            Some(&tags),
+        ));
+        assert!(relation_matches(
+            &table,
+            &Relation {
+                column: "attrs".to_string(),
+                op: RelationOp::ContainsKey,
+                value: text_term("k"),
+            },
+            Some(&attrs),
+        ));
+    }
+
+    #[test]
+    fn insert_json_parses_nested_json_values() {
+        let table = TableMetadataBuilder::new("ks", "json_events")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular(
+                "tags",
+                CqlType::List(Box::new(CqlType::Varchar), false),
+            ))
+            .add_column(ColumnMetadata::regular(
+                "attrs",
+                CqlType::Map(
+                    Box::new(CqlType::Varchar),
+                    Box::new(CqlType::Varchar),
+                    false,
+                ),
+            ))
+            .add_column(ColumnMetadata::regular("active", CqlType::Boolean))
+            .build();
+
+        let (columns, values) = parse_json_insert(
+            &text_term(r#"{"id":1,"tags":["a","b"],"attrs":{"tier":"gold"},"active":true}"#),
+            &table,
+            JsonDefault::Unset,
+        )
+        .unwrap();
+
+        assert_eq!(columns, vec!["active", "attrs", "id", "tags"]);
+        assert_eq!(values[0], Term::Literal(Literal::Boolean(true)));
+        assert!(matches!(values[1], Term::MapLiteral(ref entries) if entries.len() == 1));
+        assert_eq!(values[2], Term::Literal(Literal::Integer(1)));
+        assert!(matches!(values[3], Term::CollectionLiteral(ref items) if items.len() == 2));
+    }
+
+    #[test]
+    fn insert_json_default_null_adds_omitted_columns() {
+        let table = TableMetadataBuilder::new("ks", "json_events")
+            .add_column(ColumnMetadata::partition_key("id", 0, CqlType::Int))
+            .add_column(ColumnMetadata::regular("name", CqlType::Varchar))
+            .build();
+
+        let (columns, values) =
+            parse_json_insert(&text_term(r#"{"id":1}"#), &table, JsonDefault::Null).unwrap();
+
+        assert_eq!(columns, vec!["id", "name"]);
+        assert_eq!(values[0], Term::Literal(Literal::Integer(1)));
+        assert_eq!(values[1], Term::Literal(Literal::Null));
     }
 
     #[test]
@@ -7374,6 +9656,10 @@ mod tests {
     }
 
     fn test_executor() -> (QueryExecutor, TempDir) {
+        test_executor_with_authorizer(false)
+    }
+
+    fn test_executor_with_authorizer(cassandra_authorizer: bool) -> (QueryExecutor, TempDir) {
         let temp = TempDir::new().unwrap();
         let engine = Arc::new(
             StorageEngine::open(EngineConfig {
@@ -7406,12 +9692,13 @@ mod tests {
             .with_table(audit_table);
         let catalog = Arc::new(RwLock::new(SchemaCatalog::new().with_keyspace(keyspace)));
 
-        let executor = QueryExecutor::new(
-            engine,
-            catalog,
-            Arc::new(InMemoryRoleManager::new()),
-            Arc::new(AllowAllAuthorizer),
-        );
+        let role_manager = Arc::new(InMemoryRoleManager::new());
+        let authorizer: Arc<dyn Authorizer> = if cassandra_authorizer {
+            Arc::new(CassandraAuthorizer::new(Arc::clone(&role_manager)))
+        } else {
+            Arc::new(AllowAllAuthorizer)
+        };
+        let executor = QueryExecutor::new(engine, catalog, role_manager, authorizer);
         (executor, temp)
     }
 
@@ -7423,10 +9710,102 @@ mod tests {
             values: vec![int_term(id), int_term(bucket), text_term(name)],
             if_not_exists: false,
             json: None,
+            json_default: JsonDefault::Null,
             using_timestamp: None,
             using_ttl: None,
         });
         executor.execute(&plan, None).unwrap();
+    }
+
+    fn insert_event_without_name(executor: &QueryExecutor, id: i64, bucket: i64) {
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["id".to_string(), "bucket".to_string()],
+            values: vec![int_term(id), int_term(bucket)],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+        executor.execute(&plan, None).unwrap();
+    }
+
+    fn add_event_payload_column(executor: &QueryExecutor) {
+        executor
+            .execute(
+                &QueryPlan::AlterTable(AlterTablePlan {
+                    keyspace: "ks".to_string(),
+                    name: "events".to_string(),
+                    operation: AlterTableOp::AddColumn(ColumnDef {
+                        name: "payload".to_string(),
+                        cql_type: CqlTypeName::Simple("blob".to_string()),
+                        is_static: false,
+                        masked_with: None,
+                        constraints: Vec::new(),
+                    }),
+                }),
+                None,
+            )
+            .unwrap();
+    }
+
+    fn insert_event_with_payload(
+        executor: &QueryExecutor,
+        id: i64,
+        bucket: i64,
+        name: &str,
+        payload: &[u8],
+    ) {
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec![
+                "id".to_string(),
+                "bucket".to_string(),
+                "name".to_string(),
+                "payload".to_string(),
+            ],
+            values: vec![
+                int_term(id),
+                int_term(bucket),
+                text_term(name),
+                blob_term(payload),
+            ],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+        executor.execute(&plan, None).unwrap();
+    }
+
+    fn mask_event_name(executor: &QueryExecutor, function_name: &str, args: Vec<Term>) {
+        mask_event_column(executor, "name", function_name, args);
+    }
+
+    fn mask_event_column(
+        executor: &QueryExecutor,
+        column_name: &str,
+        function_name: &str,
+        args: Vec<Term>,
+    ) {
+        executor
+            .execute(
+                &QueryPlan::AlterTable(AlterTablePlan {
+                    keyspace: "ks".to_string(),
+                    name: "events".to_string(),
+                    operation: AlterTableOp::MaskColumn(
+                        column_name.to_string(),
+                        function_name.to_string(),
+                        args,
+                    ),
+                }),
+                None,
+            )
+            .unwrap();
     }
 
     fn create_role_plan(name: &str) -> QueryPlan {
@@ -7434,8 +9813,12 @@ mod tests {
             name: name.to_string(),
             if_not_exists: false,
             password: None,
+            hashed_password: None,
             is_superuser: false,
             can_login: true,
+            datacenter_access: None,
+            cidr_access: None,
+            options: Default::default(),
         })
     }
 
@@ -8695,6 +11078,410 @@ mod tests {
     }
 
     #[test]
+    fn select_executes_to_json_with_argument_cql_type() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 42, "alice");
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Function(
+                    "to_json".to_string(),
+                    vec![Selector::Column("bucket".to_string())],
+                ),
+                Selector::Function(
+                    "tojson".to_string(),
+                    vec![Selector::Column("name".to_string())],
+                ),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(columns[0].name, "to_json(bucket)");
+        assert_eq!(columns[0].cql_type, CqlType::Varchar);
+        assert_eq!(columns[1].name, "tojson(name)");
+        assert_eq!(columns[1].cql_type, CqlType::Varchar);
+        assert_eq!(
+            rows,
+            vec![vec![Some(b"42".to_vec()), Some(b"\"alice\"".to_vec())]]
+        );
+    }
+
+    #[test]
+    fn select_executes_cast_selector_with_target_type() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 42, "alice");
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![Selector::Alias {
+                selector: Box::new(Selector::Cast {
+                    selector: Box::new(Selector::Column("bucket".to_string())),
+                    target: CqlTypeName::Simple("text".to_string()),
+                }),
+                alias: "bucket_text".to_string(),
+            }]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(columns[0].name, "bucket_text");
+        assert_eq!(columns[0].cql_type, CqlType::Varchar);
+        assert_eq!(rows, vec![vec![Some(b"42".to_vec())]]);
+    }
+
+    #[test]
+    fn insert_executes_builtin_function_call_terms() {
+        let (executor, _temp) = test_executor();
+
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["id".to_string(), "bucket".to_string(), "name".to_string()],
+            values: vec![
+                int_term(1),
+                Term::FunctionCall("abs".to_string(), vec![int_term(-7)]),
+                text_term("computed"),
+            ],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+        executor.execute(&plan, None).unwrap();
+
+        let rows = select_all_events(&executor);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1].as_deref(), Some(7i32.to_be_bytes().as_slice()));
+    }
+
+    #[test]
+    fn insert_executes_from_json_with_column_receiver_type() {
+        let (executor, _temp) = test_executor();
+
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["id".to_string(), "bucket".to_string(), "name".to_string()],
+            values: vec![
+                int_term(1),
+                Term::FunctionCall("from_json".to_string(), vec![text_term("17")]),
+                Term::FunctionCall("fromjson".to_string(), vec![text_term("\"json-name\"")]),
+            ],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+        executor.execute(&plan, None).unwrap();
+
+        let rows = select_all_events(&executor);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1].as_deref(), Some(17i32.to_be_bytes().as_slice()));
+        assert_eq!(rows[0][2].as_deref(), Some(b"json-name".as_slice()));
+    }
+
+    #[test]
+    fn insert_executes_udf_function_call_terms() {
+        let (executor, _temp) = test_executor();
+        create_int_identity_function(&executor, "identity_term");
+
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["id".to_string(), "bucket".to_string(), "name".to_string()],
+            values: vec![
+                int_term(1),
+                Term::FunctionCall("identity_term".to_string(), vec![int_term(13)]),
+                text_term("udf"),
+            ],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+        executor.execute(&plan, None).unwrap();
+
+        let rows = select_all_events(&executor);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1].as_deref(), Some(13i32.to_be_bytes().as_slice()));
+    }
+
+    #[test]
+    fn insert_executes_nested_function_call_terms() {
+        let (executor, _temp) = test_executor();
+        create_int_identity_function(&executor, "identity_term");
+
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["id".to_string(), "bucket".to_string(), "name".to_string()],
+            values: vec![
+                int_term(1),
+                Term::FunctionCall(
+                    "identity_term".to_string(),
+                    vec![Term::FunctionCall("abs".to_string(), vec![int_term(-21)])],
+                ),
+                text_term("nested"),
+            ],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+        executor.execute(&plan, None).unwrap();
+
+        let rows = select_all_events(&executor);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1].as_deref(), Some(21i32.to_be_bytes().as_slice()));
+    }
+
+    #[test]
+    fn collection_terms_execute_nested_function_elements() {
+        let registry = FunctionRegistry::with_builtins();
+        let udf_registry = UdfRegistry::new();
+        let term = Term::CollectionLiteral(vec![Term::FunctionCall(
+            "abs".to_string(),
+            vec![int_term(-4)],
+        )]);
+
+        let bytes = term_to_bytes_with_functions(
+            &term,
+            &CqlType::List(Box::new(CqlType::Int), false),
+            &registry,
+            &udf_registry,
+            "ks",
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(BigEndian::read_i32(&bytes[0..4]), 1);
+        assert_eq!(BigEndian::read_i32(&bytes[4..8]), 4);
+        assert_eq!(BigEndian::read_i32(&bytes[8..12]), 4);
+    }
+
+    #[test]
+    fn update_collection_assignments_merge_with_existing_values() {
+        let (executor, _temp) = test_executor();
+        executor
+            .execute(
+                &QueryPlan::CreateTable(CreateTablePlan {
+                    keyspace: "ks".to_string(),
+                    name: "collections".to_string(),
+                    if_not_exists: false,
+                    columns: vec![
+                        cassandra_cql::planner::ResolvedColumnDef {
+                            name: "id".to_string(),
+                            cql_type: CqlType::Int,
+                            is_static: false,
+                            masked_with: None,
+                            constraints: Vec::new(),
+                        },
+                        cassandra_cql::planner::ResolvedColumnDef {
+                            name: "vals".to_string(),
+                            cql_type: CqlType::List(Box::new(CqlType::Int), false),
+                            is_static: false,
+                            masked_with: None,
+                            constraints: Vec::new(),
+                        },
+                        cassandra_cql::planner::ResolvedColumnDef {
+                            name: "tags".to_string(),
+                            cql_type: CqlType::Set(Box::new(CqlType::Varchar), false),
+                            is_static: false,
+                            masked_with: None,
+                            constraints: Vec::new(),
+                        },
+                        cassandra_cql::planner::ResolvedColumnDef {
+                            name: "attrs".to_string(),
+                            cql_type: CqlType::Map(
+                                Box::new(CqlType::Varchar),
+                                Box::new(CqlType::Int),
+                                false,
+                            ),
+                            is_static: false,
+                            masked_with: None,
+                            constraints: Vec::new(),
+                        },
+                    ],
+                    partition_key: vec!["id".to_string()],
+                    clustering_key: Vec::new(),
+                    clustering_order: Vec::new(),
+                    options: std::collections::HashMap::new(),
+                }),
+                None,
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                &QueryPlan::Insert(InsertPlan {
+                    keyspace: "ks".to_string(),
+                    table: "collections".to_string(),
+                    columns: vec![
+                        "id".to_string(),
+                        "vals".to_string(),
+                        "tags".to_string(),
+                        "attrs".to_string(),
+                    ],
+                    values: vec![
+                        int_term(1),
+                        Term::CollectionLiteral(vec![int_term(2)]),
+                        Term::CollectionLiteral(vec![text_term("a")]),
+                        Term::MapLiteral(vec![(text_term("x"), int_term(1))]),
+                    ],
+                    if_not_exists: false,
+                    json: None,
+                    json_default: JsonDefault::Null,
+                    using_timestamp: Some(10),
+                    using_ttl: None,
+                }),
+                None,
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                &QueryPlan::Update(UpdatePlan {
+                    keyspace: "ks".to_string(),
+                    table: "collections".to_string(),
+                    assignments: vec![
+                        Assignment {
+                            column: "vals".to_string(),
+                            value: Term::CollectionLiteral(vec![int_term(1)]),
+                            op: AssignmentOp::CollectionPrepend,
+                        },
+                        Assignment {
+                            column: "tags".to_string(),
+                            value: Term::CollectionLiteral(vec![text_term("b")]),
+                            op: AssignmentOp::CollectionAppend,
+                        },
+                        Assignment {
+                            column: "attrs".to_string(),
+                            value: int_term(2),
+                            op: AssignmentOp::MapPut {
+                                key: text_term("y"),
+                            },
+                        },
+                    ],
+                    where_clause: vec![Relation {
+                        column: "id".to_string(),
+                        op: RelationOp::Eq,
+                        value: int_term(1),
+                    }],
+                    if_exists: false,
+                    using_timestamp: Some(20),
+                    using_ttl: None,
+                }),
+                None,
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                &QueryPlan::Update(UpdatePlan {
+                    keyspace: "ks".to_string(),
+                    table: "collections".to_string(),
+                    assignments: vec![
+                        Assignment {
+                            column: "vals".to_string(),
+                            value: Term::CollectionLiteral(vec![int_term(3)]),
+                            op: AssignmentOp::CollectionAppend,
+                        },
+                        Assignment {
+                            column: "tags".to_string(),
+                            value: Term::CollectionLiteral(vec![text_term("a")]),
+                            op: AssignmentOp::CollectionRemove,
+                        },
+                        Assignment {
+                            column: "attrs".to_string(),
+                            value: Term::CollectionLiteral(vec![text_term("x")]),
+                            op: AssignmentOp::CollectionRemove,
+                        },
+                    ],
+                    where_clause: vec![Relation {
+                        column: "id".to_string(),
+                        op: RelationOp::Eq,
+                        value: int_term(1),
+                    }],
+                    if_exists: false,
+                    using_timestamp: Some(30),
+                    using_ttl: None,
+                }),
+                None,
+            )
+            .unwrap();
+
+        let partition = executor
+            .engine
+            .read_partition("ks", "collections", &1i32.to_be_bytes())
+            .unwrap();
+        let row = partition.rows.get(&Vec::new()).unwrap();
+        let cell = |name: &str| {
+            row.cells
+                .iter()
+                .find(|cell| cell.column == name)
+                .and_then(|cell| cell.value.as_deref())
+                .unwrap()
+        };
+
+        assert_eq!(
+            CqlValue::deserialize_value(
+                &CqlType::List(Box::new(CqlType::Int), false),
+                cell("vals")
+            )
+            .unwrap(),
+            CqlValue::List(vec![CqlValue::Int(1), CqlValue::Int(2), CqlValue::Int(3)])
+        );
+        assert_eq!(
+            CqlValue::deserialize_value(
+                &CqlType::Set(Box::new(CqlType::Varchar), false),
+                cell("tags")
+            )
+            .unwrap(),
+            CqlValue::Set(vec![CqlValue::Varchar("b".to_string())])
+        );
+        assert_eq!(
+            CqlValue::deserialize_value(
+                &CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
+                cell("attrs")
+            )
+            .unwrap(),
+            CqlValue::Map(vec![(CqlValue::Varchar("y".to_string()), CqlValue::Int(2))])
+        );
+    }
+
+    #[test]
     fn select_executes_nested_builtin_scalar_function() {
         let (executor, _temp) = test_executor();
         insert_event(&executor, 1, 1, "alice");
@@ -8728,6 +11515,86 @@ mod tests {
         assert_eq!(columns[0].name, "length(tojson(name))");
         assert_eq!(columns[0].cql_type, CqlType::Int);
         assert_eq!(rows, vec![vec![Some(7i32.to_be_bytes().to_vec())]]);
+    }
+
+    #[test]
+    fn select_executes_length_and_octet_length_with_java_text_semantics() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "a😀b");
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Function(
+                    "length".to_string(),
+                    vec![Selector::Column("name".to_string())],
+                ),
+                Selector::Function(
+                    "octet_length".to_string(),
+                    vec![Selector::Column("name".to_string())],
+                ),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(columns[0].name, "length(name)");
+        assert_eq!(columns[1].name, "octet_length(name)");
+        assert_eq!(columns[0].cql_type, CqlType::Int);
+        assert_eq!(columns[1].cql_type, CqlType::Int);
+        assert_eq!(
+            rows,
+            vec![vec![
+                Some(4i32.to_be_bytes().to_vec()),
+                Some(6i32.to_be_bytes().to_vec())
+            ]]
+        );
+    }
+
+    #[test]
+    fn select_executes_java_math_log10_builtin_selector() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1000, "alice");
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![Selector::Function(
+                "log10".to_string(),
+                vec![Selector::Column("bucket".to_string())],
+            )]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(columns[0].name, "log10(bucket)");
+        assert_eq!(columns[0].cql_type, CqlType::Int);
+        assert_eq!(rows, vec![vec![Some(3i32.to_be_bytes().to_vec())]]);
     }
 
     #[test]
@@ -8808,6 +11675,7 @@ mod tests {
                     values: vec![int_term(1), int_term(1), text_term("alice")],
                     if_not_exists: false,
                     json: None,
+                    json_default: JsonDefault::Null,
                     using_timestamp: Some(123_456_789),
                     using_ttl: Some(3600),
                 }),
@@ -9820,6 +12688,7 @@ mod tests {
             values: values.into_iter().map(|(_, value)| value).collect(),
             if_not_exists: false,
             json: None,
+            json_default: JsonDefault::Null,
             using_timestamp: None,
             using_ttl: None,
         })
@@ -9955,8 +12824,12 @@ mod tests {
             name: "analyst".to_string(),
             if_not_exists: false,
             password: None,
+            hashed_password: None,
             is_superuser: true,
             can_login: false,
+            datacenter_access: None,
+            cidr_access: None,
+            options: Default::default(),
         });
         assert!(matches!(
             executor.execute(&duplicate, None),
@@ -9967,8 +12840,12 @@ mod tests {
             name: "analyst".to_string(),
             if_not_exists: true,
             password: None,
+            hashed_password: None,
             is_superuser: true,
             can_login: false,
+            datacenter_access: None,
+            cidr_access: None,
+            options: Default::default(),
         });
         assert!(matches!(
             executor.execute(&no_op, None).unwrap(),
@@ -9977,6 +12854,107 @@ mod tests {
         let role = executor.role_manager.get_role("analyst").unwrap();
         assert!(!role.is_superuser);
         assert!(role.can_login);
+    }
+
+    #[test]
+    fn alter_role_if_exists_is_no_op_for_missing_role() {
+        let (executor, _temp) = test_executor();
+        let alter = QueryPlan::AlterRole(AlterRolePlan {
+            name: "missing_role".to_string(),
+            if_exists: true,
+            password: Some("secret".to_string()),
+            hashed_password: None,
+            superuser: None,
+            login: None,
+            datacenter_access: None,
+            cidr_access: None,
+            options: Default::default(),
+        });
+
+        assert!(matches!(
+            executor.execute(&alter, None).unwrap(),
+            QueryResult::Void
+        ));
+        assert!(!executor.role_manager.role_exists("missing_role"));
+    }
+
+    #[test]
+    fn create_and_alter_role_apply_network_access_options() {
+        let (executor, _temp) = test_executor();
+        let create = QueryPlan::CreateRole(CreateRolePlan {
+            name: "analyst".to_string(),
+            if_not_exists: false,
+            password: None,
+            hashed_password: None,
+            is_superuser: false,
+            can_login: true,
+            datacenter_access: Some(RoleAccess::Restricted(vec!["dc1".to_string()])),
+            cidr_access: Some(RoleAccess::All),
+            options: Default::default(),
+        });
+        executor.execute(&create, None).unwrap();
+        let role = executor.role_manager.get_role("analyst").unwrap();
+        let network = role.network_permissions.unwrap();
+        assert!(!network.all_datacenters);
+        assert_eq!(network.allowed_datacenters, vec!["dc1"]);
+        assert!(network.all_cidrs);
+
+        let alter = QueryPlan::AlterRole(AlterRolePlan {
+            name: "analyst".to_string(),
+            if_exists: false,
+            password: None,
+            hashed_password: None,
+            superuser: None,
+            login: None,
+            datacenter_access: Some(RoleAccess::All),
+            cidr_access: Some(RoleAccess::Restricted(vec![
+                "region1".to_string(),
+                "region2".to_string(),
+            ])),
+            options: Default::default(),
+        });
+        executor.execute(&alter, None).unwrap();
+        let role = executor.role_manager.get_role("analyst").unwrap();
+        let network = role.network_permissions.unwrap();
+        assert!(network.all_datacenters);
+        assert!(!network.all_cidrs);
+        assert_eq!(network.allowed_cidrs, vec!["region1", "region2"]);
+    }
+
+    #[test]
+    fn create_and_alter_role_store_hashed_password_verbatim() {
+        let (executor, _temp) = test_executor();
+        let initial_hash = "$2b$12$prehashed-create";
+        let create = QueryPlan::CreateRole(CreateRolePlan {
+            name: "hashed_user".to_string(),
+            if_not_exists: false,
+            password: None,
+            hashed_password: Some(initial_hash.to_string()),
+            is_superuser: false,
+            can_login: true,
+            datacenter_access: None,
+            cidr_access: None,
+            options: Default::default(),
+        });
+        executor.execute(&create, None).unwrap();
+        let role = executor.role_manager.get_role("hashed_user").unwrap();
+        assert_eq!(role.hashed_password.as_deref(), Some(initial_hash));
+
+        let updated_hash = "$2b$12$prehashed-alter";
+        let alter = QueryPlan::AlterRole(AlterRolePlan {
+            name: "hashed_user".to_string(),
+            if_exists: false,
+            password: None,
+            hashed_password: Some(updated_hash.to_string()),
+            superuser: None,
+            login: None,
+            datacenter_access: None,
+            cidr_access: None,
+            options: Default::default(),
+        });
+        executor.execute(&alter, None).unwrap();
+        let role = executor.role_manager.get_role("hashed_user").unwrap();
+        assert_eq!(role.hashed_password.as_deref(), Some(updated_hash));
     }
 
     #[test]
@@ -10043,6 +13021,229 @@ mod tests {
         assert!(!direct_names.contains(&"top".to_string()));
     }
 
+    #[test]
+    fn list_permissions_returns_granted_permission_rows() {
+        let (executor, _temp) = test_executor_with_authorizer(true);
+        executor
+            .execute(&create_role_plan("analyst"), None)
+            .unwrap();
+        let resource = cassandra_cql::ast::Resource::Table {
+            keyspace: Some("ks".to_string()),
+            table: "events".to_string(),
+        };
+        executor
+            .execute(
+                &QueryPlan::Grant(GrantPlan {
+                    permissions: vec!["SELECT".to_string()],
+                    resource: resource.clone(),
+                    role: "analyst".to_string(),
+                }),
+                None,
+            )
+            .unwrap();
+
+        let QueryResult::Rows { columns, rows, .. } = executor
+            .execute(
+                &QueryPlan::ListPermissions(ListPermissionsPlan {
+                    permissions: vec!["SELECT".to_string()],
+                    resource: Some(resource),
+                    of_role: Some("analyst".to_string()),
+                }),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected LIST PERMISSIONS rows");
+        };
+        assert_eq!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["role", "resource", "permission"]
+        );
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_deref(), Some(b"analyst".as_slice()));
+        assert_eq!(rows[0][1].as_deref(), Some(b"TABLE ks.events".as_slice()));
+        assert_eq!(rows[0][2].as_deref(), Some(b"SELECT".as_slice()));
+    }
+
+    #[test]
+    fn describe_table_returns_schema_ddl() {
+        let (executor, _temp) = test_executor();
+
+        let QueryResult::Rows { rows, .. } = executor
+            .execute(
+                &QueryPlan::Describe(DescribePlan {
+                    target: DescribeTarget::Table(Some("ks".to_string()), "events".to_string()),
+                }),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected DESCRIBE rows");
+        };
+        let ddl = String::from_utf8(rows[0][0].clone().unwrap()).unwrap();
+        assert!(ddl.contains("CREATE TABLE ks.events"));
+        assert!(ddl.contains("id int"));
+        assert!(ddl.contains("bucket int"));
+        assert!(ddl.contains("name text") || ddl.contains("name varchar"));
+        assert!(ddl.contains("PRIMARY KEY (id, bucket)"));
+    }
+
+    #[test]
+    fn describe_schema_objects_return_metadata_ddl() {
+        let (executor, _temp) = test_executor();
+        executor
+            .execute(
+                &QueryPlan::CreateType(CreateTypePlan {
+                    keyspace: "ks".to_string(),
+                    name: "address".to_string(),
+                    if_not_exists: false,
+                    fields: vec![
+                        ("street".to_string(), "text".to_string()),
+                        ("zip".to_string(), "int".to_string()),
+                    ],
+                }),
+                None,
+            )
+            .unwrap();
+        create_int_identity_function(&executor, "identity_for_describe");
+        create_int_state_function(&executor, "state_for_describe", "int");
+        executor
+            .execute(
+                &QueryPlan::CreateAggregate(CreateAggregatePlan {
+                    keyspace: "ks".to_string(),
+                    name: "sum_for_describe".to_string(),
+                    or_replace: false,
+                    if_not_exists: false,
+                    arg_types: vec!["int".to_string()],
+                    sfunc: "state_for_describe".to_string(),
+                    stype: "int".to_string(),
+                    finalfunc: None,
+                    initcond: Some("0".to_string()),
+                }),
+                None,
+            )
+            .unwrap();
+
+        let describe_text = |target| {
+            let QueryResult::Rows { rows, .. } = executor
+                .execute(&QueryPlan::Describe(DescribePlan { target }), None)
+                .unwrap()
+            else {
+                panic!("expected DESCRIBE rows");
+            };
+            String::from_utf8(rows[0][0].clone().unwrap()).unwrap()
+        };
+
+        let type_ddl = describe_text(DescribeTarget::Type(
+            Some("ks".to_string()),
+            "address".to_string(),
+        ));
+        assert!(type_ddl.contains("CREATE TYPE ks.address"));
+        assert!(type_ddl.contains("street text"));
+
+        let function_ddl = describe_text(DescribeTarget::Function(
+            Some("ks".to_string()),
+            "identity_for_describe".to_string(),
+        ));
+        assert!(function_ddl.contains("CREATE FUNCTION ks.identity_for_describe"));
+        assert!(function_ddl.contains("RETURNS int"));
+
+        let aggregate_ddl = describe_text(DescribeTarget::Aggregate(
+            Some("ks".to_string()),
+            "sum_for_describe".to_string(),
+        ));
+        assert!(aggregate_ddl.contains("CREATE AGGREGATE ks.sum_for_describe(int)"));
+        assert!(aggregate_ddl.contains("SFUNC state_for_describe"));
+        assert!(aggregate_ddl.contains("INITCOND 0"));
+    }
+
+    #[test]
+    fn alter_type_updates_udt_metadata() {
+        let (executor, _temp) = test_executor();
+        executor
+            .execute(
+                &QueryPlan::CreateType(CreateTypePlan {
+                    keyspace: "ks".to_string(),
+                    name: "address".to_string(),
+                    if_not_exists: false,
+                    fields: vec![
+                        ("street".to_string(), "text".to_string()),
+                        ("zip".to_string(), "int".to_string()),
+                    ],
+                }),
+                None,
+            )
+            .unwrap();
+
+        executor
+            .execute(
+                &QueryPlan::AlterType(AlterTypePlan {
+                    keyspace: "ks".to_string(),
+                    name: "address".to_string(),
+                    operation: AlterTypeOp::AddField(
+                        "country".to_string(),
+                        CqlTypeName::Simple("text".to_string()),
+                    ),
+                }),
+                None,
+            )
+            .unwrap();
+        executor
+            .execute(
+                &QueryPlan::AlterType(AlterTypePlan {
+                    keyspace: "ks".to_string(),
+                    name: "address".to_string(),
+                    operation: AlterTypeOp::RenameField(
+                        "zip".to_string(),
+                        "postal_code".to_string(),
+                    ),
+                }),
+                None,
+            )
+            .unwrap();
+        let result = executor
+            .execute(
+                &QueryPlan::AlterType(AlterTypePlan {
+                    keyspace: "ks".to_string(),
+                    name: "address".to_string(),
+                    operation: AlterTypeOp::AlterFieldType(
+                        "postal_code".to_string(),
+                        CqlTypeName::Simple("bigint".to_string()),
+                    ),
+                }),
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            result,
+            QueryResult::SchemaChange {
+                ref change_type,
+                ref target,
+                ..
+            } if change_type == "UPDATED" && target == "TYPE"
+        ));
+
+        let QueryResult::Rows { rows, .. } = executor
+            .execute(
+                &QueryPlan::Describe(DescribePlan {
+                    target: DescribeTarget::Type(Some("ks".to_string()), "address".to_string()),
+                }),
+                None,
+            )
+            .unwrap()
+        else {
+            panic!("expected DESCRIBE rows");
+        };
+        let ddl = String::from_utf8(rows[0][0].clone().unwrap()).unwrap();
+        assert!(ddl.contains("street text"));
+        assert!(ddl.contains("country text"));
+        assert!(ddl.contains("postal_code bigint"));
+        assert!(!ddl.contains("zip int"));
+    }
+
     fn select_all_events(executor: &QueryExecutor) -> Vec<Vec<Option<Vec<u8>>>> {
         let plan = QueryPlan::Select(SelectPlan {
             keyspace: "ks".to_string(),
@@ -10091,6 +13292,7 @@ mod tests {
                 values: vec![int_term(10), int_term(1), text_term("batched")],
                 if_not_exists: false,
                 json: None,
+                json_default: JsonDefault::Null,
                 using_timestamp: None,
                 using_ttl: None,
             })],
@@ -10130,6 +13332,7 @@ mod tests {
                 values: vec![int_term(11), int_term(1), text_term("batched")],
                 if_not_exists: false,
                 json: None,
+                json_default: JsonDefault::Null,
                 using_timestamp: None,
                 using_ttl: None,
             })],
@@ -10813,6 +14016,45 @@ mod tests {
     }
 
     #[test]
+    fn unkeyed_select_filters_token_restriction() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "one");
+        insert_event(&executor, 2, 1, "two");
+
+        let token = cassandra_common::murmur3::murmur3_token(&1i32.to_be_bytes());
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Column("id".to_string()),
+                Selector::Column("name".to_string()),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: vec![Relation {
+                column: "token".to_string(),
+                op: RelationOp::Eq,
+                value: int_term(token),
+            }],
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: true,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][0].as_deref(), Some(1i32.to_be_bytes().as_slice()));
+        assert_eq!(rows[0][1].as_deref(), Some(b"one".as_slice()));
+    }
+
+    #[test]
     fn keyed_select_filters_non_key_restriction() {
         let (executor, _temp) = test_executor();
         insert_event(&executor, 1, 1, "keep");
@@ -10890,6 +14132,542 @@ mod tests {
         };
         let count = i64::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
         assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn count_rows_aliases_aggregate_rows() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "alpha");
+        insert_event(&executor, 2, 1, "beta");
+        insert_event(&executor, 3, 1, "gamma");
+
+        for name in ["count_rows", "countRows"] {
+            let plan = QueryPlan::Select(SelectPlan {
+                keyspace: "ks".to_string(),
+                table: "events".to_string(),
+                columns: SelectColumns::Named(vec![Selector::Function(
+                    name.to_string(),
+                    Vec::new(),
+                )]),
+                distinct: false,
+                json: false,
+                where_clause: Vec::new(),
+                group_by: Vec::new(),
+                order_by: Vec::new(),
+                limit: None,
+                allow_filtering: false,
+                restrictions: None,
+                ann_clause: None,
+                page_size: None,
+                paging_state: None,
+            });
+
+            let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap()
+            else {
+                panic!("expected rows");
+            };
+            assert_eq!(columns[0].name, "count");
+            assert_eq!(columns[0].cql_type, CqlType::Bigint);
+            let count =
+                i64::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
+            assert_eq!(count, 3);
+        }
+    }
+
+    #[test]
+    fn count_column_skips_null_values() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "alpha");
+        insert_event_without_name(&executor, 2, 1);
+        insert_event(&executor, 3, 1, "gamma");
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![Selector::Function(
+                "count".to_string(),
+                vec![Selector::Column("name".to_string())],
+            )]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(columns[0].name, "count(name)");
+        assert_eq!(columns[0].cql_type, CqlType::Bigint);
+        let count = i64::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn select_applies_mask_default_via_cql_function_registry() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "secret");
+        mask_event_name(&executor, "mask_default", Vec::new());
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![Selector::Column("name".to_string())]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows[0][0], Some(b"****".to_vec()));
+    }
+
+    #[test]
+    fn select_applies_partial_and_replace_masks_with_schema_args() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "secret");
+        mask_event_name(
+            &executor,
+            "mask_inner",
+            vec![int_term(1), int_term(1), text_term("#")],
+        );
+
+        let select_name = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![Selector::Column("name".to_string())]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { rows, .. } = executor.execute(&select_name, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows[0][0], Some(b"s####t".to_vec()));
+
+        mask_event_name(&executor, "mask_replace", vec![text_term("REDACTED")]);
+        let QueryResult::Rows { rows, .. } = executor.execute(&select_name, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows[0][0], Some(b"REDACTED".to_vec()));
+    }
+
+    #[test]
+    fn select_applies_mask_hash_blob_column_as_blob_digest() {
+        let (executor, _temp) = test_executor();
+        add_event_payload_column(&executor);
+        insert_event_with_payload(&executor, 1, 1, "secret", b"secret");
+        mask_event_column(&executor, "payload", "mask_hash", Vec::new());
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![Selector::Column("payload".to_string())]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(
+            rows[0][0],
+            Some(
+                [
+                    0x2b, 0xb8, 0x0d, 0x53, 0x7b, 0x1d, 0xa3, 0xe3, 0x8b, 0xd3, 0x03, 0x61, 0xaa,
+                    0x85, 0x56, 0x86, 0xbd, 0xe0, 0xea, 0xcd, 0x71, 0x62, 0xfe, 0xf6, 0xa2, 0x5f,
+                    0xe9, 0x7b, 0xf5, 0x27, 0xa2, 0x5b,
+                ]
+                .to_vec()
+            )
+        );
+
+        mask_event_column(
+            &executor,
+            "payload",
+            "mask_hash",
+            vec![text_term("SHA3-256")],
+        );
+        let QueryResult::Rows { rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(
+            rows[0][0],
+            Some(
+                [
+                    0xf5, 0xa5, 0x20, 0x7a, 0x87, 0x29, 0xb1, 0xf7, 0x09, 0xcb, 0x71, 0x03, 0x11,
+                    0x75, 0x1e, 0xb2, 0xfc, 0x8a, 0xca, 0xd5, 0xa1, 0xfb, 0x8a, 0xc9, 0x91, 0xb7,
+                    0x36, 0xe6, 0x9b, 0x65, 0x29, 0xa3,
+                ]
+                .to_vec()
+            )
+        );
+    }
+
+    #[test]
+    fn alter_table_rejects_invalid_mask_definitions() {
+        let (executor, _temp) = test_executor();
+
+        let unknown = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "name".to_string(),
+                    "mask_unknown".to_string(),
+                    Vec::new(),
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(unknown, Err(ExecutorError::InvalidQuery(_))));
+
+        let wrong_arg_type = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "name".to_string(),
+                    "mask_inner".to_string(),
+                    vec![text_term("not-int"), int_term(1)],
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(
+            wrong_arg_type,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        let incompatible_column = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "bucket".to_string(),
+                    "mask_inner".to_string(),
+                    vec![int_term(1), int_term(1)],
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(
+            incompatible_column,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        let invalid_replace_value = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "bucket".to_string(),
+                    "mask_replace".to_string(),
+                    vec![text_term("not-an-int")],
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(
+            invalid_replace_value,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        let type_altering_hash = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "name".to_string(),
+                    "mask_hash".to_string(),
+                    Vec::new(),
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(
+            type_altering_hash,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        add_event_payload_column(&executor);
+        let invalid_hash_algorithm = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "payload".to_string(),
+                    "mask_hash".to_string(),
+                    vec![text_term("unknown-algorithm")],
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(
+            invalid_hash_algorithm,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        let invalid_partial_padding = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::MaskColumn(
+                    "name".to_string(),
+                    "mask_inner".to_string(),
+                    vec![int_term(1), int_term(1), text_term("xx")],
+                ),
+            }),
+            None,
+        );
+        assert!(matches!(
+            invalid_partial_padding,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        let add_type_altering_mask = executor.execute(
+            &QueryPlan::AlterTable(AlterTablePlan {
+                keyspace: "ks".to_string(),
+                name: "events".to_string(),
+                operation: AlterTableOp::AddColumn(ColumnDef {
+                    name: "masked_text".to_string(),
+                    cql_type: CqlTypeName::Simple("text".to_string()),
+                    is_static: false,
+                    masked_with: Some(("mask_hash".to_string(), Vec::new())),
+                    constraints: Vec::new(),
+                }),
+            }),
+            None,
+        );
+        assert!(matches!(
+            add_type_altering_mask,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+
+        let create_type_altering_mask = executor.execute(
+            &QueryPlan::CreateTable(CreateTablePlan {
+                keyspace: "ks".to_string(),
+                name: "bad_masked_table".to_string(),
+                if_not_exists: false,
+                columns: vec![
+                    cassandra_cql::planner::ResolvedColumnDef {
+                        name: "k".to_string(),
+                        cql_type: CqlType::Int,
+                        is_static: false,
+                        masked_with: None,
+                        constraints: Vec::new(),
+                    },
+                    cassandra_cql::planner::ResolvedColumnDef {
+                        name: "v".to_string(),
+                        cql_type: CqlType::Varchar,
+                        is_static: false,
+                        masked_with: Some(("mask_hash".to_string(), Vec::new())),
+                        constraints: Vec::new(),
+                    },
+                ],
+                partition_key: vec!["k".to_string()],
+                clustering_key: Vec::new(),
+                clustering_order: Vec::new(),
+                options: std::collections::HashMap::new(),
+            }),
+            None,
+        );
+        assert!(matches!(
+            create_type_altering_mask,
+            Err(ExecutorError::InvalidQuery(_))
+        ));
+    }
+
+    #[test]
+    fn select_requires_select_masked_when_filtering_on_masked_column() {
+        let (executor, _temp) = test_executor_with_authorizer(true);
+        executor
+            .execute(&create_role_plan("analyst"), None)
+            .unwrap();
+        insert_event(&executor, 1, 1, "secret");
+        mask_event_column(&executor, "bucket", "mask_default", Vec::new());
+
+        let select_by_masked_column = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Column("id".to_string()),
+                Selector::Column("bucket".to_string()),
+                Selector::Column("name".to_string()),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: vec![Relation {
+                column: "bucket".to_string(),
+                op: RelationOp::Eq,
+                value: int_term(1),
+            }],
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: true,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        assert!(matches!(
+            executor.execute(&select_by_masked_column, Some("analyst")),
+            Err(ExecutorError::InvalidQuery(msg))
+                if msg.contains("no UNMASK nor SELECT_MASKED")
+                    && msg.contains("[bucket]")
+        ));
+
+        let resource = SecurityResource::Table {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+        };
+        executor
+            .authorizer
+            .grant("cassandra", "analyst", &resource, Permission::SelectMasked)
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = executor
+            .execute(&select_by_masked_column, Some("analyst"))
+            .unwrap()
+        else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows[0][1], Some(0i32.to_be_bytes().to_vec()));
+
+        executor
+            .authorizer
+            .grant("cassandra", "analyst", &resource, Permission::Unmask)
+            .unwrap();
+        let QueryResult::Rows { rows, .. } = executor
+            .execute(&select_by_masked_column, Some("analyst"))
+            .unwrap()
+        else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows[0][1], Some(1i32.to_be_bytes().to_vec()));
+    }
+
+    #[test]
+    fn select_requires_select_masked_when_token_restricts_masked_partition_key() {
+        let (executor, _temp) = test_executor_with_authorizer(true);
+        executor
+            .execute(&create_role_plan("analyst"), None)
+            .unwrap();
+        insert_event(&executor, 1, 1, "secret");
+        mask_event_column(&executor, "id", "mask_default", Vec::new());
+
+        let token = cassandra_common::murmur3::murmur3_token(&1i32.to_be_bytes());
+        let select_by_masked_token = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Column("id".to_string()),
+                Selector::Column("bucket".to_string()),
+                Selector::Column("name".to_string()),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: vec![Relation {
+                column: "token".to_string(),
+                op: RelationOp::Eq,
+                value: int_term(token),
+            }],
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: true,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        assert!(matches!(
+            executor.execute(&select_by_masked_token, Some("analyst")),
+            Err(ExecutorError::InvalidQuery(msg))
+                if msg.contains("no UNMASK nor SELECT_MASKED")
+                    && msg.contains("[id]")
+        ));
+    }
+
+    #[test]
+    fn select_json_formats_masked_values_with_cql_types() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 7, "secret");
+        mask_event_column(&executor, "bucket", "mask_default", Vec::new());
+        mask_event_column(
+            &executor,
+            "name",
+            "mask_replace",
+            vec![text_term("REDACTED")],
+        );
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Column("id".to_string()),
+                Selector::Column("bucket".to_string()),
+                Selector::Column("name".to_string()),
+            ]),
+            distinct: false,
+            json: true,
+            where_clause: Vec::new(),
+            group_by: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { columns, rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(columns[0].name, "[json]");
+        let json = String::from_utf8(rows[0][0].clone().unwrap()).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["id"], serde_json::json!(1));
+        assert_eq!(value["bucket"], serde_json::json!(0));
+        assert_eq!(value["name"], serde_json::json!("REDACTED"));
     }
 
     #[derive(Debug)]
@@ -11294,6 +15072,7 @@ mod tests {
                         ],
                         if_not_exists: false,
                         json: None,
+                        json_default: JsonDefault::Null,
                         using_timestamp: None,
                         using_ttl: None,
                     }),
@@ -11391,8 +15170,8 @@ mod tests {
             panic!("expected rows");
         };
         assert_eq!(columns[0].name, "sum(bucket)");
-        assert_eq!(columns[0].cql_type, CqlType::Bigint);
-        let sum = i64::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
+        assert_eq!(columns[0].cql_type, CqlType::Int);
+        let sum = i32::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
         assert_eq!(sum, 7);
     }
 
@@ -11430,9 +15209,59 @@ mod tests {
             panic!("expected rows");
         };
         assert_eq!(columns[0].name, "sum(abs(bucket))");
-        assert_eq!(columns[0].cql_type, CqlType::Bigint);
-        let sum = i64::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
+        assert_eq!(columns[0].cql_type, CqlType::Int);
+        let sum = i32::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
         assert_eq!(sum, 7);
+    }
+
+    #[test]
+    fn builtin_sum_and_avg_preserve_java_argument_types() {
+        assert_eq!(
+            aggregate_output_type("sum", Some(&CqlType::Tinyint)),
+            CqlType::Tinyint
+        );
+        assert_eq!(
+            aggregate_output_type("avg", Some(&CqlType::Decimal)),
+            CqlType::Decimal
+        );
+
+        let mut tiny_sum = SumAccumulator::new(CqlType::Tinyint);
+        tiny_sum.add(&[120u8]).unwrap();
+        tiny_sum.add(&[10u8]).unwrap();
+        assert_eq!(tiny_sum.finalize().unwrap(), vec![130u8]);
+
+        let mut int_avg = AvgAccumulator::new(CqlType::Int);
+        int_avg.add(&5i32.to_be_bytes()).unwrap();
+        int_avg.add(&2i32.to_be_bytes()).unwrap();
+        assert_eq!(int_avg.finalize().unwrap(), 3i32.to_be_bytes().to_vec());
+    }
+
+    #[test]
+    fn builtin_sum_and_avg_support_varint_and_decimal_states() {
+        let mut varint_sum = SumAccumulator::new(CqlType::Varint);
+        let huge = BigInt::parse_bytes(b"123456789012345678901234567890", 10)
+            .unwrap()
+            .to_signed_bytes_be();
+        varint_sum.add(&huge).unwrap();
+        varint_sum
+            .add(&BigInt::from(10).to_signed_bytes_be())
+            .unwrap();
+        assert_eq!(
+            BigInt::from_signed_bytes_be(&varint_sum.finalize().unwrap()).to_string(),
+            "123456789012345678901234567900"
+        );
+
+        let mut decimal_avg = AvgAccumulator::new(CqlType::Decimal);
+        decimal_avg
+            .add(&cassandra_types::bigint::string_to_decimal("1.0").unwrap())
+            .unwrap();
+        decimal_avg
+            .add(&cassandra_types::bigint::string_to_decimal("2.0").unwrap())
+            .unwrap();
+        assert_eq!(
+            cassandra_types::bigint::decimal_to_string(&decimal_avg.finalize().unwrap()).unwrap(),
+            "1.5"
+        );
     }
 
     #[test]
@@ -11470,8 +15299,8 @@ mod tests {
             panic!("expected rows");
         };
         assert_eq!(columns[0].name, "sum(identity_bucket(bucket))");
-        assert_eq!(columns[0].cql_type, CqlType::Bigint);
-        let sum = i64::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
+        assert_eq!(columns[0].cql_type, CqlType::Int);
+        let sum = i32::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
         assert_eq!(sum, 7);
     }
 
@@ -11705,16 +15534,172 @@ mod tests {
         let first_count =
             i64::from_be_bytes(rows[0][1].as_ref().unwrap().as_slice().try_into().unwrap());
         let first_sum =
-            i64::from_be_bytes(rows[0][2].as_ref().unwrap().as_slice().try_into().unwrap());
+            i32::from_be_bytes(rows[0][2].as_ref().unwrap().as_slice().try_into().unwrap());
         let second_id =
             i32::from_be_bytes(rows[1][0].as_ref().unwrap().as_slice().try_into().unwrap());
         let second_count =
             i64::from_be_bytes(rows[1][1].as_ref().unwrap().as_slice().try_into().unwrap());
         let second_sum =
-            i64::from_be_bytes(rows[1][2].as_ref().unwrap().as_slice().try_into().unwrap());
+            i32::from_be_bytes(rows[1][2].as_ref().unwrap().as_slice().try_into().unwrap());
 
         assert_eq!((first_id, first_count, first_sum), (1, 2, 3));
         assert_eq!((second_id, second_count, second_sum), (2, 1, 4));
+    }
+
+    #[test]
+    fn group_by_uses_clear_values_before_masking_projection() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "a");
+        insert_event(&executor, 1, 2, "b");
+        insert_event(&executor, 2, 4, "c");
+        mask_event_column(&executor, "id", "mask_default", Vec::new());
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Column("id".to_string()),
+                Selector::Count,
+                Selector::Function(
+                    "sum".to_string(),
+                    vec![Selector::Column("bucket".to_string())],
+                ),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: Vec::new(),
+            group_by: vec!["id".to_string()],
+            order_by: Vec::new(),
+            limit: None,
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+
+        assert_eq!(rows.len(), 2);
+        let first_id =
+            i32::from_be_bytes(rows[0][0].as_ref().unwrap().as_slice().try_into().unwrap());
+        let first_count =
+            i64::from_be_bytes(rows[0][1].as_ref().unwrap().as_slice().try_into().unwrap());
+        let first_sum =
+            i32::from_be_bytes(rows[0][2].as_ref().unwrap().as_slice().try_into().unwrap());
+        let second_id =
+            i32::from_be_bytes(rows[1][0].as_ref().unwrap().as_slice().try_into().unwrap());
+        let second_count =
+            i64::from_be_bytes(rows[1][1].as_ref().unwrap().as_slice().try_into().unwrap());
+        let second_sum =
+            i32::from_be_bytes(rows[1][2].as_ref().unwrap().as_slice().try_into().unwrap());
+
+        assert_eq!((first_id, first_count, first_sum), (0, 2, 3));
+        assert_eq!((second_id, second_count, second_sum), (0, 1, 4));
+    }
+
+    #[test]
+    fn paged_select_applies_masks_on_every_page() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "a");
+        insert_event(&executor, 2, 2, "b");
+        insert_event(&executor, 3, 3, "c");
+        mask_event_column(&executor, "id", "mask_default", Vec::new());
+        mask_event_column(&executor, "bucket", "mask_default", Vec::new());
+        mask_event_column(
+            &executor,
+            "name",
+            "mask_replace",
+            vec![text_term("REDACTED")],
+        );
+
+        let mut paging_state = None;
+        let mut rows_seen = 0;
+        loop {
+            let plan = QueryPlan::Select(SelectPlan {
+                keyspace: "ks".to_string(),
+                table: "events".to_string(),
+                columns: SelectColumns::Named(vec![
+                    Selector::Column("id".to_string()),
+                    Selector::Column("bucket".to_string()),
+                    Selector::Column("name".to_string()),
+                ]),
+                distinct: false,
+                json: false,
+                where_clause: Vec::new(),
+                group_by: Vec::new(),
+                order_by: Vec::new(),
+                limit: None,
+                allow_filtering: false,
+                restrictions: None,
+                ann_clause: None,
+                page_size: Some(1),
+                paging_state: paging_state.clone(),
+            });
+
+            let QueryResult::Rows {
+                rows,
+                paging_state: next_state,
+                ..
+            } = executor.execute(&plan, None).unwrap()
+            else {
+                panic!("expected rows");
+            };
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0][0], Some(0i32.to_be_bytes().to_vec()));
+            assert_eq!(rows[0][1], Some(0i32.to_be_bytes().to_vec()));
+            assert_eq!(rows[0][2], Some(b"REDACTED".to_vec()));
+            rows_seen += 1;
+
+            paging_state = next_state;
+            if paging_state.is_none() {
+                break;
+            }
+        }
+        assert_eq!(rows_seen, 3);
+    }
+
+    #[test]
+    fn order_by_desc_limit_uses_clear_clustering_values_before_masking() {
+        let (executor, _temp) = test_executor();
+        insert_event(&executor, 1, 1, "first");
+        insert_event(&executor, 1, 2, "middle");
+        insert_event(&executor, 1, 3, "last");
+        mask_event_column(&executor, "bucket", "mask_default", Vec::new());
+
+        let plan = QueryPlan::Select(SelectPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: SelectColumns::Named(vec![
+                Selector::Column("id".to_string()),
+                Selector::Column("bucket".to_string()),
+                Selector::Column("name".to_string()),
+            ]),
+            distinct: false,
+            json: false,
+            where_clause: vec![Relation {
+                column: "id".to_string(),
+                op: RelationOp::Eq,
+                value: int_term(1),
+            }],
+            group_by: Vec::new(),
+            order_by: vec![("bucket".to_string(), AstClusteringOrder::Desc)],
+            limit: Some(int_term(1)),
+            allow_filtering: false,
+            restrictions: None,
+            ann_clause: None,
+            page_size: None,
+            paging_state: None,
+        });
+
+        let QueryResult::Rows { rows, .. } = executor.execute(&plan, None).unwrap() else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0][1], Some(0i32.to_be_bytes().to_vec()));
+        assert_eq!(rows[0][2], Some(b"last".to_vec()));
     }
 
     #[test]

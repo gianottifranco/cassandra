@@ -1,5 +1,11 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(
+    clippy::incompatible_msrv,
+    clippy::manual_ignore_case_cmp,
+    clippy::question_mark
+)]
+
 //! # User-Defined Functions and Aggregates
 //!
 //! ## Status: feature-gated native evaluator
@@ -2303,14 +2309,14 @@ fn java_object_literal_key(value: &str) -> Option<JavaObjectLiteralKey> {
     if let Some(value) = parse_java_integer_literal(value) {
         return Some(JavaObjectLiteralKey::Integer(value));
     }
-    if let Some(value) = parse_java_float_literal(value) {
+    if let Some(parsed) = parse_java_float_literal(value) {
         if is_java_f32_literal(value) {
             return Some(JavaObjectLiteralKey::Float32(
-                java_f32_to_i32_bits(value as f32) as u32,
+                java_f32_to_i32_bits(parsed as f32) as u32,
             ));
         }
         return Some(JavaObjectLiteralKey::Float64(
-            java_f64_to_i64_bits(value) as u64
+            java_f64_to_i64_bits(parsed) as u64
         ));
     }
     None
@@ -5221,11 +5227,11 @@ fn java_primitive_to_string_literal_alias(expression: &str, return_type: &str) -
         if let Some(value) = parse_java_integer_literal(value) {
             return Some(format!("constant:{value}"));
         }
-        if let Some(value) = parse_java_float_literal(value) {
+        if let Some(parsed) = parse_java_float_literal(value) {
             let literal = if is_java_f32_literal(value) {
-                java_f32_to_string(value as f32)
+                java_f32_to_string(parsed as f32)
             } else {
-                java_f64_to_string(value)
+                java_f64_to_string(parsed)
             };
             return Some(format!("constant:{literal}"));
         }
@@ -6917,7 +6923,9 @@ fn strip_ascii_suffix_ignore_case<'a>(value: &'a str, suffix: &str) -> Option<&'
     if value.len() < suffix.len() {
         return None;
     }
-    let (prefix, actual_suffix) = value.split_at(value.len() - suffix.len());
+    let split_at = value.len() - suffix.len();
+    let prefix = value.get(..split_at)?;
+    let actual_suffix = value.get(split_at..)?;
     actual_suffix.eq_ignore_ascii_case(suffix).then_some(prefix)
 }
 

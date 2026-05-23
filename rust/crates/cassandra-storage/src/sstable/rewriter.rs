@@ -16,19 +16,11 @@ use super::writer::{SSTableStats, SSTableWriter};
 use crate::memtable::partition::PartitionData;
 
 /// Configuration for the rewriter.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RewriterConfig {
     /// Maximum estimated size per output SSTable in bytes.
     /// `None` means write everything into a single SSTable.
     pub max_sstable_size: Option<u64>,
-}
-
-impl Default for RewriterConfig {
-    fn default() -> Self {
-        Self {
-            max_sstable_size: None,
-        }
-    }
 }
 
 /// Result of a rewrite operation.
@@ -43,7 +35,7 @@ pub struct RewriteResult {
 /// Estimate the byte size of a partition for split-size accounting.
 fn estimate_partition_size(key: &[u8], data: &PartitionData) -> u64 {
     let mut size = key.len() as u64;
-    for (_ck, row) in &data.rows {
+    for row in data.rows.values() {
         // Clustering key + overhead per row (marker, flags, cell count).
         size += row.clustering_key.len() as u64 + 10;
         for cell in &row.cells {

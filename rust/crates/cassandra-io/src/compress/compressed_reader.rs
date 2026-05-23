@@ -19,7 +19,7 @@ use byteorder::{BigEndian, ReadBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
 
 use crate::compress::metadata::CompressionMetadata;
-use crate::compress::{ICompressor, create_compressor};
+use crate::compress::{ICompressor, create_compressor_with_options};
 use crate::error::IoError;
 use crate::util::rebufferer::{BufferHolder, Rebufferer};
 
@@ -34,7 +34,9 @@ impl CompressedChunkReader {
     /// Opens the compressed data file and pairs it with pre-loaded metadata.
     pub fn new(data_path: impl AsRef<Path>, metadata: CompressionMetadata) -> io::Result<Self> {
         let file = File::open(data_path)?;
-        let compressor = create_compressor(metadata.compressor_type);
+        let compressor =
+            create_compressor_with_options(metadata.compressor_type, &metadata.options)
+                .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Self {
             file: Arc::new(Mutex::new(file)),
             metadata,
@@ -49,7 +51,7 @@ impl CompressedChunkReader {
         let mut file = self
             .file
             .lock()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("lock poisoned: {e}")))?;
+            .map_err(|e| io::Error::other(format!("lock poisoned: {e}")))?;
         file.seek(SeekFrom::Start(offset))?;
 
         // Read compressed_len(u32 BE) + compressed_data + crc32(u32 BE)
@@ -76,7 +78,7 @@ impl CompressedChunkReader {
         let uncompressed_hint = self.metadata.chunk_size as usize;
         self.compressor
             .decompress(&comp_data, uncompressed_hint)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+            .map_err(|e| io::Error::other(e.to_string()))
     }
 }
 

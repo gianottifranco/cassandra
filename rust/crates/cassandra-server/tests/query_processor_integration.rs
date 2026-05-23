@@ -156,6 +156,41 @@ fn prepared_result_frame_roundtrip() {
 }
 
 #[test]
+fn prepared_result_v5_includes_result_metadata_id() {
+    let metadata_id = vec![1u8; 16];
+    let prepared_result = PreparedResult {
+        id: vec![0u8; 16],
+        result_metadata_id: Some(metadata_id.clone()),
+        bind_metadata: RowsMetadata {
+            flags: 0,
+            columns_count: 0,
+            paging_state: None,
+            new_metadata_id: None,
+            global_table_spec: None,
+            col_specs: Vec::new(),
+        },
+        result_metadata: RowsMetadata {
+            flags: 0,
+            columns_count: 0,
+            paging_state: None,
+            new_metadata_id: None,
+            global_table_spec: None,
+            col_specs: Vec::new(),
+        },
+    };
+
+    let frame = response::encode_response(
+        &Message::Result(ResultMessage::Prepared(prepared_result)),
+        5,
+        4,
+    );
+    let mut body: &[u8] = &frame.body;
+    assert_eq!(types::read_int(&mut body).unwrap(), 0x0004);
+    assert_eq!(types::read_short_bytes(&mut body).unwrap(), vec![0u8; 16]);
+    assert_eq!(types::read_short_bytes(&mut body).unwrap(), metadata_id);
+}
+
+#[test]
 fn error_frame_correct_codes() {
     // SYNTAX_ERROR
     let frame = response::error_frame(4, 0, 0x2000, "Syntax error near 'SELCT'");

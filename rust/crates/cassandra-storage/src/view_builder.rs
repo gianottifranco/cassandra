@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::type_complexity)]
+
 //! View builder for backfilling materialized views from base table data.
 //!
 //! ## Java Oracle

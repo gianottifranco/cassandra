@@ -1,5 +1,17 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(
+    dead_code,
+    clippy::collapsible_if,
+    clippy::for_kv_map,
+    clippy::large_enum_variant,
+    clippy::question_mark,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::unnecessary_map_or,
+    clippy::useless_format
+)]
+
 //! Cassandra Rust Server – single-node binary.
 //!
 //! ## Startup sequence
@@ -218,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
     let server_config = ServerConfig {
         listen_address: nt_config.bind_address(),
         client_encryption_enabled,
+        max_frame_size: nt_config.max_frame_size,
     };
 
     let server = Arc::new(NativeServer::new(

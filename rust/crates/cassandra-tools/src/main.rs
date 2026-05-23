@@ -71,6 +71,7 @@ mod cmd_logging_security;
 mod cmd_snapshots;
 mod cmd_stats;
 mod cmd_topology;
+mod table_formatter;
 
 // New offline SSTable tools (Unit 10)
 mod sstable_expired_blockers;

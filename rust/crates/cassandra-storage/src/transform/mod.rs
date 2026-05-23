@@ -14,4 +14,6 @@ pub mod rtb_closer;
 pub mod transformation;
 
 pub use filtered::{FilteredPartitions, FilteredRows};
-pub use transformation::{LimitsTransform, PurgeTransform, Transformation};
+pub use transformation::{
+    LimitsTransform, PurgeTransform, RangeTombstoneLivenessTransform, Transformation,
+};

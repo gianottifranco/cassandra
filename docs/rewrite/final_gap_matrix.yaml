@@ -39,13 +39,14 @@ features:
       - org.apache.cassandra.serializers
     rust_crate: cassandra-types
     status: partial
-    evidence_type: [unit]
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-02
     notes: >
-      Native types, collections, UDT, vector, tuple implemented. Missing:
-      frozen deep-nesting edge cases, composite types, DynamicCompositeType.
+      Native scalar types, collections, frozen nested collections, UDTs,
+      vectors, tuples, legacy CompositeType, and DynamicCompositeType parsing,
+      serialization, and comparison are implemented.
 
   - id: cql-parser
     name: CQL Parser
@@ -60,8 +61,18 @@ features:
     closure_phase: prompt-03
     notes: >
       Recursive-descent parser. SELECT, INSERT, UPDATE, DELETE, CREATE/ALTER/DROP
-      KEYSPACE/TABLE, USE covered. Missing: GRANT, REVOKE, roles, custom payloads,
-      JSON syntax, UDF/UDA CREATE/DROP.
+      KEYSPACE/TABLE/TYPE/INDEX/FUNCTION/AGGREGATE/TRIGGER, DROP variants,
+      ALTER TYPE, USE, GRANT, REVOKE, roles, DESCRIBE, and masking clauses
+      are covered. COMMENT ON KEYSPACE/TABLE/COLUMN/TYPE/FIELD statements now
+      parse to AST and plan/execute against schema metadata.
+      BATCH grammar limits objectives to INSERT, UPDATE, and DELETE statements
+      like Java.
+      DELETE USING follows Java's delete-only grammar by accepting TIMESTAMP and
+      rejecting TTL.
+      TRUNCATE accepts Java's optional COLUMNFAMILY keyword and rejects TABLE.
+      SELECT JSON and INSERT JSON string syntax are parsed, and INSERT JSON
+      execution accepts nested JSON arrays/objects via serde_json plus DEFAULT
+      NULL/UNSET handling. Missing: remaining CQL grammar edge cases.
 
   - id: cql-conditions
     name: CQL Conditions (LWT IF)
@@ -74,7 +85,10 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-07
-    notes: "IF conditions parsed and used by Paxos. Collection element conditions missing."
+    notes: >
+      IF EXISTS/IF NOT EXISTS, scalar column comparisons, IN conditions,
+      collection element conditions, and CONTAINS/CONTAINS KEY conditions are
+      parsed and evaluated with typed collection decoding.
 
   - id: cql-constraints
     name: CQL Constraints
@@ -82,12 +96,17 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.constraints
     rust_crate: cassandra-cql
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "CHECK constraints. Trunk-only feature."
+    notes: >
+      Column CHECK constraints are parsed, planned into schema metadata, stored
+      on ColumnMetadata, and enforced for insert/update with scalar
+      comparisons, length/octet_length, regexp, json, and NOT NULL coverage.
+      Missing: complete trunk constraint grammar, full validation semantics,
+      and Java error/reporting parity.
 
   - id: cql-functions
     name: CQL Functions (builtins, UDF, UDA)
@@ -95,15 +114,46 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.functions
     rust_crate: cassandra-cql
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
     notes: >
-      Builtin functions (token, now, uuid, cast, etc.), aggregate functions
-      (count, sum, avg, min, max), UDFs (Java/JavaScript), UDAs. UDF needs
-      sandbox/WASM strategy.
+      FunctionRegistry, overload resolution, time/UUID, token/cast/blob,
+      MathFcts fixed-width numeric abs/exp/log/log10/round plus varint
+      abs/exp/log/log10/round and decimal abs/exp/log/log10/round,
+      TimeFcts current/timeuuid/date/timestamp conversion names covering Java
+      snake_case and legacy aliases, plus floor(timestamp/timeuuid/date/time,
+      duration) support including UTC month calendar semantics,
+      CastFcts fixed-width/varint/decimal numeric conversions, numeric
+      and native boolean/inet/uuid/timeuuid/timestamp/date/time text/ascii
+      casts, temporal conversions, and Java/legacy names,
+      OperationFcts fixed-width/varint/decimal numeric arithmetic/negation,
+      timestamp/date +/- duration, and text/ascii concatenation builtins,
+      ClusterMetadataFcts transformation_kind Java Transformation.Kind id/name
+      mapping,
+      CollectionFcts map_keys/map_values for native and complex map key/value
+      pairs with return types derived from the concrete map signature,
+      collection_count for list/set/map, collection_min/max for native and
+      complex list/set elements using CQL type comparison, and
+      collection_sum/avg for fixed numeric, varint, and decimal list/set
+      elements,
+      AggregateFcts count(*) and count(column) null semantics execute, and
+      sum/avg preserve Java argument result types across fixed numeric, counter,
+      varint, and decimal execution,
+      FormatFcts format_time/format_bytes Java unit conversion and formatting
+      rules for supported scalar inputs,
+      LengthFcts length and octet_length semantics, BytesConversionFcts
+      Java/legacy blob aliases for native non-blob types, JSON to_json/tojson
+      argument-typed selector/write execution plus from_json/fromjson
+      receiver-typed execution for scalar and collection write terms,
+      VectorFcts similarity_cosine/similarity_euclidean/similarity_dot_product
+      with Java all-zero cosine rejection, masking, aggregate functions,
+      selector evaluation, CREATE/DROP
+      FUNCTION/AGGREGATE parsing/planning, and UDF/UDA metadata are implemented.
+      Missing: full Java built-in catalog, production UDF sandbox/WASM
+      execution parity, and complete UDA runtime integration.
 
   - id: cql-restrictions
     name: CQL Restrictions
@@ -111,12 +161,15 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.restrictions
     rust_crate: cassandra-cql
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-03
-    notes: "Basic restrictions. Missing: multi-column, token(), CONTAINS, LIKE."
+    notes: >
+      Single-column, multi-column clustering, token(), CONTAINS/CONTAINS KEY,
+      and LIKE restrictions are parsed, validated, planned, and enforced on the
+      local execution path with type-aware operand binding.
 
   - id: cql-selection
     name: CQL Selection & Projection
@@ -124,12 +177,16 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.selection
     rust_crate: cassandra-cql
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-03
-    notes: "Basic column selection. Missing: function calls in SELECT, aliases, writetime/ttl."
+    notes: >
+      SELECT projection covers all columns, named columns, aliases, aggregate
+      count selectors, built-in/user function selectors, writetime/ttl/
+      maxwritetime selectors, execution projection, and prepared result
+      metadata inference for selector output names and types.
 
   - id: cql-statements
     name: CQL Statements
@@ -138,13 +195,28 @@ features:
       - org.apache.cassandra.cql3.statements
     rust_crate: cassandra-cql
     status: partial
-    evidence_type: [unit]
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-03
     notes: >
-      DDL+DML statements. Missing: permission statements, role statements,
-      index management, aggregate management, function management, DESCRIBE.
+      DDL, DML, DCL/role statements, ALTER TYPE, LIST ROLES,
+      LIST PERMISSIONS, and DESCRIBE keyspace/table/type/function/aggregate
+      metadata DDL are parsed, planned, and executed. COMMENT ON schema element
+      statements parse to AST; KEYSPACE/TABLE/COLUMN/TYPE/FIELD comments update
+      metadata, DESCRIBE emits comment DDL, and generic/unqualified DESCRIBE
+      resolves keyspace/table/type/function/aggregate objects. TRUNCATE follows
+      Java's optional COLUMNFAMILY grammar and rejects TABLE. DELETE USING
+      TIMESTAMP follows Java's delete-only USING grammar and rejects TTL. BATCH
+      accepts only INSERT/UPDATE/DELETE objectives, and USING TIMESTAMP
+      propagates to child mutations with Java validation for global TTL, counter
+      batches, conditional batches, and mixed batch/statement timestamps.
+      CREATE/ALTER/DROP ROLE plus CREATE/ALTER/DROP USER aliases parse Java
+      string-literal and dollar-quoted role names, USER
+      quoted-identifier rejection, HASHED PASSWORD, custom OPTIONS maps, ACCESS
+      TO DATACENTERS / ACCESS FROM CIDRS options, multiple permission lists, and
+      ON ALL KEYSPACES. Missing: full schema agreement/migration semantics and
+      remaining Java reporting edge cases.
 
   - id: cql-terms
     name: CQL Terms & Literals
@@ -152,12 +224,18 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.terms
     rust_crate: cassandra-cql
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-03
-    notes: "Literals, bind markers. Missing: function call terms, type casts, collection constructors."
+    notes: >
+      Core literals, bind markers, collection/map/tuple constructors, term-level
+      type hints/cast(... AS type), and built-in/UDF function-call terms are
+      parsed, type-bound, and executed for typed write values, including nested
+      function terms and function terms inside typed constructors. Advanced UDT
+      literals and collection modifiers are tracked separately by
+      cql-terms-advanced.
 
   - id: cql-functions-masking
     name: CQL Masking Functions
@@ -165,12 +243,37 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.functions.masking
     rust_crate: cassandra-cql
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Dynamic data masking functions (mask_default, mask_null, mask_inner, etc.)."
+    notes: >
+      mask_default, mask_null, and mask_replace resolve native scalar overloads
+      with Java-style return typing and serialized default/null/replacement
+      behavior. mask_default also resolves complex list/set/map empty defaults
+      plus tuple/UDT/vector nested field defaults. mask_inner and mask_outer use
+      the Java signatures with begin/end integer arguments and optional
+      single-character padding for ascii/text inputs, including unclamped
+      begin/end boundary behavior. mask_hash returns blob
+      digests with SHA-256 as the default algorithm and supports the
+      JDK-standard MD2, MD5, SHA-1, SHA-2, and SHA3 MessageDigest names. Local
+      SELECT column masking now applies masks through FunctionRegistry using
+      the column CQL type and schema-stored partial arguments, and SELECT JSON
+      renders masked values according to the result column CQL type instead of
+      raw bytes. GROUP BY uses clear column values for grouping and masks only
+      the projected results, ORDER BY/LIMIT over clustering rows is applied to
+      clear values before masked projection, and paged local SELECT applies
+      masks on every returned page. ALTER MASK validates mask function names,
+      arity, argument types, return compatibility, and function-level argument
+      semantics before storing schema metadata. CREATE TABLE and ALTER TABLE ADD
+      column masks use the same validation, and column masks reject
+      type-altering functions unless the returned type matches the masked column
+      type. Local SELECT honors UNMASK for clear-value reads and enforces
+      SELECT_MASKED when a user filters on masked columns, including token
+      restrictions over masked partition keys. Missing: provider-specific
+      MessageDigest extensions, remaining protocol/permission edge cases, and
+      complete dynamic masking enforcement across every read path.
 
   - id: cql-functions-types
     name: CQL Function Type Helpers
@@ -178,12 +281,17 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.functions.types
     rust_crate: cassandra-cql
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "UDF type resolution helpers, CodecRegistry for UDF arguments."
+    notes: >
+      Function overload type compatibility, canonical UDF/UDA signature type
+      names, serialized argument execution helpers, and UDF argument compose
+      empty-buffer null semantics for native types where empty values are
+      meaningless are implemented. Missing: full Java CodecRegistry surface
+      and remaining UDF argument/return conversion edge cases.
 
   - id: cql-statements-schema
     name: CQL Schema Statements
@@ -191,12 +299,16 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.statements.schema
     rust_crate: cassandra-cql
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "CREATE/ALTER/DROP for types, functions, aggregates, indexes, triggers. Sub-package of statements."
+    notes: >
+      Parser and planner cover CREATE/DROP keyspace/table/type/index/function/
+      aggregate/trigger plus ALTER TABLE and ALTER TYPE. Missing: complete
+      schema mutation execution, agreement propagation, and full Cassandra
+      validation semantics.
 
   - id: cql-selection-functions
     name: CQL Selection Function Calls
@@ -204,12 +316,17 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.selection
     rust_crate: cassandra-cql
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "Function calls in SELECT (writetime, ttl, maxwritetime, cast). Sub-package coverage for selector factories."
+    notes: >
+      Function calls, aliases, writetime, ttl, and maxwritetime selectors are
+      parsed, planned, executed, and included in prepared result metadata.
+      cast(... AS type) selector syntax preserves the target type in the AST,
+      resolves overloads by target return type, executes through the built-in
+      cast functions, and reports the target result metadata type.
 
   - id: cql-terms-advanced
     name: CQL Advanced Terms
@@ -217,12 +334,16 @@ features:
     java_packages:
       - org.apache.cassandra.cql3.terms
     rust_crate: cassandra-cql
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "UserTypes.literal(), Lists.prepender/appender, Maps.putter/discarder. Advanced term operations."
+    notes: >
+      User-defined type literals serialize in schema field order, tuple-style
+      UDT literals serialize by position, and collection update operators
+      apply against existing values for list prepend/append, set add/remove,
+      and map put/remove.
 
   - id: cql-transactions
     name: CQL Accord Transactions
@@ -243,12 +364,19 @@ features:
     java_packages:
       - org.apache.cassandra.cql3
     rust_crate: cassandra-cql
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-03
-    notes: "Cache with schema-generation invalidation. Not wired to protocol layer."
+    notes: >
+      Cache with schema-generation invalidation is wired through QueryProcessor
+      PREPARE/EXECUTE, including typed bind values for query and batch
+      execution and protocol NAMES_FOR_VALUES support for named bind markers.
+      Complex collection, tuple, UDT, and vector bind values are validated via
+      the binary CQL value codec before execution. Prepared/result metadata IDs
+      are computed from actual result metadata, encoded for protocol v5, checked
+      on EXECUTE, and used to omit unchanged result metadata.
 
   # ═══════════════════════════════════════════════════════════════
   # STORAGE ENGINE
@@ -266,7 +394,10 @@ features:
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "BTreeMap-based. Missing: TrieMemtable, off-heap allocation, concurrent writes."
+    notes: >
+      SkipList, TrieMemtable, and sharded trie backends are implemented with
+      sorted iteration and memory accounting. Missing: strict off-heap
+      allocation and full Java concurrent write behavior.
 
   - id: commitlog
     name: CommitLog
@@ -274,12 +405,17 @@ features:
     java_packages:
       - org.apache.cassandra.db.commitlog
     rust_crate: cassandra-storage
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "Segment-based with CRC. Missing: compression, encryption, archive, CDC."
+    notes: >
+      Segment-based WAL with CRC validation, v2 segment flags, optional LZ4
+      entry compression, segment-level encryption codec hooks, archive copy/
+      command hooks, restore-on-replay from archived segments, CDC raw segment
+      mirroring with _cdc.idx sidecars, truncation tracking, recycling,
+      corruption policies, and operational metrics.
 
   - id: sstable-read
     name: SSTable Read Path
@@ -294,8 +430,13 @@ features:
     config_condition: null
     closure_phase: prompt-04
     notes: >
-      Custom format reads. NOT binary-compatible with Java big-format.
-      Missing: reading Java SSTables, trie index, bloom filter interop.
+      Custom Big/BTI format reads include row/cell tombstones and partition
+      deletion markers across direct lookup, forward/reverse scans, scrubber,
+      and verifier. Big/BTI direct and sequential readers can also
+      materialize FilteredPartition unfiltered streams preserving native
+      range-tombstone markers. Java big-format metadata/header parsing exists
+      separately. Missing: full reading of Java SSTable rows into the native
+      storage model, trie-index parity, bloom filter interop.
 
   - id: sstable-write
     name: SSTable Write Path
@@ -308,7 +449,13 @@ features:
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "Writes custom format. Not Java-compatible."
+    notes: >
+      Writes custom Big/BTI format including row/cell tombstones and partition
+      deletion markers. Big/BTI FilteredPartition writes preserve native
+      unfiltered range-tombstone markers and remain readable through both
+      FilteredPartition and simplified PartitionData readers. Missing:
+      Java-compatible Data.db writer and byte-for-byte Java unfiltered marker
+      layout parity.
 
   - id: compaction
     name: Compaction
@@ -316,12 +463,18 @@ features:
     java_packages:
       - org.apache.cassandra.db.compaction
     rust_crate: cassandra-storage
-    status: stub
-    evidence_type: [unit]
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-07
-    notes: "STCS, LCS, TWCS, UCS strategy stubs. Missing: actual compaction execution, task management."
+    notes: >
+      STCS/LCS/TWCS/UCS strategy selection and Java option parsing,
+      CompactionController, CompactionManager, active compaction tracking,
+      cancellation, rate limiting, regular/cleanup/scrub/tombstone/upgrade
+      tasks, partition merge, anticompaction, metrics, and output splitting
+      are implemented. Missing: full ColumnFamilyStore/SSTable rewrite
+      integration and Java operational parity.
 
   - id: compaction-unified
     name: Unified Compaction Strategy
@@ -329,12 +482,17 @@ features:
     java_packages:
       - org.apache.cassandra.db.compaction.unified
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "UCS tiered/leveled hybrid. Controller, ShardManager, CostsCalculator."
+    notes: >
+      UnifiedCompactionStrategy parses Java UCS options, scaling parameters,
+      target/min SSTable sizes, shard count, overlap inclusion method, and
+      density-based tiered/leveled picks. Missing: full upstream controller,
+      shard manager, cost calculator, overlap expansion, and production task
+      construction parity.
 
   - id: compaction-writers
     name: Compaction Writers
@@ -342,12 +500,16 @@ features:
     java_packages:
       - org.apache.cassandra.db.compaction.writers
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "DefaultCompactionWriter, SplittingSizeTieredCompactionWriter, MajorLeveledCompactionWriter."
+    notes: >
+      Compaction output size estimation and size-capped output splitting are
+      implemented for Java-style writer rotation decisions. Missing:
+      dedicated Default/SplittingSizeTiered/MajorLeveled writer types and
+      full SSTableRewriter lifecycle parity.
 
   - id: compression
     name: Compression
@@ -360,7 +522,14 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-04
-    notes: "LZ4 and Snappy. Missing: Zstd, compression dictionaries, decompression of Java SSTables."
+    notes: >
+      LZ4, Snappy, Zstd, Deflate, and Noop compressors are implemented with
+      chunked compressed reader/writer coverage, CompressionMetadata
+      serialization, and Java compressor class-name aliases for CompressionInfo
+      parsing. Zstd compression dictionaries are supported through compression
+      options and round-trip through chunked compressed writer/reader metadata.
+      Missing: complete decompression of Java SSTable compressed Data.db chunks
+      into the native reader path.
 
   - id: db-context
     name: Counter Context
@@ -373,7 +542,11 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-07
-    notes: "CRDT counter context with merge. Missing: cleanup of old shards."
+    notes: >
+      CounterContext implements deterministic shard serialization,
+      deserialization, CRDT merge, local mutations, remote-shard detection, and
+      cleanup/clearAllRemote-style folding that preserves totals, with unit,
+      property, and golden-format coverage.
 
   - id: db-filter
     name: Row/Partition Filters
@@ -381,12 +554,15 @@ features:
     java_packages:
       - org.apache.cassandra.db.filter
     rust_crate: cassandra-storage
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P0
     config_condition: null
     closure_phase: prompt-12
-    notes: "ClusteringIndexFilter, ColumnFilter, RowFilter not yet implemented."
+    notes: >
+      ColumnFilter, ClusteringIndexFilter, RowFilter, DataLimits, and
+      SSTable filtered scanning are implemented. Missing: full CQL-to-storage
+      lowering parity and all Java filter edge cases.
 
   - id: db-guardrails
     name: Guardrails
@@ -394,14 +570,22 @@ features:
     java_packages:
       - org.apache.cassandra.db.guardrails
     rust_crate: cassandra-config
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
     notes: >
-      Table/column count limits, partition size warnings, query complexity
-      limits. Config-driven safety rails.
+      GuardrailsConfig, registry, threshold/feature checks, password policy,
+      hot reload, and server-layer read/write/DDL checks are implemented.
+      The config layer now deserializes the upstream flat cassandra.yaml
+      guardrail catalog for keyspace/table/index/MV limits, table/keyspace
+      property lists, consistency-level restrictions, timestamp bounds,
+      page/IN/vector/replication/disk-usage thresholds, size thresholds for
+      partitions, column values, collections, and SAI terms, secondary-index
+      defaults, role-name policy, password policy, and related feature flags.
+      Missing: remaining Java enforcement hooks across every CQL execution path
+      and full GuardrailsMBean runtime reconfiguration parity.
 
   - id: db-lifecycle
     name: SSTable Lifecycle
@@ -409,12 +593,15 @@ features:
     java_packages:
       - org.apache.cassandra.db.lifecycle
     rust_crate: cassandra-storage
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "Tracker, LogTransaction for atomicity. Stub only."
+    notes: >
+      SSTableTracker, LifecycleTransaction, journal-backed LogTransaction
+      recovery, and lifecycle integration coverage are implemented. Missing:
+      full ColumnFamilyStore integration and Java lifecycle notification parity.
 
   - id: db-partitions
     name: Partition Iterators
@@ -427,7 +614,12 @@ features:
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "Basic partition read. Missing: UnfilteredPartitionIterator, merge iterators."
+    notes: >
+      Basic partition read plus in-memory UnfilteredPartitionIterator,
+      merged row iterators, and merged partition iterators with duplicate-row
+      LWW resolution and partition metadata merging are implemented. Missing:
+      full streaming Java UnfilteredPartitionIterators parity and remaining
+      range tombstone merge edge cases.
 
   - id: db-rows
     name: Row Representation
@@ -440,7 +632,17 @@ features:
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "Row, Cell, Tombstone. Missing: ComplexColumnData, range tombstone processing."
+    notes: >
+      Row, Cell, Tombstone, ComplexColumnData, and timestamp-aware row liveness
+      under row, partition, and range tombstone deletion are implemented.
+      PartitionUpdate live-row materialization applies the active partition/range
+      deletion per clustering key, and iterator transforms now prune rows/cells
+      under open/close/boundary range tombstone markers. Native SSTable marker
+      encoding preserves unfiltered range tombstone marker shape and bound
+      inclusivity, and Big/BTI readers/writers expose those markers through
+      FilteredPartition materialization. Missing: complete Java row
+      binary/layout parity and
+      byte-for-byte Java range tombstone marker serialization parity.
 
   - id: db-streaming
     name: DB-level Streaming
@@ -448,12 +650,17 @@ features:
     java_packages:
       - org.apache.cassandra.db.streaming
     rust_crate: cassandra-streaming
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-06
-    notes: "SSTable streaming integration. Stub only."
+    notes: >
+      StreamSender reads SSTables into chunked transfers and StreamReceiver
+      assembles incoming chunks into SSTableWriter output with checksum,
+      registration, cleanup, and multi-node transfer coverage. Missing: full
+      Java CassandraStreamReader/Writer format compatibility, zero-copy
+      component streaming, and compaction/lifecycle pinning parity.
 
   - id: db-transform
     name: Row Transformations
@@ -461,12 +668,16 @@ features:
     java_packages:
       - org.apache.cassandra.db.transform
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "Filter, DuplicateRowChecker, Transformation pipeline."
+    notes: >
+      Transformation trait, FilterTransform, FilteredRows/FilteredPartitions,
+      RTBoundCloser, Purge/Limits transforms, DuplicateRowChecker, and
+      RangeTombstoneLivenessTransform with open/close/boundary marker state are
+      implemented. Missing: full Java transformation chain coverage.
 
   - id: db-tries
     name: Trie Index
@@ -474,12 +685,16 @@ features:
     java_packages:
       - org.apache.cassandra.db.tries
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "InMemoryTrie, trie-based partition index used in latest SSTable format."
+    notes: >
+      InMemoryTrie, cursor traversal, MergeTrie materialization, and a trie
+      memtable backend are implemented with unit and storage integration
+      coverage. Missing: BTI/SSTable partition index disk-format parity and
+      Java trie byte-comparable cursor semantics.
 
   - id: db-monitoring
     name: Query Monitoring
@@ -487,12 +702,17 @@ features:
     java_packages:
       - org.apache.cassandra.db.monitoring
     rust_crate: cassandra-admin
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Slow query log, operation timeouts, abort mechanism."
+    notes: >
+      SlowQuery diagnostic events, system_views.slow_queries shape,
+      OperationTracker live/history surfaces, coordinator read/write timeouts,
+      and tombstone-overwhelming abort errors are implemented. Missing:
+      production slow-query recorder wiring, full monitorable task lifecycle,
+      and Java operation-abort parity.
 
   - id: db-repair
     name: DB Repair Metadata
@@ -500,12 +720,17 @@ features:
     java_packages:
       - org.apache.cassandra.db.repair
     rust_crate: cassandra-repair
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-06
-    notes: "Pending anti-compaction, repair tracking."
+    notes: >
+      RepairedState, pending-repair tracking, anti-compaction range
+      classification, repair history tracking, and in-memory repair virtual
+      table surfaces are implemented with integration coverage. Missing:
+      persisted system_distributed repair metadata, compaction-layer rewrite
+      integration, and full Java repair state table parity.
 
   - id: db-aggregation
     name: Query Aggregation
@@ -513,12 +738,16 @@ features:
     java_packages:
       - org.apache.cassandra.db.aggregation
     rust_crate: cassandra-coordinator
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "GROUP BY aggregation, aggregate functions."
+    notes: >
+      GROUP BY parsing/planning, grouped SELECT validation, builtin aggregate
+      execution, and user-defined aggregate runtime paths are implemented with
+      server tests. Missing: full Java aggregation selector semantics,
+      collection/map edge cases, and distributed coordinator merge parity.
 
   - id: db-view
     name: Materialized Views
@@ -552,12 +781,15 @@ features:
     java_packages:
       - org.apache.cassandra.cache
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, bench]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "KeyCache, RowCache, CounterCache, SerializingCache."
+    notes: >
+      KeyCache, RowCache, CounterCache, ChunkCache, CacheService,
+      invalidation hooks, and key/counter cache persistence are implemented.
+      Missing: Java-compatible SerializingCache and full operational tuning.
 
   - id: io
     name: I/O Layer (SSTable I/O)
@@ -595,12 +827,17 @@ features:
       - org.apache.cassandra.io.sstable.indexsummary
       - org.apache.cassandra.io.sstable.keycache
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "IndexSummary for sampling-based partition lookups. SSTable key cache integration."
+    notes: >
+      Summary.db load/serialize/search, writer sampling, reader key-cache
+      integration, LRU KeyCache, persistence, and cache invalidation are
+      implemented. Missing: Java binary Summary.db compatibility,
+      full index downsampling/resizing behavior, and all key-cache operational
+      tuning.
 
   - id: io-sstable-metadata
     name: SSTable Metadata
@@ -608,25 +845,32 @@ features:
     java_packages:
       - org.apache.cassandra.io.sstable.metadata
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "StatsMetadata, CompactionMetadata, ValidationMetadata. Read for migration compat."
+    notes: >
+      SSTableMetadata, MetadataCollector, binary serializer/deserializer, and
+      Java Big-format StatsMetadata/CompactionMetadata prefix/tail helpers are
+      implemented. Missing: full ValidationMetadata surface, complete
+      Statistics.db component coverage, and byte-for-byte Java metadata parity.
 
   - id: io-compress
     name: Compressed I/O
     subsystem: storage
     java_packages:
       - org.apache.cassandra.io.compress
-    rust_crate: cassandra-storage
-    status: partial
-    evidence_type: [unit]
+    rust_crate: cassandra-io
+    status: done
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "CompressedSequentialWriter, CompressedRandomAccessReader. LZ4/Snappy done, Zstd missing."
+    notes: >
+      CompressedSequentialWriter and CompressedChunkReader round-trip chunked
+      data with metadata and CRC validation across LZ4, Snappy, Zstd, Deflate,
+      and no-op compressors.
 
   - id: io-util
     name: I/O Utilities
@@ -634,12 +878,16 @@ features:
     java_packages:
       - org.apache.cassandra.io.util
     rust_crate: cassandra-io
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "FileHandle, RandomAccessReader, SequentialWriter, MmappedRegions, DataInputBuffer."
+    notes: >
+      FileHandle, RandomAccessReader, SequentialWriter, MmapRebufferer,
+      Rebufferer/BufferHolder, DataInputPlus/DataOutputPlus, checksum wrappers,
+      and VInt/sized-int helpers are implemented with unit and integration
+      coverage.
 
   - id: memtable-trie
     name: Trie Memtable
@@ -647,12 +895,16 @@ features:
     java_packages:
       - org.apache.cassandra.db.memtable
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "TrieMemtable for off-heap trie-based memtable. Sub-package of db.memtable."
+    notes: >
+      TrieMemtable and generic InMemoryTrie-backed MemtableTrie provide
+      prefix-trie partition storage, sorted iteration, row merge, tombstone,
+      and sharded trie backend coverage. Missing: off-heap trie allocation
+      and complete Java TrieMemtable concurrency/flush integration.
 
   - id: commitlog-compression
     name: CommitLog Compression & Encryption
@@ -660,12 +912,17 @@ features:
     java_packages:
       - org.apache.cassandra.db.commitlog
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "Compressed/encrypted commit log segments. CDC integration."
+    notes: >
+      Commitlog segment flags, LZ4 entry compression, encrypted segment codec
+      adapter, compression-before-encryption write path, replay decoding, and
+      CDC-enabled mutation duplication are implemented. Missing: production
+      encryption provider integration, Java segment binary compatibility, and
+      complete CDC allocator behavior.
 
   - id: db-columnindex
     name: Column Index Builder
@@ -673,12 +930,16 @@ features:
     java_packages:
       - org.apache.cassandra.db.columnindex
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "ColumnIndexBuilder for partition-internal row index blocks."
+    notes: >
+      ColumnIndexBuilder, IndexInfo block construction, block lookup,
+      serializer/deserializer, row-index-entry helpers, and clustering-bound
+      coverage are implemented. Missing: full BigFormatPartitionWriter
+      integration and Java row-index binary compatibility.
 
   - id: db-marshal
     name: Type Marshalling (Extended)
@@ -691,7 +952,11 @@ features:
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "Core types done. Missing: DynamicCompositeType, CompositeType, frozen nesting edge cases."
+    notes: >
+      Extended marshal coverage includes Java-style TypeParser support for
+      FrozenType, ReversedType, CompositeType, DynamicCompositeType aliases,
+      TupleType, UserType, VectorType, plus legacy composite and dynamic
+      composite wire-format round-trip and comparison coverage.
 
   # ═══════════════════════════════════════════════════════════════
   # NATIVE PROTOCOL
@@ -703,15 +968,60 @@ features:
     java_packages:
       - org.apache.cassandra.transport
     rust_crate: cassandra-native-protocol
-    status: stub
+    status: partial
     evidence_type: [unit]
     criticality: P0
     config_condition: null
     closure_phase: prompt-02
     notes: >
-      Frame codec, all opcodes, column types. No TCP listener, no actual
-      query execution over wire. Missing: protocol negotiation, event push,
-      payload size limits, backpressure.
+      Frame codec, v4/v5 lifecycle, startup/options/auth/register handling,
+      protocol negotiation errors, query/prepare/execute/batch pass-through,
+      tracing/warnings/custom payload flags, compression, and type/result
+      encoders are implemented; server crate wires a TCP listener and query
+      processor. REGISTER subscriptions are now connected to a server-wide
+      event dispatcher, schema changes are published as protocol EVENT frames
+      on stream -1, connections filter pushes by registered event type, and
+      native-server startup/shutdown emit STATUS_CHANGE UP/DOWN events. The
+      server now enforces configured native_transport_max_frame_size from frame
+      headers before reading oversized payload bodies and returns PROTOCOL_ERROR
+      on violations. REGISTER validates requested event types atomically and
+      rejects unsupported types with PROTOCOL_ERROR. Request lifecycle rejects
+      response-direction frames and response-only opcodes sent by clients with
+      PROTOCOL_ERROR. TCM topology notifications now register a native-protocol
+      listener that republishes committed node register, unregister, token
+      movement, and liveness state changes as TOPOLOGY_CHANGE/STATUS_CHANGE
+      push events. Event push payloads are retained logically and encoded per
+      connection with the client's negotiated protocol version, including v5
+      beta clients. Native TCP connections now apply negotiated LZ4/Snappy
+      frame compression on incoming requests plus responses and events, and
+      reject compressed frames before STARTUP negotiation with PROTOCOL_ERROR.
+      STARTUP validates the required CQL_VERSION option against the advertised
+      supported version and returns PROTOCOL_ERROR without closing the
+      connection for missing or unsupported values. Request lifecycle now
+      rejects response-only WARNING flags, unknown request flags, and USE_BETA
+      outside v5-beta with PROTOCOL_ERROR while keeping the connection usable.
+      Request decoding now rejects trailing body bytes and maps malformed
+      lifecycle/query request bodies to PROTOCOL_ERROR responses instead of
+      surfacing internal connection errors. The TCP server prevalidates frame
+      headers with unknown opcode bytes and returns PROTOCOL_ERROR using the
+      decoded stream id before the frame codec would abort the connection.
+      Compatibility coverage now includes a v5-beta driver-style TCP sequence
+      for OPTIONS, STARTUP, schema setup, PREPARE, and EXECUTE with
+      result_metadata_id/NO_METADATA behavior. PREPARE, QUERY, EXECUTE, and
+      BATCH option decoding now matches Java v5 flag width/keyspace semantics:
+      request options read 32-bit flags, PREPARE preserves request keyspace,
+      QUERY/EXECUTE/BATCH honor KEYSPACE/NOW_IN_SECONDS bits instead of
+      consuming unflagged trailing bytes, and BATCH keyspace/now_in_seconds
+      options are preserved. Server-side query/batch processing now honors
+      request keyspace overrides, and driver-style v5 prepare/execute coverage
+      writes the correct 32-bit option flags and verifies request-keyspaced
+      PREPARE against an unqualified statement. TCP coverage now also verifies
+      request-keyspaced v5 BATCH with an unqualified mutation and read-back.
+      Request decoding retains custom payloads for QUERY, PREPARE, EXECUTE,
+      and BATCH requests. BATCH request decoding now rejects query kind bytes
+      other than 0 or 1, matching Java's ProtocolException path. Missing:
+      remaining protocol edge cases and broader Java driver compatibility
+      coverage.
 
   # ═══════════════════════════════════════════════════════════════
   # SCHEMA
@@ -730,8 +1040,23 @@ features:
     closure_phase: prompt-03
     notes: >
       Keyspace, table, column metadata with immutable catalog and persistence.
-      Missing: UDT/UDA/UDF metadata, index metadata, schema agreement, schema
-      migration coordination, system keyspaces.
+      UDT/UDF/UDA metadata, index metadata, schema agreement, and system
+      keyspace metadata are implemented. Local schema migrations are
+      coordinated through DistributedSchema with atomic catalog updates,
+      version recomputation, and change notifications. Remote migration
+      envelopes are serializable and enforce base-version matching before
+      application, and SchemaPush transport accepts typed migration payloads
+      while preserving legacy snapshot pushes. SchemaPush migration fan-out
+      with per-peer ACK/failure reporting, retry attempts, and backoff is
+      implemented. Remote reconciliation now distinguishes apply,
+      already-applied, and pull-required outcomes for divergent versions.
+      Conservative snapshot merge combines independent divergent schema
+      objects and reports explicit conflicts. Schema migration decisions are
+      persisted in an append-only JSONL journal for recovery. Cluster
+      coordination applies locally, journals, then fans out with retry/ACK
+      reporting. FIFO migration scheduling is implemented. Missing:
+      production runtime/background scheduler integration, full semantic
+      conflict resolution, and full Java schema-manager parity.
 
   # ═══════════════════════════════════════════════════════════════
   # CONFIGURATION
@@ -743,14 +1068,59 @@ features:
     java_packages:
       - org.apache.cassandra.config
     rust_crate: cassandra-config
-    status: stub
+    status: partial
     evidence_type: [unit]
     criticality: P0
     config_condition: null
     closure_phase: prompt-02
     notes: >
-      Figment-based YAML parser. Must parse existing cassandra.yaml without error.
-      Missing: most config keys, guardrails config, audit config.
+      CassandraConfig YAML deserialization, defaults, validation, units
+      parsing, environment/property overrides, DatabaseDescriptor accessors,
+      guardrails, SAI options, partition denylist, audit/FQL config, and hot
+      reload are implemented. Upstream runtime keys for bootstrap/token
+      selection, endpoint snitch, request/repair/slow-query/internode
+      timeouts, streaming/compaction throughput, failure detection, dynamic
+      snitch, bind/broadcast/RPC networking, native transport executors and
+      protocol flags, modern topology provider/proximity/address config,
+      internode queue/socket limits, streaming state tracking,
+      memtable/file-cache sizing, repair session space, partition denylist,
+      CDC and index-summary intervals, trickle fsync, snapshots/backups,
+      SSTable format/
+      preemptive-open/UUID ID settings, column-index sizing, full-SSTable
+      streaming throughput, TLS/crypto provider and encryption options,
+      transparent data encryption options, hints/batchlog runtime settings,
+      hints compression, heapdump and persistent hint opt-ins, cache-validity
+      aliases, auth cache refresh/active-update/consistency/warming controls,
+      cache save/load tuning, CDC block/repair toggles, disk/commitlog/flush
+      compression modes, legacy native flush batching, networking/file cache
+      controls, internode compression, tracing TTLs, corrupted tombstone
+      strategy, GC thresholds, max value size, keyspace RF defaults,
+      automatic SSTable upgrade, repaired-data tracking, dynamic masking,
+      client-error exclusions, audit/FQL archive and queue options, safety
+      thresholds, read-size threshold toggles and warn/fail limits,
+      JMX server options, startup checks, Accord runtime options, repair
+      headroom/compaction thresholds, auto-repair scheduler options,
+      experimental feature flags, storage compatibility mode, compression
+      dictionary settings, compaction validators, and materialized-view builders
+      are parsed, defaulted, validated, and exposed through
+      DatabaseDescriptor. The repository conf/cassandra.yaml fixture now
+      deserializes and validates end-to-end.
+      Listen/rpc address-vs-interface exclusivity, wildcard broadcast RPC
+      requirements, wildcard listen/broadcast rejection, and
+      native_transport_max_auth_threads=0 Java semantics are validated.
+      Modern topology settings are checked for provider/proximity pairing, and
+      partition denylist intervals, limits, and consistency levels are
+      validated. Encryption option validation covers ssl context factory
+      class names, internode encryption modes, and certificate validity
+      thresholds. Runtime option validation covers internode compression,
+      trigger policy, storage compatibility mode, corrupted tombstone strategy,
+      consistency levels, batch/read threshold ordering, provider class names,
+      compression class names, disk access modes, batchlog endpoint strategies,
+      flush compression modes, client-error exclusions, JMX/startup/Accord/
+      auto-repair option bounds, repair headroom ratios, and compression
+      dictionary intervals.
+      Missing: remaining optional upstream cassandra.yaml key catalog, remaining
+      cross-field validation rules, and full DatabaseDescriptor behavior.
 
   # ═══════════════════════════════════════════════════════════════
   # DISTRIBUTED OPERATIONS
@@ -780,7 +1150,11 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-05
-    notes: "Simple, Rack, Ec2, GCE snitches. Missing: dynamic snitch, PropertyFileSnitch."
+    notes: >
+      Simple, property-file, gossiping property-file, rack-inferring, EC2,
+      EC2 multi-region, GCE, Azure, Alibaba, CloudStack, and dynamic snitches
+      are implemented. Missing: full production config integration and all
+      Java cloud metadata refresh edge cases.
 
   - id: snitches-dynamic
     name: Dynamic Snitch
@@ -788,12 +1162,17 @@ features:
     java_packages:
       - org.apache.cassandra.locator
     rust_crate: cassandra-cluster-metadata
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "DynamicEndpointSnitch for latency-aware routing."
+    notes: >
+      DynamicEndpointSnitch wraps a base snitch, records EWMA latency samples,
+      applies severity scores, respects badness threshold, resets scores, and
+      reorders endpoints by dynamic score with unit coverage. Missing: gossip
+      severity feed integration, live latency probe wiring, and full Java
+      subsnitch lifecycle parity.
 
   - id: partitioner
     name: Partitioner & Token Ring
@@ -801,12 +1180,16 @@ features:
     java_packages:
       - org.apache.cassandra.dht
     rust_crate: cassandra-cluster-metadata
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-05
-    notes: "Murmur3 partitioner, token ranges. Missing: ByteOrdered, Random partitioners."
+    notes: >
+      Murmur3, Random, ByteOrdered, and Local partitioners are implemented and
+      re-exported through cassandra-common, with token range splitting,
+      ownership calculation, Java class-name factory resolution, and
+      cluster-metadata placement coverage.
 
   - id: messaging
     name: Internode Messaging
@@ -814,12 +1197,18 @@ features:
     java_packages:
       - org.apache.cassandra.net
     rust_crate: cassandra-messaging
-    status: stub
-    evidence_type: [unit]
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-05
-    notes: "Verb enum, frame codec, stub service. No wire compatibility, no connection pool."
+    notes: >
+      Verb catalog, CRC/LZ4/unprotected frame codecs, Java verb id mapping,
+      TCP listener, send/send_and_wait, handler dispatch, backpressure,
+      forwarding metadata, outbound queues, three-lane outbound connections,
+      connection pool, TLS hooks, and per-verb timeouts are implemented.
+      Missing: complete Java wire compatibility, persistent connection reuse
+      under load, failure detector integration, and production TLS config.
 
   - id: coordinator-read
     name: Read Coordinator
@@ -832,7 +1221,16 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-05
-    notes: "Basic read coordination. Missing: speculative retry, digest mismatch, read repair."
+    notes: >
+      Replica planning, local-DC consistency accounting, speculative retry
+      policies, digest mismatch detection, data reconciliation, tombstone
+      tracking, and read repair staging are implemented with unit coverage.
+      StorageProxy executes live data/digest internode fan-out, sends the
+      immediate speculative replica for ALWAYS speculation, and can satisfy CL
+      by falling through to an extra planned read candidate when a digest
+      replica fails. Missing: delayed speculative retry scheduling, short-read
+      retry integration, and remaining Java AbstractReadExecutor runtime edge
+      cases.
 
   - id: coordinator-write
     name: Write Coordinator
@@ -845,7 +1243,13 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-05
-    notes: "Basic write coordination. Missing: counter writes, batch log writes, view updates."
+    notes: >
+      Replica planning, consistency acknowledgement handling, hints,
+      StorageProxy mutation fan-out, counter read-before-write, batchlog
+      store/remove/replay, trigger augmentation, and synchronous/asynchronous
+      materialized-view fanout hooks are implemented with focused coverage.
+      Missing: production parity for Java write-stage scheduling, failure
+      classification, and long-running view update worker lifecycle integration.
 
   - id: coordinator-pager
     name: Paging
@@ -853,12 +1257,17 @@ features:
     java_packages:
       - org.apache.cassandra.service.pager
     rust_crate: cassandra-coordinator
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "QueryPager, paging state serialization."
+    notes: >
+      Native-protocol PagingState serialization/deserialization and
+      PageSizeControl are implemented and read results carry paging_state.
+      QueryPager/MultiPartitionPager now page PartitionResult rows across
+      partitions, produce continuation state, and resume from partition/row
+      marks. Missing: full Java distributed execution parity.
 
   - id: coordinator-thresholds
     name: Coordinator Thresholds
@@ -866,12 +1275,20 @@ features:
     java_packages:
       - org.apache.cassandra.service.thresholds
     rust_crate: cassandra-coordinator
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Coordinator-level local read/write time tracking."
+    notes: >
+      CoordinatorThresholdTracker classifies local read/range-read/write/CAS
+      latencies against configurable warning/failure thresholds, keeps
+      operation snapshots, max/average latency, and bounded recent warning
+      events. cassandra-config now models the upstream read_thresholds_enabled
+      switch plus coordinator/local/row-index read-size warn/fail limits with
+      validation and DatabaseDescriptor accessors. Missing: full
+      CoordinatorWarnings catalog and wiring through every read/write
+      execution path.
 
   - id: service-core
     name: Service Layer (StorageProxy, StorageService)
@@ -892,12 +1309,17 @@ features:
     java_packages:
       - org.apache.cassandra.service.disk
     rust_crate: cassandra-admin
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Disk boundary management."
+    notes: >
+      DataDirectory usage accounting, disk capacity/reservation checks,
+      token-range DiskBoundary assignment, per-directory boundary lookup, and
+      write-directory selection are implemented. Missing: live filesystem
+      capacity provider integration, disk failure policies, JMX/admin wiring,
+      and full Java DiskBoundaries refresh semantics.
 
   - id: service-snapshot
     name: Snapshot Management
@@ -905,12 +1327,15 @@ features:
     java_packages:
       - org.apache.cassandra.service.snapshot
     rust_crate: cassandra-admin
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Snapshot management service."
+    notes: >
+      Storage snapshot create/list/delete/restore plus admin HTTP handlers
+      and system_views.snapshots are implemented. Missing: full Java
+      SnapshotManager lifecycle and nodetool parity.
 
   - id: paxos
     name: Paxos / LWT
@@ -933,12 +1358,18 @@ features:
     java_packages:
       - org.apache.cassandra.repair
     rust_crate: cassandra-repair
-    status: stub
-    evidence_type: [unit]
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-06
-    notes: "MerkleTree, RepairCoordinator stubs. No actual data exchange."
+    notes: >
+      RepairCoordinator/session lifecycle, Merkle validation and diffing,
+      repair job sync-plan generation, local/remote sync task descriptors,
+      streaming-backed sync execution path, repair messages, consistent repair
+      state, asymmetric difference planning, and integration repair flows are
+      implemented. Missing: full live internode orchestration, durable repair
+      metadata, anti-compaction rewrite execution, and Java protocol parity.
 
   - id: streaming
     name: Streaming
@@ -946,12 +1377,18 @@ features:
     java_packages:
       - org.apache.cassandra.streaming
     rust_crate: cassandra-streaming
-    status: stub
+    status: partial
     evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-06
-    notes: "StreamSession, plan, transfer stubs. No actual data transfer."
+    notes: >
+      StreamSession state machine, StreamPlan, StreamCoordinator,
+      StreamSender/Receiver, chunked transfer with checksums/rate limiting,
+      stream verbs, topology bootstrap/decommission/rebuild/repair helpers,
+      and multi-node transfer coverage are implemented. Missing: full Java
+      stream protocol compatibility, restartable transfers, production
+      snapshot pinning, and real cluster failure semantics.
 
   - id: streaming-management
     name: Streaming Management
@@ -959,12 +1396,14 @@ features:
     java_packages:
       - org.apache.cassandra.streaming.management
     rust_crate: cassandra-streaming
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "StreamStateCompositeData, JMX integration for stream monitoring."
+    notes: >
+      StreamManager and StreamingMetrics track active sessions, progress, and
+      terminal states. Missing: Java StreamStateCompositeData/JMX surface.
 
   - id: streaming-messages
     name: Streaming Messages
@@ -972,12 +1411,15 @@ features:
     java_packages:
       - org.apache.cassandra.streaming.messages
     rust_crate: cassandra-streaming
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "StreamMessage types, IncomingStreamMessage, OutgoingStreamMessage."
+    notes: >
+      StreamMessage envelope covers init, response, data, ack, complete, and
+      complete-ack payloads with round-trip and multi-node protocol tests.
+      Missing: Java binary wire compatibility for all message variants.
 
   - id: repair-messages
     name: Repair Messages
@@ -985,12 +1427,15 @@ features:
     java_packages:
       - org.apache.cassandra.repair.messages
     rust_crate: cassandra-repair
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "RepairMessage types for inter-node repair coordination."
+    notes: >
+      RepairMessage envelope and consistent-repair/sync/status payloads are
+      implemented with serde coverage. Missing: internode verb wiring and full
+      Java protocol compatibility.
 
   - id: repair-asymmetric
     name: Asymmetric Repair
@@ -998,12 +1443,16 @@ features:
     java_packages:
       - org.apache.cassandra.repair.asymmetric
     rust_crate: cassandra-repair
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "DifferenceHolder, RangeMap for optimized repair."
+    notes: >
+      DifferenceHolder and RangeMap track pairwise Merkle differences and derive
+      asymmetric sync plans with majority-source selection and bidirectional
+      fallback coverage. Missing: full Java DifferenceHolder/RangeMap semantics,
+      streaming execution integration, and internode repair orchestration.
 
   - id: repair-consistent
     name: Consistent Repair
@@ -1011,12 +1460,15 @@ features:
     java_packages:
       - org.apache.cassandra.repair.consistent
     rust_crate: cassandra-repair
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "CoordinatorSession, LocalSession for incremental repair."
+    notes: >
+      CoordinatorSession, LocalSession, local session store, and state
+      transitions are implemented. Missing: durable system_distributed
+      persistence and cluster transport integration.
 
   - id: coordinator-read-repair
     name: Read Repair
@@ -1024,12 +1476,25 @@ features:
     java_packages:
       - org.apache.cassandra.service.reads.repair
     rust_crate: cassandra-coordinator
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "BlockingReadRepair, AsyncReadRepair for consistency convergence."
+    notes: >
+      ReadRepairStrategy, ReadRepairHandler, repair mutation staging,
+      replica-side ReadRepair verb handling, and mismatch-triggered repair
+      wiring are implemented. Blocking repair dispatch now reports
+      attempted/acknowledged/failed counts, treats failure frames as failures,
+      and retains failed repairs for retry/inspection. AsyncReadRepairScheduler
+      queues staged repairs, dispatches them asynchronously, and requeues failed
+      live sends; ReadCoordinator now owns the scheduler, queues repairs from
+      response reconciliation, exposes live dispatch, and can drain the async
+      queue. StorageProxy now resolves real digest mismatches by re-reading
+      full data from digest replicas, reconciling full responses, returning the
+      latest merged partition, and enqueuing async read repairs. Missing: full
+      production AbstractReadExecutor parity for speculative retry, short-read,
+      and live internode failure edge cases.
 
   - id: service-consensus
     name: Service Consensus Sub-packages
@@ -1136,12 +1601,16 @@ features:
       - org.apache.cassandra.index.sai.disk.v5
       - org.apache.cassandra.index.sai.disk.vector
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "SAI on-disk format versioning (v1-v5), vector index persistence, I/O layer."
+    notes: >
+      SAI v1-style segment writer/reader persists term dictionaries and posting
+      locations with corruption checks and round-trip tests. Missing:
+      upstream v1-v5 component families, vector index persistence, checksum
+      footer parity, and Java SAI disk I/O compatibility.
 
   - id: index-sai-plan
     name: SAI Query Planning
@@ -1163,12 +1632,16 @@ features:
       - org.apache.cassandra.index.sai.analyzer
       - org.apache.cassandra.index.sai.analyzer.filter
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Text analyzers (Standard, NonTokenizing), filter chain for SAI text indexes."
+    notes: >
+      NonTokenizingAnalyzer, StandardAnalyzer, Java-compatible analyzer
+      option parsing, case/normalization/ASCII filters, and SaiIndex
+      index/query integration are implemented. Missing: full Lucene analyzer
+      parity and complete upstream filter catalog.
 
   - id: index-accord
     name: Accord Index Integration
@@ -1193,12 +1666,19 @@ features:
     java_packages:
       - org.apache.cassandra.hints
     rust_crate: cassandra-coordinator
-    status: stub
+    status: partial
     evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-06
-    notes: "HintStore stub with insert/retrieve. Missing: file persistence, delivery."
+    notes: >
+      HintStore capacity/expiration metrics, pause/resume lifecycle,
+      HintSegment persistence hooks, HintedHandoffManager, HintDeliveryService
+      with messaging retries/throttling, failed-delivery requeue,
+      recovered-node topology filtering, one-shot/periodic delivery
+      scheduling, and replica-side hint verb handlers are implemented.
+      Missing: full Java segment binary compatibility, production topology
+      event wiring, and remaining topology-change edge cases.
 
   - id: hints-persistence
     name: Hints File Persistence
@@ -1206,12 +1686,15 @@ features:
     java_packages:
       - org.apache.cassandra.hints
     rust_crate: cassandra-coordinator
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "HintsWriter, HintsReader, HintsDescriptor for on-disk hint storage."
+    notes: >
+      HintSegmentWriter, HintSegmentReader, HintSegmentDescriptor, segment
+      manager, CRC validation, rotation, and store reload are implemented.
+      Missing: full Java segment binary compatibility and operational tooling.
 
   - id: batchlog
     name: Batchlog
@@ -1219,12 +1702,19 @@ features:
     java_packages:
       - org.apache.cassandra.batchlog
     rust_crate: cassandra-coordinator
-    status: stub
+    status: partial
     evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "Batch coordinator stub. Missing: actual batchlog write/replay."
+    notes: >
+      BatchLogManager, logged/unlogged/counter coordination, guardrails,
+      endpoint selection, expired-entry replay with lease/rate limiting,
+      replica store/remove verb handlers, and messaging-backed batchlog phases
+      are implemented. Local durable batchlog storage persists entries to disk,
+      loads them during startup/recovery, and removes persisted entries after
+      successful completion. Missing: full Java binary compatibility and
+      production cluster scheduling.
 
   # ═══════════════════════════════════════════════════════════════
   # SECURITY
@@ -1241,7 +1731,7 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-08
-    notes: "Password + AllowAll authenticators. Missing: LDAP, Kerberos, persistent stores."
+    notes: "Password + AllowAll authenticators, plus LDAP/Kerberos adapters and persistent role stores. Remaining gaps: production external-provider integration."
 
   - id: authz
     name: Authorization
@@ -1254,7 +1744,7 @@ features:
     criticality: P1
     config_condition: null
     closure_phase: prompt-08
-    notes: "Role-based with hierarchy. Missing: persistent permission store."
+    notes: "Role-based authorization with hierarchy and persistent permission grants. Remaining gaps: full Cassandra system_auth table compatibility."
 
   - id: security-tls
     name: TLS/SSL
@@ -1288,12 +1778,16 @@ features:
     java_packages:
       - org.apache.cassandra.auth
     rust_crate: cassandra-security
-    status: missing
-    evidence_type: []
+    status: done
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "CassandraRoleManager, CassandraAuthorizer persistence to system_auth keyspace."
+    notes: >
+      PersistentAuthStore, PersistentRoleManager, PersistentAuthorizer, and
+      persistent identity/network/CIDR stores are implemented with reopen
+      coverage; cassandra-server also wires durable system_auth-backed role
+      and authorization managers.
 
   - id: fql
     name: Full Query Logging
@@ -1301,12 +1795,14 @@ features:
     java_packages:
       - org.apache.cassandra.fql
     rust_crate: cassandra-security
-    status: missing
-    evidence_type: []
+    status: done
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Chronicle-queue based. Rust needs equivalent file-based FQL."
+    notes: >
+      File-based binary FQL records, readback, rotation, disabled mode, and
+      server-side query logging wiring are implemented.
 
   # ═══════════════════════════════════════════════════════════════
   # OBSERVABILITY & DIAGNOSTICS
@@ -1331,12 +1827,17 @@ features:
     java_packages:
       - org.apache.cassandra.tracing
     rust_crate: cassandra-coordinator
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "Trace context propagation. Missing: storage to system_traces, session management."
+    notes: >
+      TraceSession, TracingManager, active/finished trace tracking,
+      probabilistic session creation, system_traces row projection, cleanup,
+      server request tracing, and HTTP tracing audit surfaces are implemented.
+      Missing: persisted system_traces storage, full cross-node propagation,
+      complete coordinator/read/write hook coverage, and Java trace semantics.
 
   - id: diag
     name: Diagnostics Events
@@ -1344,25 +1845,33 @@ features:
     java_packages:
       - org.apache.cassandra.diag
     rust_crate: cassandra-admin
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P3
     config_condition: null
     closure_phase: prompt-12
-    notes: "DiagnosticEventService, event broadcasting."
+    notes: >
+      DiagnosticEvent, DiagnosticEventService, listener subscription,
+      bounded history, virtual-table/admin surfaces, and HTTP diagnostics
+      readout are implemented. Missing: full upstream event catalog and
+      cluster-wide broadcast wiring.
 
   - id: notifications
     name: Notifications
     subsystem: observability
     java_packages:
       - org.apache.cassandra.notifications
-    rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    rust_crate: cassandra-storage
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P3
     config_condition: null
     closure_phase: prompt-12
-    notes: "INotification, SSTableListChangedNotification, etc."
+    notes: >
+      StorageEventBus covers SSTable add/remove/replace, flush, compaction,
+      repair status, and truncate notifications with listener isolation.
+      Missing: shared cassandra-common INotification hierarchy and complete
+      Java notification type catalog.
 
   # ═══════════════════════════════════════════════════════════════
   # TOOLING & ADMIN
@@ -1375,12 +1884,17 @@ features:
       - org.apache.cassandra.tools
       - org.apache.cassandra.tools.nodetool
     rust_crate: cassandra-tools
-    status: stub
-    evidence_type: [unit]
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-08
-    notes: "17 subcommands (clap). ~140 additional nodetool commands missing."
+    notes: >
+      Clap-based nodetool surface covers cluster info, status/ring,
+      gossip/compaction/snapshot, topology, stats, cache, hints, config,
+      logging, security, repair, index, SSTable, bootstrap, token, password,
+      audit/FQL, and stress commands with smoke coverage. Missing: complete
+      upstream command catalog and Java output/exit-code parity.
 
   - id: sstable-tools
     name: SSTable Offline Tools
@@ -1388,14 +1902,15 @@ features:
     java_packages:
       - org.apache.cassandra.tools
     rust_crate: cassandra-tools
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
     notes: >
-      SSTableExport, Scrubber, Splitter, Upgrader, Verifier, MetadataViewer,
-      LevelResetter, RepairSetSetter — all stubs.
+      Offline dump/metadata, scrub, split, upgrade, verify, level reset,
+      repaired-at, partitions, and expired-blockers tools are implemented.
+      Missing: full Java output compatibility and remaining niche tools.
 
   - id: tools-nodetool-formatter
     name: Nodetool Output Formatters
@@ -1403,12 +1918,15 @@ features:
     java_packages:
       - org.apache.cassandra.tools.nodetool.formatter
     rust_crate: cassandra-tools
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "TableFormatter and output formatting for nodetool output."
+    notes: >
+      TableFormatter/TableColumn support fixed-width nodetool-style text
+      output with alignment, and status output is wired through it. Missing:
+      full Java formatter catalog and adoption by every nodetool command.
 
   - id: tools-nodetool-stats
     name: Nodetool Stats Commands
@@ -1416,12 +1934,18 @@ features:
     java_packages:
       - org.apache.cassandra.tools.nodetool.stats
     rust_crate: cassandra-tools
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "TableStatsHolder, StatsTable, StatsPrinter for cfstats/tablestats."
+    notes: >
+      nodetool-style stat commands are wired for tablestats/tablehistograms,
+      tpstats, gcstats, proxyhistograms, clientstats, toppartitions,
+      failuredetectorinfo, datapaths, refreshsizeestimates, viewbuildstatus,
+      getendpoints, and getsstables with error-handling tests. Missing:
+      Java-compatible TableStatsHolder/StatsTable/StatsPrinter formatting
+      and full cfstats/tablestats output parity.
 
   - id: admin-http
     name: HTTP Admin API
@@ -1445,15 +1969,20 @@ features:
     java_packages:
       - org.apache.cassandra.utils
     rust_crate: cassandra-common
-    status: stub
+    status: partial
     evidence_type: [unit]
     criticality: P0
     config_condition: null
     closure_phase: prompt-02
     notes: >
-      Murmur3, timestamps, tokens, tombstones, TTL. Missing: BloomFilter,
-      MerkleTree (in repair crate), ByteBufferUtil, FBUtilities, UUIDGen,
-      many utility classes.
+      Murmur3 hashing, timestamps, tokens, partitioners, tombstones, TTL,
+      BloomFilter, bitsets, ByteBufferUtil-style byte ordering, hex, UTF-8, and
+      length-prefixed serialization helpers, UUIDGen-style timeuuid generation,
+      timestamp extraction, and min/max range UUIDs, FBUtilities-style wall
+      clock, address fallback, and human-readable byte-size helpers, memory
+      accounting, concurrent helpers, estimated and streaming histograms are
+      implemented. Missing: complete utility catalog coverage and Java edge
+      cases.
 
   - id: utils-bloom-filter
     name: Bloom Filter
@@ -1461,12 +1990,16 @@ features:
     java_packages:
       - org.apache.cassandra.utils.bloom
     rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    status: done
+    evidence_type: [unit]
     criticality: P0
     config_condition: null
     closure_phase: prompt-12
-    notes: "BloomFilter, FilterFactory for SSTable bloom filters."
+    notes: >
+      Murmur3-backed common BloomFilter, Java-style FilterFactory sizing,
+      buckets-per-element overload, BITSET_EXCESS sizing, AlwaysPresent
+      behavior, native OffHeapBitSet storage, and SSTable Filter.db
+      serialize/deserialize path are implemented.
 
   - id: utils-memory
     name: Memory Management Utilities
@@ -1474,12 +2007,16 @@ features:
     java_packages:
       - org.apache.cassandra.utils.memory
     rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "MemtableAllocator, NativeAllocator, SlabAllocator, MemtablePool."
+    notes: >
+      NativeAllocator, SlabAllocator, MemtableAllocation, and MemtablePool
+      are implemented in cassandra-common and re-exported by the storage
+      memtable module. Missing: strict off-heap arenas, cleaner lifecycle,
+      and full Java allocator hierarchy.
 
   - id: utils-obs
     name: Observable Utilities
@@ -1487,12 +2024,15 @@ features:
     java_packages:
       - org.apache.cassandra.utils.obs
     rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    status: done
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "OffHeapBitSet, OpenBitSet for bloom filter backends."
+    notes: >
+      OpenBitSet and native OffHeapBitSet operations are implemented with
+      set/get/clear, cardinality, set algebra, scan coverage, raw word
+      construction, and off-heap size accounting.
 
   - id: utils-concurrent
     name: Concurrent Utilities
@@ -1500,12 +2040,15 @@ features:
     java_packages:
       - org.apache.cassandra.utils.concurrent
     rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "Ref, SharedCloseable, Transactional, WaitQueue, OpOrder."
+    notes: >
+      Ref, SharedCloseable, WaitQueue, OpOrder, OpGroup, and OpBarrier are
+      implemented. Missing: full Transactional hierarchy and all Java utility
+      edge cases.
 
   - id: utils-streaming
     name: Streaming Utilities
@@ -1513,25 +2056,34 @@ features:
     java_packages:
       - org.apache.cassandra.utils.streamhist
     rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "StreamingTombstoneHistogramBuilder for estimated histogram in SSTables."
+    notes: >
+      StreamingTombstoneHistogramBuilder builds compact sorted tombstone
+      histograms with weighted adjacent-bucket merges. Missing: byte-for-byte
+      Java serialization integration in SSTable statistics.
 
   - id: utils-bytecomparable
     name: ByteComparable & Tries
     subsystem: common
     java_packages:
       - org.apache.cassandra.utils.bytecomparable
-    rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    rust_crate: cassandra-types
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "ByteComparable, ByteSource for trie-compatible key encoding."
+    notes: >
+      Order-preserving ByteComparable-style encoding exists for signed
+      numeric types, floats, strings/blobs, UUIDs, varints, reversed types,
+      and vectors. ByteSource-style streaming cursors, multi-component
+      separators/terminators, shortened separator bounds, and successor helpers
+      are implemented. Missing: byte-for-byte Java trie encoding compatibility
+      and remaining advanced ByteSource edge cases.
 
   - id: cdc
     name: Change Data Capture
@@ -1539,12 +2091,17 @@ features:
     java_packages:
       - org.apache.cassandra.cdc
     rust_crate: cassandra-storage
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
-    notes: "CDCCommitLogSegmentAllocator, CDC reader for streaming changes."
+    notes: >
+      CDC raw directory status, segment listing, Java-compatible _cdc.idx
+      sidecar read/write, completed-segment mutation decoding, discard, and
+      commitlog CDC hooks are implemented. Missing: CDCCommitLogSegmentAllocator
+      parity, complete streaming consumer APIs, and production backpressure
+      integration.
 
   - id: serializers
     name: Type Serializers
@@ -1552,12 +2109,16 @@ features:
     java_packages:
       - org.apache.cassandra.serializers
     rust_crate: cassandra-types
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, golden]
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
-    notes: "Core type serializers done. Missing: DurationSerializer, some edge cases."
+    notes: >
+      Native scalar, collection, tuple, UDT, vector, decimal/varint, and
+      DurationSerializer-compatible VInt duration serialization are implemented.
+      Duration decoding rejects trailing bytes and out-of-range month/day
+      components, with unit and golden serialization coverage.
 
   - id: harry
     name: Harry Testing Framework
@@ -1578,12 +2139,14 @@ features:
     java_packages:
       - org.apache.cassandra.concurrent
     rust_crate: cassandra-common
-    status: missing
-    evidence_type: []
+    status: partial
+    evidence_type: [unit]
     criticality: P1
     config_condition: null
     closure_phase: prompt-12
-    notes: "SEPExecutor, SharedExecutorPool, Stage. Rust uses tokio, but stage model missing."
+    notes: >
+      Stage enum, StageExecutor, StageRegistry, and observable stage metrics
+      are implemented. Missing: full SEPExecutor/SharedExecutorPool parity.
 
   - id: exceptions
     name: Exception Types
@@ -1591,12 +2154,15 @@ features:
     java_packages:
       - org.apache.cassandra.exceptions
     rust_crate: cassandra-common
-    status: partial
-    evidence_type: [unit]
+    status: done
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-02
-    notes: "Core error types. Missing: full exception hierarchy mapping."
+    notes: >
+      CQL/native protocol error variants, protocol codes, Java exception class
+      names, and Java-style exception categories are mapped for validation,
+      execution, server, transport, authentication, and internal errors.
 
   # ═══════════════════════════════════════════════════════════════
   # TRUNK-ONLY / EXPERIMENTAL
@@ -1681,9 +2247,14 @@ features:
     java_packages:
       - org.apache.cassandra.triggers
     rust_crate: cassandra-storage
-    status: stub
-    evidence_type: []
+    status: partial
+    evidence_type: [unit, integration]
     criticality: P3
     config_condition: "triggers"
     closure_phase: deferred
-    notes: "TriggerDefinition stub behind feature flag. Needs WASM/scripting for execution."
+    notes: >
+      Trigger metadata parsing/planning, TriggerRegistry, server write-path
+      execution for insert/update/delete/batch, storage TriggerManager,
+      plugin registry, static plugin execution, and enable/disable coverage are
+      implemented. Missing: production WASM/scripting or Java-class plugin
+      loader, full feature-gated runtime integration, and Java compatibility.

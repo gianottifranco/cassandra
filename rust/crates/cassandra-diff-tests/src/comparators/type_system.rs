@@ -75,14 +75,14 @@ fn rt_boolean() {
 
 #[test]
 fn rt_double() {
-    roundtrip(&CqlType::Double, CqlValue::Double(3.14159265358979));
+    roundtrip(&CqlType::Double, CqlValue::Double(std::f64::consts::PI));
     roundtrip(&CqlType::Double, CqlValue::Double(f64::INFINITY));
     roundtrip(&CqlType::Double, CqlValue::Double(0.0));
 }
 
 #[test]
 fn rt_float() {
-    roundtrip(&CqlType::Float, CqlValue::Float(2.718));
+    roundtrip(&CqlType::Float, CqlValue::Float(std::f32::consts::E));
     roundtrip(&CqlType::Float, CqlValue::Float(0.0));
 }
 

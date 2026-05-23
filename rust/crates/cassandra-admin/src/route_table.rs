@@ -36,8 +36,6 @@ enum RouteEntry {
     Async(AsyncHandler),
     /// Prefix-matched sync handler (e.g. `/api/v1/virtual/` matches any sub-path).
     PrefixSync(SyncHandler),
-    /// Prefix-matched async handler.
-    PrefixAsync(AsyncHandler),
 }
 
 /// A table of HTTP routes that dispatches to registered handlers.
@@ -105,16 +103,14 @@ impl RouteTable {
                 RouteEntry::Sync(handler) => handler(&path, &state),
                 RouteEntry::Async(handler) => handler(req, state).await,
                 RouteEntry::PrefixSync(handler) => handler(&path, &state),
-                RouteEntry::PrefixAsync(handler) => handler(req, state).await,
             };
         }
 
         // Try prefix match.
         for (route_method, prefix, entry) in &self.prefix_routes {
-            if &method == route_method && path.starts_with(prefix) {
+            if method == *route_method && path.starts_with(prefix) {
                 return match entry {
                     RouteEntry::PrefixSync(handler) => handler(&path, &state),
-                    RouteEntry::PrefixAsync(handler) => handler(req, state).await,
                     RouteEntry::Sync(handler) => handler(&path, &state),
                     RouteEntry::Async(handler) => handler(req, state).await,
                 };

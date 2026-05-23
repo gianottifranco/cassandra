@@ -333,6 +333,8 @@ mod tests {
 
     #[test]
     fn recover_incomplete_transactions_finds_uncommitted() {
+        use std::mem::ManuallyDrop;
+
         let dir = tempfile::tempdir().unwrap();
 
         // Create a committed transaction — should NOT appear in recovery.
@@ -346,19 +348,17 @@ mod tests {
         let incomplete_id;
         let incomplete_path;
         {
-            let mut txn = LifecycleTransaction::new(dir.path()).unwrap();
+            let mut txn = ManuallyDrop::new(LifecycleTransaction::new(dir.path()).unwrap());
             txn.stage(42).unwrap();
             txn.obsolete(7).unwrap();
             incomplete_id = txn.id;
             incomplete_path = txn.log_path().to_path_buf();
-            // Prevent Drop from auto-aborting so recovery can find it.
-            txn.state = TransactionState::Committed; // hack to skip abort in drop
+            // Simulate a process crash: no Rust destructors run, so no terminal
+            // Commit/Abort entry is appended to the transaction log.
         }
         // Leave the log without a commit/abort line, matching crash recovery input.
         // The file already has Stage(42) + Obsolete(7) — no Commit/Abort,
-        // but we set state to Committed above to prevent Drop from writing Abort.
-        // Actually, the state hack means Drop won't write Abort, so the file
-        // genuinely lacks a terminal entry. Let's verify.
+        // because the manually-dropped transaction did not run Drop.
         let contents = fs::read_to_string(&incomplete_path).unwrap();
         let lines: Vec<&str> = contents.lines().collect();
         assert_eq!(lines.len(), 2); // Stage + Obsolete only

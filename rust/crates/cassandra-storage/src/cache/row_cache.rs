@@ -21,16 +21,10 @@ use crate::memtable::partition::PartitionData;
 pub type RowCacheKey = (u64, Vec<u8>);
 
 /// Configuration for the row cache.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct RowCacheConfig {
     /// Maximum number of cached partitions. 0 means disabled.
     pub max_entries: usize,
-}
-
-impl Default for RowCacheConfig {
-    fn default() -> Self {
-        Self { max_entries: 0 }
-    }
 }
 
 /// Thread-safe LRU row cache for full partition data.

@@ -34,6 +34,7 @@
 //! - `org.apache.cassandra.db.marshal.TypeParser`
 
 use crate::native::CqlType;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Error type for type string parsing failures.
@@ -238,9 +239,11 @@ impl<'a> Parser<'a> {
                     return self.parse_vector_type();
                 }
                 "CompositeType" => {
-                    // Composite is treated as a tuple for CQL purposes
                     let params = self.parse_type_params()?;
-                    return Ok(CqlType::Tuple(params));
+                    return Ok(CqlType::Composite(params));
+                }
+                "DynamicCompositeType" => {
+                    return self.parse_dynamic_composite_type();
                 }
                 "UserType" => {
                     return self.parse_user_type();
@@ -279,6 +282,43 @@ impl<'a> Parser<'a> {
         self.skip_ws();
         self.consume_char(')')?;
         Ok(CqlType::Vector(Box::new(inner), dims))
+    }
+
+    fn parse_dynamic_composite_type(&mut self) -> Result<CqlType, ParseError> {
+        self.consume_char('(')?;
+        let mut aliases = BTreeMap::new();
+        loop {
+            self.skip_ws();
+            if self.peek() == Some(')') {
+                self.advance_by(1);
+                break;
+            }
+
+            let alias = self.read_alias()?;
+            self.skip_ws();
+            self.consume_str("=>")?;
+            self.skip_ws();
+            let ty = self.parse_type()?;
+            aliases.insert(alias, ty);
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => {
+                    self.advance_by(1);
+                }
+                Some(')') => {
+                    self.advance_by(1);
+                    break;
+                }
+                Some(c) => {
+                    return Err(ParseError::Malformed(format!(
+                        "expected ',' or ')' but got '{}' at pos {}",
+                        c, self.pos
+                    )));
+                }
+                None => return Err(ParseError::UnexpectedEof),
+            }
+        }
+        Ok(CqlType::DynamicComposite(aliases))
     }
 
     /// Parse UserType(ks,name,field1hex,type1,...)
@@ -328,6 +368,38 @@ impl<'a> Parser<'a> {
             return Err(ParseError::UnexpectedEof);
         }
         Ok(&self.input[start..self.pos])
+    }
+
+    fn consume_str(&mut self, s: &str) -> Result<(), ParseError> {
+        if self.remaining().starts_with(s) {
+            self.advance_by(s.len());
+            Ok(())
+        } else {
+            Err(ParseError::Malformed(format!(
+                "expected '{}' at position {} in '{}'",
+                s, self.pos, self.input
+            )))
+        }
+    }
+
+    fn read_alias(&mut self) -> Result<u8, ParseError> {
+        let Some(ch) = self.peek() else {
+            return Err(ParseError::UnexpectedEof);
+        };
+        if ch.is_whitespace() || ch == ',' || ch == ')' || ch == '=' {
+            return Err(ParseError::Malformed(format!(
+                "expected dynamic composite alias at position {}",
+                self.pos
+            )));
+        }
+        self.advance_by(ch.len_utf8());
+        if !ch.is_ascii() || !(33..=127).contains(&(ch as u8)) {
+            return Err(ParseError::Malformed(format!(
+                "dynamic composite alias must be a single ASCII character in [33,127], got '{}'",
+                ch
+            )));
+        }
+        Ok(ch as u8)
     }
 }
 
@@ -566,7 +638,14 @@ mod tests {
     #[test]
     fn composite_type_parsing() {
         let ty = parse_type("CompositeType(UTF8Type,Int32Type)").unwrap();
-        assert_eq!(ty, CqlType::Tuple(vec![CqlType::Varchar, CqlType::Int]));
+        assert_eq!(ty, CqlType::Composite(vec![CqlType::Varchar, CqlType::Int]));
+    }
+
+    #[test]
+    fn dynamic_composite_type_parsing() {
+        let ty = parse_type("DynamicCompositeType(b => BytesType, i=>IntegerType)").unwrap();
+        let expected = BTreeMap::from([(b'b', CqlType::Blob), (b'i', CqlType::Varint)]);
+        assert_eq!(ty, CqlType::DynamicComposite(expected));
     }
 
     #[test]

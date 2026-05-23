@@ -22,6 +22,7 @@
 //! Unlike Java's class-based polymorphism, we use a flat enum for exhaustive
 //! matching and zero-cost dispatch.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,10 @@ pub enum CqlType {
     Map(Box<CqlType>, Box<CqlType>, bool),
     /// Fixed-length tuple: `tuple<T1, T2, ...>`.
     Tuple(Vec<CqlType>),
+    /// Legacy thrift composite type: `CompositeType(T1, T2, ...)`.
+    Composite(Vec<CqlType>),
+    /// Legacy dynamic composite type with inline/aliased component comparators.
+    DynamicComposite(BTreeMap<u8, CqlType>),
     /// User-defined type reference (keyspace, name, field_names, field_types).
     Udt {
         keyspace: String,
@@ -169,7 +174,10 @@ impl CqlType {
             CqlType::Udt { .. } => Some(0x0030),
             CqlType::Tuple(_) => Some(0x0031),
             CqlType::Vector(_, _) => Some(0x0032),
-            CqlType::Empty | CqlType::Reversed(_) => None,
+            CqlType::Empty
+            | CqlType::Reversed(_)
+            | CqlType::Composite(_)
+            | CqlType::DynamicComposite(_) => None,
         }
     }
 
@@ -222,6 +230,17 @@ impl CqlType {
                 let inner: Vec<_> = types.iter().map(|t| t.cql_name()).collect();
                 format!("tuple<{}>", inner.join(", "))
             }
+            CqlType::Composite(types) => {
+                let inner: Vec<_> = types.iter().map(|t| t.cql_name()).collect();
+                format!("CompositeType({})", inner.join(", "))
+            }
+            CqlType::DynamicComposite(aliases) => {
+                let inner: Vec<_> = aliases
+                    .iter()
+                    .map(|(alias, ty)| format!("{}=>{}", *alias as char, ty.cql_name()))
+                    .collect();
+                format!("DynamicCompositeType({})", inner.join(", "))
+            }
             CqlType::Udt { keyspace, name, .. } => {
                 format!("{}.{}", keyspace, name)
             }
@@ -247,6 +266,7 @@ impl CqlType {
                 !frozen
             }
             CqlType::Udt { is_multi_cell, .. } => *is_multi_cell,
+            CqlType::Composite(_) | CqlType::DynamicComposite(_) => true,
             _ => false,
         }
     }

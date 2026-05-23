@@ -169,15 +169,22 @@ mod tests {
 
     #[test]
     fn validation_catches_zero_sessions() {
-        let mut cfg = RepairConfig::default();
-        cfg.max_concurrent_sessions = 0;
+        let cfg = RepairConfig {
+            max_concurrent_sessions: 0,
+            ..RepairConfig::default()
+        };
         assert!(!cfg.validate().is_empty());
     }
 
     #[test]
     fn validation_catches_bad_backoff() {
-        let mut cfg = RepairConfig::default();
-        cfg.retry.backoff_multiplier = 0.5;
+        let cfg = RepairConfig {
+            retry: RetrySpec {
+                backoff_multiplier: 0.5,
+                ..RetrySpec::default()
+            },
+            ..RepairConfig::default()
+        };
         assert!(!cfg.validate().is_empty());
     }
 

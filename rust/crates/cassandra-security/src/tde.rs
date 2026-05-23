@@ -154,8 +154,10 @@ mod tests {
 
     #[test]
     fn enabled_without_key_fails() {
-        let mut opts = TransparentDataEncryptionOptions::default();
-        opts.enabled = true;
+        let opts = TransparentDataEncryptionOptions {
+            enabled: true,
+            ..Default::default()
+        };
         let errors = opts.validate();
         assert!(errors.iter().any(|e| e.contains("key_alias")));
         assert!(errors.iter().any(|e| e.contains("key_provider")));
@@ -163,14 +165,16 @@ mod tests {
 
     #[test]
     fn unrecognized_cipher_fails() {
-        let mut opts = TransparentDataEncryptionOptions::default();
-        opts.enabled = true;
-        opts.cipher = "DES/ECB/NoPadding".to_string();
-        opts.key_alias = Some("test".to_string());
-        opts.key_provider = Some(KeyProviderConfig {
-            class_name: "FileKeyProvider".to_string(),
-            parameters: HashMap::new(),
-        });
+        let opts = TransparentDataEncryptionOptions {
+            enabled: true,
+            cipher: "DES/ECB/NoPadding".to_string(),
+            key_alias: Some("test".to_string()),
+            key_provider: Some(KeyProviderConfig {
+                class_name: "FileKeyProvider".to_string(),
+                parameters: HashMap::new(),
+            }),
+            ..Default::default()
+        };
         let errors = opts.validate();
         assert!(errors.iter().any(|e| e.contains("unrecognized cipher")));
     }

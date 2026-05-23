@@ -39,6 +39,7 @@ pub mod collections;
 pub mod comparator;
 pub mod composite;
 pub mod counter;
+pub mod dynamic_composite;
 pub mod marshal;
 pub mod native;
 pub mod partition_key;
@@ -49,8 +50,13 @@ pub mod value_accessor;
 pub mod vector;
 pub mod vint;
 
+pub use byte_comparable::{
+    BYTE_SOURCE_END, ByteSource, SEPARATOR, TERMINATOR, encode_byte_comparable, encode_components,
+    encode_typed_components, separator_between, successor,
+};
 pub use codec::CqlValue;
 pub use collections::{ListType, MapType, SetType, TupleType};
+pub use dynamic_composite::{DynamicComponent, DynamicParseError};
 pub use marshal::{MarshalError, MarshalResult};
 pub use native::CqlType;
 pub use type_compat::AssignmentResult;

@@ -60,6 +60,15 @@ impl ComplexColumnData {
 
     /// Returns cells that are live at the given time, considering complex deletion.
     pub fn live_cells(&self, now_in_seconds: i32) -> Vec<&CellData> {
+        self.live_cells_after(now_in_seconds, DeletionTime::LIVE)
+    }
+
+    /// Returns cells live at the given time after applying an enclosing row/range deletion.
+    pub fn live_cells_after(
+        &self,
+        now_in_seconds: i32,
+        enclosing_deletion: DeletionTime,
+    ) -> Vec<&CellData> {
         self.cells
             .values()
             .filter(|cell| {
@@ -73,6 +82,11 @@ impl ComplexColumnData {
                 {
                     return false;
                 }
+                if !enclosing_deletion.is_live()
+                    && cell.timestamp <= enclosing_deletion.marked_for_delete_at
+                {
+                    return false;
+                }
                 true
             })
             .collect()
@@ -81,6 +95,27 @@ impl ComplexColumnData {
     /// Returns `true` if no live cells remain.
     pub fn is_empty_at(&self, now_in_seconds: i32) -> bool {
         self.live_cells(now_in_seconds).is_empty()
+    }
+
+    /// Returns `true` if no live cells remain after applying an enclosing deletion.
+    pub fn is_empty_after(&self, now_in_seconds: i32, enclosing_deletion: DeletionTime) -> bool {
+        self.live_cells_after(now_in_seconds, enclosing_deletion)
+            .is_empty()
+    }
+
+    /// Remove cells that are not live after applying this column's and an enclosing deletion.
+    pub fn retain_live_cells_after(
+        &mut self,
+        now_in_seconds: i32,
+        enclosing_deletion: DeletionTime,
+    ) {
+        self.cells.retain(|_, cell| {
+            cell.is_live(now_in_seconds)
+                && (self.complex_deletion.is_live()
+                    || cell.timestamp > self.complex_deletion.marked_for_delete_at)
+                && (enclosing_deletion.is_live()
+                    || cell.timestamp > enclosing_deletion.marked_for_delete_at)
+        });
     }
 
     /// Merge another complex column into this one.
@@ -139,6 +174,28 @@ mod tests {
         ccd.add_cell(collection_cell("tags", vec![1], b"a", 300));
         ccd.complex_deletion = DeletionTime::new(200, 200);
         assert_eq!(ccd.live_cells(0).len(), 1);
+    }
+
+    #[test]
+    fn enclosing_deletion_hides_old_complex_cells() {
+        let mut ccd = ComplexColumnData::new("tags".to_string());
+        ccd.add_cell(collection_cell("tags", vec![1], b"old", 100));
+        ccd.add_cell(collection_cell("tags", vec![2], b"new", 300));
+
+        let live = ccd.live_cells_after(0, DeletionTime::new(200, 200));
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].value.as_deref(), Some(b"new".as_slice()));
+    }
+
+    #[test]
+    fn retain_live_cells_after_removes_shadowed_complex_cells() {
+        let mut ccd = ComplexColumnData::new("tags".to_string());
+        ccd.add_cell(collection_cell("tags", vec![1], b"old", 100));
+        ccd.add_cell(collection_cell("tags", vec![2], b"new", 300));
+
+        ccd.retain_live_cells_after(0, DeletionTime::new(200, 200));
+        assert_eq!(ccd.cells.len(), 1);
+        assert!(ccd.cells.contains_key(&CellPath(vec![2])));
     }
 
     #[test]

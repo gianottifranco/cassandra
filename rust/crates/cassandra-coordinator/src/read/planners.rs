@@ -269,7 +269,6 @@ mod tests {
 
     #[test]
     fn ann_still_takes_priority_over_sai() {
-        let planner = QueryPlanner::new(&MultiIndexCatalog);
         // ANN on a non-indexed column won't match, but let's use a catalog that has vector
         struct VecCatalog;
         impl SchemaIndexCatalog for VecCatalog {

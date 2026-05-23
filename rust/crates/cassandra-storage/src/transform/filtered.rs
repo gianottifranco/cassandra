@@ -136,7 +136,8 @@ mod tests {
     use crate::partitions::iterators::InMemoryRowIterator;
     use crate::rows::cell::CellData;
     use crate::rows::liveness::LivenessInfo;
-    use crate::transform::transformation::PurgeTransform;
+    use crate::rows::unfiltered::{ClusteringBound, ClusteringBoundKind, RangeTombstoneMarker};
+    use crate::transform::transformation::{PurgeTransform, RangeTombstoneLivenessTransform};
     use cassandra_common::ttl::NO_TTL;
 
     fn live_row(ck: &[u8], ts: i64) -> Unfiltered {
@@ -177,6 +178,38 @@ mod tests {
         let item2 = filtered.next().unwrap();
         assert_eq!(item2.clustering_key(), b"ck3"); // ck2 was purged
 
+        assert!(filtered.next().is_none());
+    }
+
+    #[test]
+    fn filtered_rows_apply_range_tombstone_liveness() {
+        let items = vec![
+            Unfiltered::Marker(RangeTombstoneMarker::Open {
+                bound: ClusteringBound {
+                    kind: ClusteringBoundKind::InclusiveStart,
+                    values: b"ck1".to_vec(),
+                },
+                deletion: DeletionTime::new(200, 200),
+            }),
+            live_row(b"ck1", 100),
+            live_row(b"ck2", 300),
+            Unfiltered::Marker(RangeTombstoneMarker::Close {
+                bound: ClusteringBound {
+                    kind: ClusteringBoundKind::InclusiveEnd,
+                    values: b"ck3".to_vec(),
+                },
+                deletion: DeletionTime::new(200, 200),
+            }),
+            live_row(b"ck4", 100),
+        ];
+        let source = InMemoryRowIterator::new(b"pk".to_vec(), DeletionTime::LIVE, items, false);
+        let mut filtered = FilteredRows::new(Box::new(source))
+            .add_transform(Box::new(RangeTombstoneLivenessTransform::new(0)));
+
+        assert!(filtered.next().unwrap().is_marker());
+        assert_eq!(filtered.next().unwrap().clustering_key(), b"ck2");
+        assert!(filtered.next().unwrap().is_marker());
+        assert_eq!(filtered.next().unwrap().clustering_key(), b"ck4");
         assert!(filtered.next().is_none());
     }
 }

@@ -75,7 +75,7 @@ mod tests {
     #[test]
     fn crate_compiles() {
         // Smoke test: the diff-tests crate compiles and links correctly.
-        assert!(true);
+        assert!(golden::golden_dir().ends_with("golden"));
     }
 
     #[test]

@@ -53,6 +53,7 @@ pub enum Statement {
     AlterType(AlterType),
     AlterMaterializedView(AlterMaterializedView),
     Describe(DescribeStatement),
+    Comment(CommentStatement),
     // ── Accord transactions ──
     Transaction(TransactionStatement),
 }
@@ -82,6 +83,7 @@ impl Statement {
                 | Statement::DropTrigger(_)
                 | Statement::AlterType(_)
                 | Statement::AlterMaterializedView(_)
+                | Statement::Comment(_)
         )
     }
 
@@ -119,6 +121,35 @@ pub struct AlterKeyspace {
 pub struct DropKeyspace {
     pub name: String,
     pub if_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommentStatement {
+    pub target: CommentTarget,
+    pub comment: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommentTarget {
+    Keyspace(String),
+    Table {
+        keyspace: Option<String>,
+        table: String,
+    },
+    Column {
+        keyspace: Option<String>,
+        table: String,
+        column: String,
+    },
+    Type {
+        keyspace: Option<String>,
+        name: String,
+    },
+    Field {
+        keyspace: Option<String>,
+        type_name: String,
+        field: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -236,6 +267,7 @@ pub enum AlterTableOp {
     AddColumn(ColumnDef),
     DropColumn(String),
     AlterColumn(String, CqlTypeName),
+    CommentColumn(String, String),
     AlterConstraints(String, Vec<ColumnConstraint>),
     DropConstraints(String),
     MaskColumn(String, String, Vec<Term>), // col, func, args
@@ -284,6 +316,10 @@ pub enum SelectColumns {
 pub enum Selector {
     Column(String),
     Function(String, Vec<Selector>),
+    Cast {
+        selector: Box<Selector>,
+        target: CqlTypeName,
+    },
     Alias {
         selector: Box<Selector>,
         alias: String,
@@ -320,6 +356,7 @@ pub enum Term {
     BindMarker(BindMarker),
     FunctionCall(String, Vec<Term>),
     TypeHint(CqlTypeName, Box<Term>),
+    CollectionElement { key: Box<Term>, value: Box<Term> },
     CollectionLiteral(Vec<Term>),
     MapLiteral(Vec<(Term, Term)>),
     TupleLiteral(Vec<Term>),
@@ -350,7 +387,20 @@ pub struct Insert {
     pub columns: Vec<String>,
     pub values: Vec<Term>,
     pub json: Option<Term>,
+    pub json_default: JsonDefault,
     pub using: Vec<UsingClause>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonDefault {
+    Null,
+    Unset,
+}
+
+impl Default for JsonDefault {
+    fn default() -> Self {
+        Self::Null
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -542,6 +592,8 @@ pub enum AlterTypeOp {
     AddField(String, CqlTypeName),
     RenameField(String, String),
     AlterFieldType(String, CqlTypeName),
+    CommentType(String),
+    CommentField(String, String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -640,18 +692,31 @@ pub struct CreateRole {
     pub name: String,
     pub if_not_exists: bool,
     pub password: Option<String>,
+    pub hashed_password: Option<String>,
     pub superuser: Option<bool>,
     pub login: Option<bool>,
+    pub datacenter_access: Option<RoleAccess>,
+    pub cidr_access: Option<RoleAccess>,
     pub options: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AlterRole {
     pub name: String,
+    pub if_exists: bool,
     pub password: Option<String>,
+    pub hashed_password: Option<String>,
     pub superuser: Option<bool>,
     pub login: Option<bool>,
+    pub datacenter_access: Option<RoleAccess>,
+    pub cidr_access: Option<RoleAccess>,
     pub options: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RoleAccess {
+    All,
+    Restricted(Vec<String>),
 }
 
 #[derive(Debug, Clone, PartialEq)]

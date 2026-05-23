@@ -46,6 +46,9 @@ use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
 use crate::sstable::key_cache::{KeyCache, KeyCacheConfig};
 use crate::sstable::{BtiReader, BtiWriter, SSTableReader, SSTableWriter};
 
+pub type KeyedPartition = (Vec<u8>, PartitionData);
+pub type ScoredKeyedPartition = (Vec<u8>, PartitionData, f32);
+
 // ─── Configuration ─────────────────────────────────────────────────────────
 
 /// Storage engine configuration.
@@ -722,7 +725,7 @@ impl StorageEngine {
         table: &str,
         index_name: &str,
         term: &[u8],
-    ) -> Result<Vec<(Vec<u8>, PartitionData)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<KeyedPartition>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
         let mgr = mgrs.get(&cf_name).ok_or("Index manager not found")?;
@@ -764,7 +767,7 @@ impl StorageEngine {
         index_name: &str,
         vector: &[u8],
         top_k: usize,
-    ) -> Result<Vec<(Vec<u8>, PartitionData, f32)>, Box<dyn std::error::Error>> {
+    ) -> Result<Vec<ScoredKeyedPartition>, Box<dyn std::error::Error>> {
         let cf_name = format!("{}.{}", keyspace, table);
         let mgrs = self.index_managers.read();
         let mgr = mgrs.get(&cf_name).ok_or("Index manager not found")?;

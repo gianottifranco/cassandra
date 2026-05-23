@@ -44,6 +44,7 @@ use tracing::{debug, info};
 
 use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, ReplicationStrategy, Snitch};
 use cassandra_common::Token;
+use cassandra_messaging::MessagingService;
 
 use crate::consistency::ConsistencyLevel;
 
@@ -52,8 +53,11 @@ pub use command::{
     SinglePartitionReadCommand,
 };
 pub use executor::{ReadExecutionPlan, ReadExecutorType, compute_execution_plan};
-pub use paging::{PageSizeControl, PagingState};
-pub use repair::{ReadRepairHandler, ReadRepairMutation, ReadRepairStrategy};
+pub use paging::{MultiPartitionPager, PageSizeControl, PagingState, QueryPage, QueryPager};
+pub use repair::{
+    AsyncReadRepairScheduler, ReadRepairExecutionResult, ReadRepairHandler, ReadRepairMutation,
+    ReadRepairStrategy,
+};
 pub use resolver::{DataResolver, DigestMismatch, DigestResolver, RepairMutation, ResolvedData};
 pub use response::{
     DataResponse, Digest, PartitionResult, ReadResponse, TombstoneThresholds, TombstoneTracker,
@@ -90,6 +94,21 @@ pub struct ReadResult {
     /// Whether this was a speculative retry.
     pub speculative_retry_used: bool,
     /// Number of tombstones encountered.
+    pub tombstones_read: u32,
+}
+
+/// Result of resolving replica read responses.
+#[derive(Debug)]
+pub struct ResolvedReadResponses {
+    /// Reconciled data to return to the client.
+    pub data: DataResponse,
+    /// Whether digest mismatch handling was required.
+    pub digest_mismatch_resolved: bool,
+    /// Read repair handler containing staged repair mutations.
+    pub read_repair: ReadRepairHandler,
+    /// Warnings produced while resolving rows.
+    pub warnings: Vec<String>,
+    /// Number of tombstones seen during data resolution.
     pub tombstones_read: u32,
 }
 
@@ -239,6 +258,8 @@ pub struct ReadCoordinator {
     speculative_retry_policy: SpeculativeRetryPolicy,
     /// Read repair strategy.
     read_repair_strategy: ReadRepairStrategy,
+    /// Async read repair scheduler for non-blocking repair dispatch.
+    read_repair_scheduler: AsyncReadRepairScheduler,
     /// Tombstone thresholds.
     tombstone_thresholds: TombstoneThresholds,
     /// Latency percentile estimator for speculative retry delays.
@@ -263,6 +284,7 @@ impl ReadCoordinator {
             metrics: Arc::new(ReadMetrics::new()),
             speculative_retry_policy: SpeculativeRetryPolicy::default(),
             read_repair_strategy: ReadRepairStrategy::default(),
+            read_repair_scheduler: AsyncReadRepairScheduler::new(ReadRepairStrategy::default()),
             tombstone_thresholds: TombstoneThresholds::default(),
             latency_estimator: Arc::new(|_| 50),
         }
@@ -289,7 +311,17 @@ impl ReadCoordinator {
 
     pub fn with_read_repair_strategy(mut self, strategy: ReadRepairStrategy) -> Self {
         self.read_repair_strategy = strategy;
+        self.read_repair_scheduler = AsyncReadRepairScheduler::new(strategy);
         self
+    }
+
+    pub fn with_read_repair_scheduler(mut self, scheduler: AsyncReadRepairScheduler) -> Self {
+        self.read_repair_scheduler = scheduler;
+        self
+    }
+
+    pub fn read_repair_scheduler(&self) -> &AsyncReadRepairScheduler {
+        &self.read_repair_scheduler
     }
 
     pub fn with_tombstone_thresholds(mut self, thresholds: TombstoneThresholds) -> Self {
@@ -517,6 +549,78 @@ impl ReadCoordinator {
         self.plan_read(read, cl, strategy, snitch)
     }
 
+    /// Resolve replica responses from a read execution plan.
+    ///
+    /// Fast path: when the data response digest matches all digest responses,
+    /// return the data response directly. Mismatch path: resolve full data
+    /// responses, reconcile them, and stage read repair mutations for stale
+    /// replicas according to the configured read repair strategy.
+    ///
+    /// ## Java Oracle
+    ///
+    /// `DigestResolver.resolve()` -> `DataResolver.resolve()` ->
+    /// `BlockingReadRepair.repairPartition()`
+    pub fn resolve_replica_responses(
+        &self,
+        read: &CoordinatedRead,
+        contacted_replicas: &[Endpoint],
+        data_response: DataResponse,
+        digest_responses: Vec<Digest>,
+        full_responses_on_mismatch: Vec<DataResponse>,
+        now_seconds: i32,
+    ) -> Result<ResolvedReadResponses, ReadError> {
+        let required = 1 + digest_responses.len();
+        let mut digest_resolver = DigestResolver::new(required);
+        digest_resolver.add_data_response(data_response.clone());
+        for digest in digest_responses {
+            digest_resolver.add_digest_response(digest);
+        }
+
+        match digest_resolver.resolve() {
+            Ok(data) => Ok(ResolvedReadResponses {
+                data,
+                digest_mismatch_resolved: false,
+                read_repair: ReadRepairHandler::new(self.read_repair_strategy),
+                warnings: Vec::new(),
+                tombstones_read: 0,
+            }),
+            Err(mismatch) => {
+                if full_responses_on_mismatch.is_empty() {
+                    return Err(ReadError::DigestMismatch {
+                        replicas_mismatched: mismatch.mismatched_count,
+                    });
+                }
+
+                let mut data_resolver = DataResolver::new(self.tombstone_thresholds.clone());
+                for response in full_responses_on_mismatch {
+                    data_resolver.add_response(response);
+                }
+                let resolved = data_resolver.resolve(now_seconds);
+
+                let mut read_repair = ReadRepairHandler::new(self.read_repair_strategy);
+                for repair in &resolved.repair_mutations {
+                    if let Some(target) = contacted_replicas.get(repair.replica_index) {
+                        read_repair.stage_repair(
+                            *target,
+                            read.keyspace.clone(),
+                            read.table.clone(),
+                            repair.partition_key.clone(),
+                            repair.merged_data.clone(),
+                        );
+                    }
+                }
+
+                Ok(ResolvedReadResponses {
+                    data: resolved.data,
+                    digest_mismatch_resolved: true,
+                    read_repair,
+                    warnings: resolved.tombstone_tracker.warnings,
+                    tombstones_read: resolved.tombstone_tracker.count,
+                })
+            }
+        }
+    }
+
     /// Coordinate a range read across multiple partitions.
     ///
     /// ## Java Oracle
@@ -647,14 +751,6 @@ impl ReadCoordinator {
         replicas: &[Endpoint],
         responses: Vec<DataResponse>,
     ) -> Result<(), ReadError> {
-        if responses.len() != replicas.len() {
-            return Err(ReadError::Internal(format!(
-                "Read repair response count {} does not match replica count {}",
-                responses.len(),
-                replicas.len()
-            )));
-        }
-
         info!(
             replicas = ?replicas,
             "Triggering read repair"
@@ -662,6 +758,62 @@ impl ReadCoordinator {
         self.metrics
             .read_repairs_triggered
             .fetch_add(1, Ordering::Relaxed);
+
+        let mut handler = self.stage_read_repair_from_responses(read, replicas, responses)?;
+        let queued = self
+            .read_repair_scheduler
+            .enqueue_from_handler(&mut handler);
+        debug!(queued, "Queued read repair mutations for async dispatch");
+        Ok(())
+    }
+
+    /// Perform read repair and dispatch it through live internode messaging.
+    pub async fn read_repair_from_responses_with_messaging(
+        &self,
+        read: &CoordinatedRead,
+        replicas: &[Endpoint],
+        responses: Vec<DataResponse>,
+        messaging: Option<Arc<MessagingService>>,
+        timeout: Duration,
+    ) -> Result<ReadRepairExecutionResult, ReadError> {
+        info!(
+            replicas = ?replicas,
+            "Triggering read repair with live dispatch"
+        );
+        self.metrics
+            .read_repairs_triggered
+            .fetch_add(1, Ordering::Relaxed);
+
+        let mut handler = self.stage_read_repair_from_responses(read, replicas, responses)?;
+        Ok(handler
+            .execute_repairs_with_timeout(messaging, timeout)
+            .await)
+    }
+
+    /// Drain the coordinator-owned async read repair scheduler once.
+    pub async fn drain_async_read_repairs(
+        &self,
+        messaging: Option<Arc<MessagingService>>,
+        timeout: Duration,
+    ) -> ReadRepairExecutionResult {
+        self.read_repair_scheduler
+            .drain_once(messaging, timeout)
+            .await
+    }
+
+    fn stage_read_repair_from_responses(
+        &self,
+        read: &CoordinatedRead,
+        replicas: &[Endpoint],
+        responses: Vec<DataResponse>,
+    ) -> Result<ReadRepairHandler, ReadError> {
+        if responses.len() != replicas.len() {
+            return Err(ReadError::Internal(format!(
+                "Read repair response count {} does not match replica count {}",
+                responses.len(),
+                replicas.len()
+            )));
+        }
 
         let mut resolver = DataResolver::new(self.tombstone_thresholds.clone());
         for response in responses {
@@ -686,14 +838,7 @@ impl ReadCoordinator {
             );
         }
 
-        if handler.pending_count() > 0 {
-            tokio::spawn(async move {
-                let count = handler.execute_repairs(None).await;
-                debug!("Executed {} read repair mutations in background", count);
-            });
-        }
-
-        Ok(())
+        Ok(handler)
     }
 
     /// Compatibility read-repair entry point for callers that have not yet
@@ -730,6 +875,7 @@ mod tests {
     use cassandra_cluster_metadata::{
         ClusterMetadata, NodeId, NodeInfo, SimpleSnitch, SimpleStrategy,
     };
+    use cassandra_storage::memtable::partition::{Cell, PartitionData, Row};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     fn ep(port: u16) -> Endpoint {
@@ -777,6 +923,37 @@ mod tests {
             keyspace: "ks".to_string(),
             table: "users".to_string(),
             partition_key: b"user1".to_vec(),
+        }
+    }
+
+    fn cell(value: &[u8], timestamp: i64) -> Cell {
+        Cell {
+            column: "v".to_string(),
+            value: Some(value.to_vec()),
+            timestamp,
+            ttl: 0,
+            local_deletion_time: None,
+            is_tombstone: false,
+        }
+    }
+
+    fn data_response(value: &[u8], timestamp: i64) -> DataResponse {
+        let mut data = PartitionData::new();
+        data.apply_row(Row {
+            clustering_key: b"ck".to_vec(),
+            cells: vec![cell(value, timestamp)],
+            is_tombstone: false,
+            local_deletion_time: None,
+        });
+        DataResponse {
+            partitions: vec![PartitionResult {
+                partition_key: b"user1".to_vec(),
+                data: Some(data),
+                live_row_count: 1,
+                was_truncated: false,
+            }],
+            tombstones_read: 0,
+            is_short_read: false,
         }
     }
 
@@ -1057,6 +1234,116 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, ReadError::Internal(_)));
+    }
+
+    #[test]
+    fn read_repair_from_responses_queues_async_repairs() {
+        let (_cm, coordinator) = setup_cluster();
+        let stale = data_response(b"old", 100);
+        let fresh = data_response(b"new", 200);
+
+        coordinator
+            .read_repair_from_responses(&test_read(), &[ep(7001), ep(7002)], vec![stale, fresh])
+            .unwrap();
+
+        assert_eq!(coordinator.read_repair_scheduler().pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn read_repair_from_responses_with_messaging_reports_execution() {
+        let (_cm, coordinator) = setup_cluster();
+        let stale = data_response(b"old", 100);
+        let fresh = data_response(b"new", 200);
+
+        let result = coordinator
+            .read_repair_from_responses_with_messaging(
+                &test_read(),
+                &[ep(7001), ep(7002)],
+                vec![stale, fresh],
+                None,
+                Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(coordinator.read_repair_scheduler().pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn drain_async_read_repairs_dispatches_queued_repairs() {
+        let (_cm, coordinator) = setup_cluster();
+        let stale = data_response(b"old", 100);
+        let fresh = data_response(b"new", 200);
+
+        coordinator
+            .read_repair_from_responses(&test_read(), &[ep(7001), ep(7002)], vec![stale, fresh])
+            .unwrap();
+
+        let result = coordinator
+            .drain_async_read_repairs(None, Duration::from_secs(1))
+            .await;
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(coordinator.read_repair_scheduler().pending_count(), 0);
+    }
+
+    #[test]
+    fn resolve_replica_responses_fast_path_returns_data_without_repair() {
+        let (_cm, coordinator) = setup_cluster();
+        let response = data_response(b"v1", 100);
+        let digest = response.digest();
+
+        let resolved = coordinator
+            .resolve_replica_responses(
+                &test_read(),
+                &[ep(7001), ep(7002)],
+                response,
+                vec![digest],
+                Vec::new(),
+                1_700_000_000,
+            )
+            .unwrap();
+
+        assert!(!resolved.digest_mismatch_resolved);
+        assert_eq!(resolved.data.row_count(), 1);
+        assert_eq!(resolved.read_repair.pending_count(), 0);
+    }
+
+    #[test]
+    fn resolve_replica_responses_mismatch_reconciles_and_stages_read_repair() {
+        let (_cm, coordinator) = setup_cluster();
+        let stale = data_response(b"old", 100);
+        let fresh = data_response(b"new", 200);
+
+        let resolved = coordinator
+            .resolve_replica_responses(
+                &test_read(),
+                &[ep(7001), ep(7002)],
+                stale.clone(),
+                vec![Digest::from_bytes(b"different")],
+                vec![stale, fresh],
+                1_700_000_000,
+            )
+            .unwrap();
+
+        assert!(resolved.digest_mismatch_resolved);
+        assert_eq!(resolved.data.row_count(), 1);
+        assert_eq!(resolved.read_repair.pending_count(), 1);
+        assert_eq!(resolved.read_repair.pending[0].target, ep(7001));
+        let repaired_row = resolved.read_repair.pending[0]
+            .data
+            .rows
+            .values()
+            .next()
+            .unwrap();
+        let repaired_cell = &repaired_row.cells[0];
+        assert_eq!(repaired_cell.value.as_deref(), Some(b"new".as_slice()));
+        assert_eq!(repaired_cell.timestamp, 200);
     }
 
     #[test]

@@ -84,6 +84,7 @@ impl SystemTableDef {
                 clustering_order: ClusteringOrder::Asc,
                 masked_with: None,
                 constraints: Vec::new(),
+                comment: String::new(),
             });
         }
         builder.build()
@@ -1235,6 +1236,7 @@ pub fn build_system_auth_keyspace() -> KeyspaceMetadata {
         KeyspaceParams {
             replication: ReplicationParams::simple(1),
             durable_writes: true,
+            comment: String::new(),
         },
     );
     for def in system_auth_tables() {
@@ -1250,6 +1252,7 @@ pub fn build_system_traces_keyspace() -> KeyspaceMetadata {
         KeyspaceParams {
             replication: ReplicationParams::simple(2),
             durable_writes: true,
+            comment: String::new(),
         },
     );
     for def in system_traces_tables() {
@@ -1265,6 +1268,7 @@ pub fn build_system_distributed_keyspace() -> KeyspaceMetadata {
         KeyspaceParams {
             replication: ReplicationParams::simple(3),
             durable_writes: true,
+            comment: String::new(),
         },
     );
     for def in system_distributed_tables() {

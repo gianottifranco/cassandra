@@ -348,17 +348,10 @@ impl MigrationCoordinator {
             .tally()
             .ok_or_else(|| MigrationError::ElectionFailed("no majority reached".into()))?;
 
-        if winner == self.local_node {
-            self.state = MigrationState::Migrating {
-                leader: winner,
-                progress: 0.0,
-            };
-        } else {
-            self.state = MigrationState::Migrating {
-                leader: winner,
-                progress: 0.0,
-            };
-        }
+        self.state = MigrationState::Migrating {
+            leader: winner,
+            progress: 0.0,
+        };
 
         Ok(winner)
     }
@@ -366,6 +359,14 @@ impl MigrationCoordinator {
     /// Returns a reference to the current migration state.
     pub fn state(&self) -> &MigrationState {
         &self.state
+    }
+
+    /// Whether this coordinator's local node is the elected migration leader.
+    pub fn is_local_leader(&self) -> bool {
+        matches!(
+            self.state,
+            MigrationState::Migrating { leader, .. } if leader == self.local_node
+        )
     }
 
     /// Mark the migration as complete.
@@ -582,6 +583,7 @@ mod tests {
             coord.state(),
             MigrationState::Migrating { leader, .. } if *leader == local
         ));
+        assert!(coord.is_local_leader());
 
         // Complete migration
         coord.complete();

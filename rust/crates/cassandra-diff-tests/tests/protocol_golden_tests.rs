@@ -48,12 +48,36 @@ fn golden_protocol_fixtures_load() {
 
     assert_eq!(fixtures.protocol_version, 4);
     assert!(
+        !fixtures.description.is_empty(),
+        "Fixture bundle must describe its source"
+    );
+    assert!(
         !fixtures.frames.is_empty(),
         "Expected at least one frame fixture"
     );
 
     for fixture in &fixtures.frames {
         assert!(!fixture.name.is_empty(), "Fixture must have a name");
+        assert!(
+            !fixture.description.is_empty(),
+            "Fixture {} must describe the frame",
+            fixture.name
+        );
+        assert!(
+            !fixture.opcode.is_empty(),
+            "Fixture {} must include an opcode",
+            fixture.name
+        );
+        assert!(
+            !fixture.direction.is_empty(),
+            "Fixture {} must include a direction",
+            fixture.name
+        );
+        assert!(
+            fixture.fields.is_object(),
+            "Fixture {} fields must be an object",
+            fixture.name
+        );
         assert!(
             !fixture.hex.is_empty(),
             "Fixture {} must have hex data",

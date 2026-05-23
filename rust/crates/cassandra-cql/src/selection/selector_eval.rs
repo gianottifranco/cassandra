@@ -56,6 +56,13 @@ impl<'a> SelectorEvaluator<'a> {
 
                 func.execute(&arg_refs).unwrap_or_default()
             }
+            Selector::Cast { selector, target } => {
+                let value = self.evaluate(selector, columns, row, cell_metadata);
+                let target = target.resolve()?;
+                let func = self.registry.resolve_with_return("cast", &[], &target)?;
+                let arg_refs = [value.as_deref()];
+                func.execute(&arg_refs).unwrap_or_default()
+            }
             Selector::Alias { selector, .. } => {
                 self.evaluate(selector, columns, row, cell_metadata)
             }
@@ -99,6 +106,13 @@ impl<'a> SelectorEvaluator<'a> {
         match selector {
             Selector::Column(name) => name.clone(),
             Selector::Function(name, _) => format!("{}(...)", name),
+            Selector::Cast { selector, target } => {
+                let target = target
+                    .resolve()
+                    .map(|target| target.cql_name())
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!("cast({} as {})", Self::output_name(selector), target)
+            }
             Selector::Alias { alias, .. } => alias.clone(),
             Selector::Count => "count".to_string(),
             Selector::WritetimeOrTtl(kind, col) => format!("{}({})", kind, col),

@@ -21,6 +21,9 @@
 //! Counter batches are routed differently (counter leader logic).
 
 use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -139,14 +142,15 @@ impl Default for BatchGuardrails {
 /// Batch log manager: stores pending batch entries.
 ///
 /// In production, batchlog entries are stored on two replicas in a
-/// non-local DC. This implementation uses in-memory storage with
-/// the correct protocol semantics.
+/// non-local DC. This implementation stores local entries in memory and can
+/// mirror them to a durable system-batchlog directory for crash recovery.
 ///
 /// ## Java Oracle
 ///
 /// `org.apache.cassandra.batchlog.BatchlogManager`
 pub struct BatchLogManager {
     entries: Arc<RwLock<HashMap<Uuid, BatchEntry>>>,
+    persistence_dir: Option<PathBuf>,
     /// Batchlog replay interval.
     replay_interval: Duration,
     /// Distributed lease: prevents concurrent replays.
@@ -188,12 +192,31 @@ impl BatchLogManager {
     pub fn new() -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
+            persistence_dir: None,
             replay_interval: Duration::from_secs(60),
             replay_in_progress: AtomicBool::new(false),
             replay_rate_limit: AtomicUsize::new(100),
             retry_counts: Arc::new(RwLock::new(HashMap::new())),
             metrics: BatchLogMetrics::new(),
         }
+    }
+
+    /// Create a batchlog manager backed by durable local storage.
+    ///
+    /// Existing batchlog entry files in `dir` are loaded immediately, matching
+    /// `system.batches` recovery semantics after a node restart.
+    pub fn with_persistence_dir<P: Into<PathBuf>>(mut self, dir: P) -> io::Result<Self> {
+        let dir = dir.into();
+        fs::create_dir_all(&dir)?;
+        let entries = load_persisted_entries(&dir)?;
+        {
+            let mut guard = self.entries.write();
+            for entry in entries {
+                guard.insert(entry.id, entry);
+            }
+        }
+        self.persistence_dir = Some(dir);
+        Ok(self)
     }
 
     pub fn with_replay_interval(mut self, interval: Duration) -> Self {
@@ -237,6 +260,7 @@ impl BatchLogManager {
             version: 1,
         };
 
+        self.persist_entry(&entry);
         self.entries.write().insert(id, entry);
         self.metrics.batches_stored.fetch_add(1, Ordering::Relaxed);
         debug!(batch_id = %id, "Batch log entry stored");
@@ -246,6 +270,7 @@ impl BatchLogManager {
     /// Store a batch entry received from another coordinator.
     pub fn store_entry(&self, entry: BatchEntry) {
         let id = entry.id;
+        self.persist_entry(&entry);
         self.entries.write().insert(id, entry);
         self.metrics.batches_stored.fetch_add(1, Ordering::Relaxed);
         debug!(batch_id = %id, "Batch log entry stored from replica request");
@@ -255,6 +280,7 @@ impl BatchLogManager {
     pub fn remove(&self, id: &Uuid) -> Option<BatchEntry> {
         let entry = self.entries.write().remove(id);
         if entry.is_some() {
+            self.remove_persisted_entry(id);
             self.metrics.batches_removed.fetch_add(1, Ordering::Relaxed);
             debug!(batch_id = %id, "Batch log entry removed");
         }
@@ -295,6 +321,27 @@ impl BatchLogManager {
             .cloned()
             .collect()
     }
+
+    fn persist_entry(&self, entry: &BatchEntry) {
+        let Some(dir) = &self.persistence_dir else {
+            return;
+        };
+        if let Err(err) = persist_batch_entry(dir, entry) {
+            warn!(batch_id = %entry.id, error = %err, "Failed to persist batchlog entry");
+        }
+    }
+
+    fn remove_persisted_entry(&self, id: &Uuid) {
+        let Some(dir) = &self.persistence_dir else {
+            return;
+        };
+        let path = batch_entry_path(dir, id);
+        if let Err(err) = fs::remove_file(&path) {
+            if err.kind() != io::ErrorKind::NotFound {
+                warn!(batch_id = %id, path = %path.display(), error = %err, "Failed to remove persisted batchlog entry");
+            }
+        }
+    }
 }
 
 impl Default for BatchLogManager {
@@ -308,6 +355,58 @@ fn current_epoch_millis() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
+}
+
+fn batch_entry_path(dir: &Path, id: &Uuid) -> PathBuf {
+    dir.join(format!("{id}.batchlog"))
+}
+
+fn persist_batch_entry(dir: &Path, entry: &BatchEntry) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let path = batch_entry_path(dir, &entry.id);
+    let tmp_path = dir.join(format!("{}.batchlog.tmp", entry.id));
+    let data = serde_json::to_vec(entry).map_err(|err| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("serialize batchlog entry: {err}"),
+        )
+    })?;
+
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(&data)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &path)?;
+    Ok(())
+}
+
+fn load_persisted_entries(dir: &Path) -> io::Result<Vec<BatchEntry>> {
+    let mut entries = Vec::new();
+    if !dir.exists() {
+        return Ok(entries);
+    }
+
+    for item in fs::read_dir(dir)? {
+        let path = item?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("batchlog") {
+            continue;
+        }
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "Failed to read persisted batchlog entry");
+                continue;
+            }
+        };
+        match serde_json::from_slice::<BatchEntry>(&bytes) {
+            Ok(entry) => entries.push(entry),
+            Err(err) => {
+                warn!(path = %path.display(), error = %err, "Failed to decode persisted batchlog entry");
+            }
+        }
+    }
+    Ok(entries)
 }
 
 // ─── Replay Result ──────────────────────────────────────────────
@@ -1082,6 +1181,52 @@ mod tests {
         blm.store(BatchType::Unlogged, vec![test_mutation()]);
 
         assert_eq!(blm.pending_entries().len(), 2);
+    }
+
+    #[test]
+    fn persisted_batchlog_entries_survive_restart_and_remove_deletes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let blm = BatchLogManager::new()
+            .with_persistence_dir(dir.path())
+            .unwrap();
+
+        let id = blm.store(BatchType::Logged, vec![test_mutation()]);
+        assert!(dir.path().join(format!("{id}.batchlog")).exists());
+
+        let reloaded = BatchLogManager::new()
+            .with_persistence_dir(dir.path())
+            .unwrap();
+        let entry = reloaded.get(&id).unwrap();
+        assert_eq!(entry.id, id);
+        assert_eq!(entry.batch_type, BatchType::Logged);
+        assert_eq!(entry.mutations.len(), 1);
+
+        reloaded.remove(&id);
+        assert!(reloaded.get(&id).is_none());
+        assert!(!dir.path().join(format!("{id}.batchlog")).exists());
+    }
+
+    #[test]
+    fn persisted_store_entry_preserves_replica_batch_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let blm = BatchLogManager::new()
+            .with_persistence_dir(dir.path())
+            .unwrap();
+        let id = Uuid::new_v4();
+        blm.store_entry(BatchEntry {
+            id,
+            batch_type: BatchType::Logged,
+            mutations: vec![test_mutation()],
+            created_at: 1_700_000_000_000,
+            version: 1,
+        });
+
+        let reloaded = BatchLogManager::new()
+            .with_persistence_dir(dir.path())
+            .unwrap();
+        let stored = reloaded.get(&id).unwrap();
+        assert_eq!(stored.id, id);
+        assert_eq!(stored.created_at, 1_700_000_000_000);
     }
 
     // ── BatchType tests ──────────────────────────────────────────

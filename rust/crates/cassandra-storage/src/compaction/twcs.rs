@@ -52,18 +52,13 @@ impl TryFrom<&str> for TimeUnit {
 }
 
 /// Timestamp unit used by Java TWCS for max-timestamp windowing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum TimestampResolution {
     Seconds,
     Milliseconds,
+    #[default]
     Microseconds,
     Nanoseconds,
-}
-
-impl Default for TimestampResolution {
-    fn default() -> Self {
-        Self::Microseconds
-    }
 }
 
 impl TryFrom<&str> for TimestampResolution {
@@ -116,8 +111,10 @@ impl Default for TimeWindowCompactionStrategy {
 impl TimeWindowCompactionStrategy {
     /// Build TWCS from the Java compaction option map.
     pub fn from_options(options: &HashMap<String, String>) -> Result<Self, String> {
-        let mut strategy = Self::default();
-        strategy.stcs = SizeTieredCompactionStrategy::from_options(options)?;
+        let mut strategy = Self {
+            stcs: SizeTieredCompactionStrategy::from_options(options)?,
+            ..Self::default()
+        };
 
         if let Some(value) = options.get("compaction_window_unit") {
             strategy.time_unit = TimeUnit::try_from(value.as_str())?;
@@ -222,7 +219,7 @@ mod tests {
             id,
             data_size: size,
             partition_count: 100,
-            min_timestamp: max_ts - 3600_000_000, // 1 hour before max
+            min_timestamp: max_ts - 3_600_000_000, // 1 hour before max
             max_timestamp: max_ts,
         }
     }
@@ -252,9 +249,9 @@ mod tests {
 
         let hour = 3600 * 1_000_000i64;
         let sstables = vec![
-            make_meta(1, 100, hour * 0 + 100),
-            make_meta(2, 100, hour * 0 + 200),
-            make_meta(3, 100, hour * 1 + 100),
+            make_meta(1, 100, 100),
+            make_meta(2, 100, 200),
+            make_meta(3, 100, hour + 100),
         ];
 
         let groups = twcs.group_by_window(&sstables);

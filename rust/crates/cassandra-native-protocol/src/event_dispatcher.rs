@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::broadcast;
 
 use crate::frame::Frame;
-use crate::message::EventMessage;
+use crate::message::{EventMessage, Message};
 use crate::response;
 
 /// Capacity of the broadcast channel for event push.
@@ -42,14 +42,28 @@ pub struct EventDispatcher {
     dispatched_count: AtomicU64,
 }
 
-/// An event frame ready for transmission, tagged with the event type
-/// for filtering by the receiver.
+/// A server-push event, tagged with the event type for filtering by receivers.
 #[derive(Clone, Debug)]
 pub struct EventFrame {
     /// The event type string ("TOPOLOGY_CHANGE", "STATUS_CHANGE", "SCHEMA_CHANGE").
     pub event_type: String,
-    /// Pre-encoded frame bytes ready for the wire.
+    /// Logical event payload, retained so each connection can encode it with
+    /// its negotiated protocol version.
+    pub event: EventMessage,
+    /// Pre-encoded frame at the dispatcher-supplied version for direct
+    /// subscribers and callers that do not need per-connection negotiation.
     pub frame: Frame,
+}
+
+impl EventFrame {
+    /// Encode this event for the requested native protocol version.
+    pub fn frame_for_version(&self, version: u8) -> Frame {
+        if self.frame.header.protocol_version() == version {
+            self.frame.clone()
+        } else {
+            response::encode_response(&Message::Event(self.event.clone()), version, -1)
+        }
+    }
 }
 
 impl EventDispatcher {
@@ -69,8 +83,8 @@ impl EventDispatcher {
 
     /// Broadcast an event to all registered connections.
     ///
-    /// The event is encoded as a protocol frame at version 4 on stream -1
-    /// (the standard event stream ID).
+    /// The event is retained logically and also encoded at the supplied default
+    /// version on stream -1 (the standard event stream ID).
     pub fn dispatch(&self, event: EventMessage, version: u8) {
         let event_type = match &event {
             EventMessage::TopologyChange { .. } => "TOPOLOGY_CHANGE",
@@ -79,13 +93,14 @@ impl EventDispatcher {
         };
 
         let frame = response::encode_response(
-            &crate::message::Message::Event(event),
+            &Message::Event(event.clone()),
             version,
             -1, // Event stream ID per protocol spec.
         );
 
         let ef = EventFrame {
             event_type: event_type.to_string(),
+            event,
             frame,
         };
 
@@ -133,6 +148,28 @@ mod tests {
         let ef = rx.recv().await.unwrap();
         assert_eq!(ef.event_type, "TOPOLOGY_CHANGE");
         assert_eq!(dispatcher.dispatched_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn event_frame_reencodes_for_requested_protocol_version() {
+        let dispatcher = EventDispatcher::new();
+        let mut rx = dispatcher.subscribe();
+
+        dispatcher.dispatch(
+            EventMessage::StatusChange {
+                change: "UP".to_string(),
+                addr: (IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)), 9042),
+            },
+            4,
+        );
+
+        let ef = rx.recv().await.unwrap();
+        assert_eq!(ef.frame.header.protocol_version(), 4);
+
+        let v5_frame = ef.frame_for_version(5);
+        assert_eq!(v5_frame.header.protocol_version(), 5);
+        assert_eq!(v5_frame.header.stream_id, -1);
+        assert_eq!(v5_frame.header.opcode, crate::frame::Opcode::Event);
     }
 
     #[tokio::test]

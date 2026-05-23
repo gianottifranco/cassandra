@@ -61,7 +61,7 @@ impl ReceiveBuffer {
 
     fn assemble(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(self.total_bytes as usize);
-        for (_seq, chunk) in &self.chunks {
+        for chunk in self.chunks.values() {
             data.extend_from_slice(chunk);
         }
         data

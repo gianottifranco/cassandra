@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::unnecessary_to_owned)]
+
 //! # Cassandra Storage Engine
 //!
 //! Complete storage engine for the Rust rewrite of Apache Cassandra.

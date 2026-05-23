@@ -33,31 +33,31 @@ use super::read_repair_handler::ReadRepairVerbHandler;
 /// is created but before it starts accepting connections.
 pub fn register_all_verb_handlers(messaging: &MessagingService) {
     // Mutation
-    let mutation_handler: MessageHandler = Arc::new(|msg| MutationVerbHandler::handle(msg));
+    let mutation_handler: MessageHandler = Arc::new(MutationVerbHandler::handle);
     messaging.register_handler(Verb::Mutation, mutation_handler);
 
     // ReadData
-    let read_data_handler: MessageHandler = Arc::new(|msg| ReadDataVerbHandler::handle(msg));
+    let read_data_handler: MessageHandler = Arc::new(ReadDataVerbHandler::handle);
     messaging.register_handler(Verb::ReadData, read_data_handler);
 
     // ReadDigest
-    let read_digest_handler: MessageHandler = Arc::new(|msg| ReadDigestVerbHandler::handle(msg));
+    let read_digest_handler: MessageHandler = Arc::new(ReadDigestVerbHandler::handle);
     messaging.register_handler(Verb::ReadDigest, read_digest_handler);
 
     // Hint
-    let hint_handler: MessageHandler = Arc::new(|msg| HintVerbHandler::handle(msg));
+    let hint_handler: MessageHandler = Arc::new(HintVerbHandler::handle);
     messaging.register_handler(Verb::Hint, hint_handler);
 
     // BatchStore
-    let batch_store_handler: MessageHandler = Arc::new(|msg| BatchStoreVerbHandler::handle(msg));
+    let batch_store_handler: MessageHandler = Arc::new(BatchStoreVerbHandler::handle);
     messaging.register_handler(Verb::BatchStore, batch_store_handler);
 
     // BatchRemove
-    let batch_remove_handler: MessageHandler = Arc::new(|msg| BatchRemoveVerbHandler::handle(msg));
+    let batch_remove_handler: MessageHandler = Arc::new(BatchRemoveVerbHandler::handle);
     messaging.register_handler(Verb::BatchRemove, batch_remove_handler);
 
     // ReadRepair
-    let read_repair_handler: MessageHandler = Arc::new(|msg| ReadRepairVerbHandler::handle(msg));
+    let read_repair_handler: MessageHandler = Arc::new(ReadRepairVerbHandler::handle);
     messaging.register_handler(Verb::ReadRepair, read_repair_handler);
 
     info!("Registered all data-path verb handlers");
@@ -90,10 +90,10 @@ pub fn register_all_verb_handlers_with_storage(
         Arc::new(move |msg| HintVerbHandler::handle_with_storage(msg, hint_storage.as_ref()));
     messaging.register_handler(Verb::Hint, hint_handler);
 
-    let batch_store_handler: MessageHandler = Arc::new(|msg| BatchStoreVerbHandler::handle(msg));
+    let batch_store_handler: MessageHandler = Arc::new(BatchStoreVerbHandler::handle);
     messaging.register_handler(Verb::BatchStore, batch_store_handler);
 
-    let batch_remove_handler: MessageHandler = Arc::new(|msg| BatchRemoveVerbHandler::handle(msg));
+    let batch_remove_handler: MessageHandler = Arc::new(BatchRemoveVerbHandler::handle);
     messaging.register_handler(Verb::BatchRemove, batch_remove_handler);
 
     let repair_storage = Arc::clone(&storage);

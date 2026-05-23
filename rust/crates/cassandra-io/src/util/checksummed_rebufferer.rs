@@ -109,10 +109,7 @@ mod tests {
         tmp.write_all(data).unwrap();
         tmp.flush().unwrap();
 
-        let checksums: Vec<u32> = data
-            .chunks(chunk_size)
-            .map(|c| crc32fast::hash(c))
-            .collect();
+        let checksums: Vec<u32> = data.chunks(chunk_size).map(crc32fast::hash).collect();
 
         let meta = DataIntegrityMetadata::new(chunk_size as u32, checksums);
         (tmp, meta)
@@ -128,7 +125,7 @@ mod tests {
         let rebuf = ChecksummedRebufferer::new(inner, meta);
 
         // Read each chunk — all should succeed.
-        let num_chunks = (data.len() + chunk_size - 1) / chunk_size;
+        let num_chunks = data.len().div_ceil(chunk_size);
         for i in 0..num_chunks {
             let holder = rebuf.rebuffer(i as u64 * chunk_size as u64).unwrap();
             assert!(!holder.data().is_empty());

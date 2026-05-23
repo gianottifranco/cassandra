@@ -18,8 +18,12 @@ fn is_aggregate(selector: &Selector) -> bool {
         Selector::Count => true,
         Selector::Function(name, _) => {
             let lower = name.to_lowercase();
-            matches!(lower.as_str(), "count" | "sum" | "avg" | "min" | "max")
+            matches!(
+                lower.as_str(),
+                "count" | "count_rows" | "countrows" | "sum" | "avg" | "min" | "max"
+            )
         }
+        Selector::Cast { .. } => false,
         Selector::Alias { selector, .. } => is_aggregate(selector),
         _ => false,
     }
@@ -46,13 +50,14 @@ impl AggregationPipeline {
                 Selector::Count => AggregateState::CountStar { count: 0 },
                 Selector::Function(name, _) => {
                     let lower = name.to_lowercase();
-                    if lower == "count" {
+                    if matches!(lower.as_str(), "count" | "count_rows" | "countrows") {
                         AggregateState::CountStar { count: 0 }
                     } else {
                         // Non-count aggregates are resolved by the registry-backed pipeline.
                         AggregateState::PassThrough(None)
                     }
                 }
+                Selector::Cast { .. } => AggregateState::PassThrough(None),
                 _ => AggregateState::PassThrough(None),
             })
             .collect();
@@ -104,6 +109,14 @@ mod tests {
         assert!(has_aggregates(&[Selector::Function(
             "sum".into(),
             vec![Selector::Column("x".into())]
+        )]));
+        assert!(has_aggregates(&[Selector::Function(
+            "count_rows".into(),
+            Vec::new()
+        )]));
+        assert!(has_aggregates(&[Selector::Function(
+            "countRows".into(),
+            Vec::new()
         )]));
         assert!(!has_aggregates(&[Selector::Column("x".into())]));
     }

@@ -259,16 +259,16 @@ impl ClusterMetadataService {
     /// - `Remote`  → `Local` | `Reset`
     /// - `Reset`   → `Gossip`
     pub fn transition_to(&mut self, new_state: ServiceState) -> Result<(), ServiceError> {
-        let valid = match (&self.state, &new_state) {
-            (ServiceState::Gossip, ServiceState::Local) => true,
-            (ServiceState::Gossip, ServiceState::Remote { .. }) => true,
-            (ServiceState::Local, ServiceState::Remote { .. }) => true,
-            (ServiceState::Local, ServiceState::Reset) => true,
-            (ServiceState::Remote { .. }, ServiceState::Local) => true,
-            (ServiceState::Remote { .. }, ServiceState::Reset) => true,
-            (ServiceState::Reset, ServiceState::Gossip) => true,
-            _ => false,
-        };
+        let valid = matches!(
+            (&self.state, &new_state),
+            (ServiceState::Gossip, ServiceState::Local)
+                | (ServiceState::Gossip, ServiceState::Remote { .. })
+                | (ServiceState::Local, ServiceState::Remote { .. })
+                | (ServiceState::Local, ServiceState::Reset)
+                | (ServiceState::Remote { .. }, ServiceState::Local)
+                | (ServiceState::Remote { .. }, ServiceState::Reset)
+                | (ServiceState::Reset, ServiceState::Gossip)
+        );
 
         if !valid {
             return Err(ServiceError::InvalidTransition {

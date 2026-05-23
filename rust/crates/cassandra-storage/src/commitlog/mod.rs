@@ -330,6 +330,7 @@ impl CommitLog {
     /// Open or create a commit log in the configured directory.
     pub fn open(config: CommitLogConfig) -> Result<Self> {
         fs::create_dir_all(&config.directory)?;
+        restore_archived_segments(&config)?;
 
         // Find the highest existing segment ID.
         let mut max_id: u64 = 0;
@@ -451,6 +452,8 @@ impl CommitLog {
 
     /// Replay with explicit corruption policy.
     pub fn replay_with_policy(&self, policy: CorruptionPolicy) -> Result<ReplayResult> {
+        restore_archived_segments(&self.config)?;
+
         let mut segments = list_segment_files(&self.config.directory)?;
         segments.sort();
 
@@ -707,6 +710,60 @@ fn dir_size(dir: &Path) -> std::io::Result<u64> {
     Ok(total)
 }
 
+fn restore_archived_segments(config: &CommitLogConfig) -> Result<()> {
+    if !config.archiving.restore_on_replay {
+        return Ok(());
+    }
+
+    let Some(archive_dir) = config.archiving.archive_directory.as_ref() else {
+        return Ok(());
+    };
+    if !archive_dir.exists() {
+        return Ok(());
+    }
+
+    fs::create_dir_all(&config.directory)?;
+
+    let mut archived = list_segment_files(archive_dir)?;
+    archived.sort();
+    for archived_path in archived {
+        let file_name = archived_path.file_name().unwrap_or_default();
+        let destination = config.directory.join(file_name);
+        if destination.exists() {
+            continue;
+        }
+
+        if let Some(command_template) = config.archiving.restore_command.as_ref() {
+            let from = archived_path.display().to_string();
+            let to = destination.display().to_string();
+            let name = file_name.to_string_lossy();
+            let command = command_template
+                .replace("%from", &from)
+                .replace("%to", &to)
+                .replace("%name", &name);
+            let status = std::process::Command::new("sh")
+                .args(["-c", &command])
+                .status()?;
+            if !status.success() {
+                return Err(CommitLogError::Io(std::io::Error::other(format!(
+                    "commitlog restore command failed for {}",
+                    archived_path.display()
+                ))));
+            }
+        } else {
+            fs::copy(&archived_path, &destination)?;
+        }
+
+        debug!(
+            from = %archived_path.display(),
+            to = %destination.display(),
+            "Restored archived commitlog segment"
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -920,6 +977,43 @@ mod tests {
             let archived: Vec<_> = fs::read_dir(&archive_dir).unwrap().flatten().collect();
             assert!(!archived.is_empty(), "Expected archived segments");
         }
+    }
+
+    #[test]
+    fn restore_on_replay_loads_archived_segments() {
+        let dir = TempDir::new().unwrap();
+        let archive_dir = dir.path().join("archive");
+        let restore_dir = dir.path().join("restore");
+        fs::create_dir_all(&archive_dir).unwrap();
+
+        let archived_mutation = test_mutation("ks", "archived_table", b"archived_pk");
+        let archived_payload = serde_json::to_vec(&archived_mutation).unwrap();
+        let mut archived_segment = Segment::create(&archive_dir, 7).unwrap();
+        archived_segment.append_entry(&archived_payload).unwrap();
+        archived_segment.sync().unwrap();
+
+        let config = CommitLogConfig {
+            directory: restore_dir.clone(),
+            archiving: ArchivingConfig {
+                archive_directory: Some(archive_dir.clone()),
+                restore_on_replay: true,
+                ..Default::default()
+            },
+            ..test_config(&restore_dir)
+        };
+        let cl = CommitLog::open(config).unwrap();
+
+        assert!(restore_dir.join(segment_filename(7)).exists());
+        assert!(cl.current_segment_id() > 7);
+
+        let result = cl.replay().unwrap();
+        assert!(
+            result
+                .mutations
+                .iter()
+                .any(|mutation| mutation.table == "archived_table"
+                    && mutation.partition_key == b"archived_pk")
+        );
     }
 
     #[test]

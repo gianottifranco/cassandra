@@ -24,6 +24,7 @@
 //! - `org.apache.cassandra.tools.nodetool.GossipInfo`
 
 use crate::admin_client::AdminClient;
+use crate::table_formatter::{TableColumn, TableFormatter};
 
 /// Show cluster status (nodetool status equivalent).
 ///
@@ -31,9 +32,7 @@ use crate::admin_client::AdminClient;
 pub fn status(client: &AdminClient) {
     match client.get("/api/v1/cluster/status") {
         Ok(resp) => {
-            if print_status_response(&resp) {
-                return;
-            } else {
+            if !print_status_response(&resp) {
                 println!("{}", resp);
             }
         }
@@ -54,6 +53,7 @@ fn print_status_response(resp: &serde_json::Value) -> bool {
         print_status_header(dc_name);
 
         if let Some(nodes) = dc.get("nodes").and_then(|v| v.as_array()) {
+            let mut table = status_table();
             for node in nodes {
                 let status_str = format_node_status(node);
                 let address = node.get("address").and_then(|v| v.as_str()).unwrap_or("?");
@@ -67,11 +67,17 @@ fn print_status_response(resp: &serde_json::Value) -> bool {
                 let host_id = node.get("host_id").and_then(|v| v.as_str()).unwrap_or("?");
                 let rack = node.get("rack").and_then(|v| v.as_str()).unwrap_or("?");
 
-                println!(
-                    "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
-                    status_str, address, load, tokens, owns, host_id, rack
-                );
+                table.add_row([
+                    status_str.as_str(),
+                    address,
+                    load,
+                    &tokens,
+                    owns,
+                    host_id,
+                    rack,
+                ]);
             }
+            println!("{}", table.render());
         }
         println!();
     }
@@ -81,20 +87,27 @@ fn print_status_response(resp: &serde_json::Value) -> bool {
 
 fn print_offline_status() {
     print_status_header("datacenter1");
-    println!(
-        "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
-        "DN", "127.0.0.1", "?", "?", "?", "?", "rack1"
-    );
+    let mut table = status_table();
+    table.add_row(["DN", "127.0.0.1", "?", "?", "?", "?", "rack1"]);
+    println!("{}", table.render());
     println!();
 }
 
 fn print_status_header(dc_name: &str) {
     println!("Datacenter: {}", dc_name);
     println!("==========");
-    println!(
-        "{:<4} {:<16} {:<12} {:<8} {:<8} {:<38} {:<12}",
-        "Status", "Address", "Load", "Tokens", "Owns", "Host ID", "Rack"
-    );
+}
+
+fn status_table() -> TableFormatter {
+    TableFormatter::new(vec![
+        TableColumn::left("Status").min_width(4),
+        TableColumn::left("Address").min_width(16),
+        TableColumn::left("Load").min_width(12),
+        TableColumn::right("Tokens").min_width(8),
+        TableColumn::right("Owns").min_width(8),
+        TableColumn::left("Host ID").min_width(38),
+        TableColumn::left("Rack").min_width(12),
+    ])
 }
 
 /// Show local node information (nodetool info equivalent).
@@ -157,8 +170,8 @@ pub fn ring(client: &AdminClient) {
     match client.get("/api/v1/cluster/ring") {
         Ok(resp) => {
             println!(
-                "{:<16} {:<12} {:<8} {:<8} {:<12} {:<8} {}",
-                "Address", "Rack", "Status", "State", "Load", "Owns", "Token"
+                "{:<16} {:<12} {:<8} {:<8} {:<12} {:<8} Token",
+                "Address", "Rack", "Status", "State", "Load", "Owns"
             );
             println!(
                 "{:-<16} {:-<12} {:-<8} {:-<8} {:-<12} {:-<8} {:-<20}",

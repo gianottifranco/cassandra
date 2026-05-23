@@ -7,7 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use std::io::Write;
 use tempfile::NamedTempFile;
 
-use cassandra_io::compress::{CompressorType, ICompressor, create_compressor};
+use cassandra_io::compress::{CompressorType, create_compressor};
 use cassandra_io::util::buffer_pool::BufferPool;
 use cassandra_io::util::chunk_reader::SimpleChunkReader;
 use cassandra_io::util::rebufferer::Rebufferer;

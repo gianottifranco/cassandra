@@ -17,6 +17,7 @@ tracing = { workspace = true }
 serde = { workspace = true }
 md-5 = { workspace = true }
 rand = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

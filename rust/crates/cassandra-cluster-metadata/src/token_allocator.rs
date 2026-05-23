@@ -66,7 +66,7 @@ impl TokenAllocator for NoReplicationTokenAllocator {
                 break;
             }
             // Sort by gap size descending
-            gaps.sort_by(|a, b| b.size.cmp(&a.size));
+            gaps.sort_by_key(|gap| std::cmp::Reverse(gap.size));
             // Split the largest gap
             let largest = gaps.remove(0);
             let mid = Token::midpoint(largest.start, largest.end);
@@ -373,7 +373,7 @@ mod tests {
         let tokens = allocator.allocate(&ring, 3, &snitch, &ep(7002));
         // With 1 token on the ring, there's only 1 gap (the full ring wrap).
         // Splitting it 3 times should produce 3 tokens.
-        assert!(tokens.len() >= 1, "should produce at least 1 token");
+        assert!(!tokens.is_empty(), "should produce at least 1 token");
         // All tokens should be unique
         let mut sorted = tokens.clone();
         sorted.sort();

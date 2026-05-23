@@ -262,6 +262,9 @@ impl CqlValue {
                 })
             }
             CqlType::Empty => Ok(CqlValue::Empty),
+            CqlType::Composite(_) | CqlType::DynamicComposite(_) => {
+                Ok(CqlValue::Blob(data.to_vec()))
+            }
             CqlType::Reversed(inner) => Self::deserialize_value(inner, data),
             // Duration: vint-encoded months, days, nanoseconds.
             // Java oracle: DurationType / DurationSerializer.
@@ -270,18 +273,33 @@ impl CqlValue {
                     minimum: 1,
                     got: data.len(),
                 })?;
+                let months = i32::try_from(months).map_err(|_| CodecError::OutOfRange {
+                    type_name: "duration.months",
+                    value: months,
+                })?;
                 let (days, n2) = decode_vint(&data[n1..]).map_err(|_| CodecError::TooShort {
                     minimum: 1,
                     got: data.len().saturating_sub(n1),
                 })?;
-                let (nanoseconds, _) =
+                let days = i32::try_from(days).map_err(|_| CodecError::OutOfRange {
+                    type_name: "duration.days",
+                    value: days,
+                })?;
+                let (nanoseconds, n3) =
                     decode_vint(&data[n1 + n2..]).map_err(|_| CodecError::TooShort {
                         minimum: 1,
                         got: data.len().saturating_sub(n1 + n2),
                     })?;
+                let consumed = n1 + n2 + n3;
+                if consumed != data.len() {
+                    return Err(CodecError::TrailingBytes {
+                        consumed,
+                        total: data.len(),
+                    });
+                }
                 Ok(CqlValue::Duration {
-                    months: months as i32,
-                    days: days as i32,
+                    months,
+                    days,
                     nanoseconds,
                 })
             }
@@ -464,6 +482,8 @@ fn write_opt(buf: &mut Vec<u8>, val: &Option<CqlValue>) {
 pub enum CodecError {
     InvalidLength { expected: usize, got: usize },
     TooShort { minimum: usize, got: usize },
+    TrailingBytes { consumed: usize, total: usize },
+    OutOfRange { type_name: &'static str, value: i64 },
     InvalidUtf8,
     UnsupportedType(String),
     InvalidVector(String),
@@ -475,6 +495,12 @@ impl fmt::Display for CodecError {
                 write!(f, "expected {} bytes, got {}", expected, got)
             }
             Self::TooShort { minimum, got } => write!(f, "need >= {} bytes, got {}", minimum, got),
+            Self::TrailingBytes { consumed, total } => {
+                write!(f, "trailing bytes: consumed {}, total {}", consumed, total)
+            }
+            Self::OutOfRange { type_name, value } => {
+                write!(f, "{} value {} out of range", type_name, value)
+            }
             Self::InvalidUtf8 => write!(f, "invalid UTF-8"),
             Self::UnsupportedType(n) => write!(f, "unsupported type: {}", n),
             Self::InvalidVector(msg) => write!(f, "invalid vector: {}", msg),
@@ -511,7 +537,7 @@ mod tests {
     }
     #[test]
     fn rt_double() {
-        rt(&CqlType::Double, CqlValue::Double(3.14));
+        rt(&CqlType::Double, CqlValue::Double(std::f64::consts::PI));
     }
     #[test]
     fn rt_float() {
@@ -539,6 +565,44 @@ mod tests {
     #[test]
     fn rt_timestamp() {
         rt(&CqlType::Timestamp, CqlValue::Timestamp(1_710_000_000_000));
+    }
+    #[test]
+    fn rt_duration() {
+        rt(
+            &CqlType::Duration,
+            CqlValue::Duration {
+                months: 14,
+                days: -3,
+                nanoseconds: 123_456_789,
+            },
+        );
+    }
+    #[test]
+    fn duration_rejects_trailing_bytes() {
+        let mut bytes = CqlValue::Duration {
+            months: 1,
+            days: 2,
+            nanoseconds: 3,
+        }
+        .serialize_value();
+        bytes.push(0);
+        assert!(matches!(
+            CqlValue::deserialize_value(&CqlType::Duration, &bytes),
+            Err(CodecError::TrailingBytes { .. })
+        ));
+    }
+    #[test]
+    fn duration_rejects_month_day_overflow() {
+        let mut bytes = crate::vint::encode_vint(i64::from(i32::MAX) + 1);
+        bytes.extend_from_slice(&crate::vint::encode_vint(0));
+        bytes.extend_from_slice(&crate::vint::encode_vint(0));
+        assert!(matches!(
+            CqlValue::deserialize_value(&CqlType::Duration, &bytes),
+            Err(CodecError::OutOfRange {
+                type_name: "duration.months",
+                ..
+            })
+        ));
     }
     #[test]
     fn rt_inet_v4() {

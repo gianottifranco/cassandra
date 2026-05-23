@@ -123,6 +123,81 @@ impl Transformation for LimitsTransform {
     }
 }
 
+/// Applies active range tombstone state to rows in an unfiltered stream.
+///
+/// Open/close/boundary markers are passed through unchanged, while rows are
+/// pruned or skipped according to the newest active partition/range deletion.
+pub struct RangeTombstoneLivenessTransform {
+    now_in_seconds: i32,
+    partition_deletion: DeletionTime,
+    open_deletions: Vec<DeletionTime>,
+}
+
+impl RangeTombstoneLivenessTransform {
+    pub fn new(now_in_seconds: i32) -> Self {
+        Self {
+            now_in_seconds,
+            partition_deletion: DeletionTime::LIVE,
+            open_deletions: Vec::new(),
+        }
+    }
+
+    fn active_deletion(&self) -> DeletionTime {
+        self.open_deletions
+            .iter()
+            .copied()
+            .fold(self.partition_deletion, |active, deletion| {
+                if deletion.supersedes(&active) {
+                    deletion
+                } else {
+                    active
+                }
+            })
+    }
+
+    fn close_deletion(&mut self, deletion: DeletionTime) {
+        if let Some(pos) = self
+            .open_deletions
+            .iter()
+            .rposition(|open| *open == deletion)
+        {
+            self.open_deletions.remove(pos);
+        }
+    }
+}
+
+impl Transformation for RangeTombstoneLivenessTransform {
+    fn apply_to_row(&mut self, row: RowData) -> Option<RowData> {
+        row.live_data_after(self.now_in_seconds, self.active_deletion())
+    }
+
+    fn apply_to_marker(&mut self, marker: RangeTombstoneMarker) -> Option<RangeTombstoneMarker> {
+        match &marker {
+            RangeTombstoneMarker::Open { deletion, .. } => {
+                self.open_deletions.push(*deletion);
+            }
+            RangeTombstoneMarker::Close { deletion, .. } => {
+                self.close_deletion(*deletion);
+            }
+            RangeTombstoneMarker::Boundary {
+                close_deletion,
+                open_deletion,
+                ..
+            } => {
+                self.close_deletion(*close_deletion);
+                self.open_deletions.push(*open_deletion);
+            }
+        }
+        Some(marker)
+    }
+
+    fn apply_to_partition(&mut self, _partition_key: &[u8], deletion: DeletionTime) -> bool {
+        self.partition_deletion = deletion;
+        self.open_deletions.clear();
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +294,84 @@ mod tests {
         // New partition resets per-partition count
         lt.apply_to_partition(b"pk2", DeletionTime::LIVE);
         assert!(lt.apply_to_row(live_row(b"ck1", 100)).is_some());
+    }
+
+    #[test]
+    fn range_tombstone_liveness_filters_shadowed_rows() {
+        let mut transform = RangeTombstoneLivenessTransform::new(0);
+
+        transform.apply_to_marker(RangeTombstoneMarker::Open {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveStart,
+                values: b"ck1".to_vec(),
+            },
+            deletion: DeletionTime::new(200, 200),
+        });
+
+        assert!(transform.apply_to_row(live_row(b"ck1", 100)).is_none());
+        assert!(transform.apply_to_row(live_row(b"ck2", 300)).is_some());
+
+        transform.apply_to_marker(RangeTombstoneMarker::Close {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveEnd,
+                values: b"ck3".to_vec(),
+            },
+            deletion: DeletionTime::new(200, 200),
+        });
+        assert!(transform.apply_to_row(live_row(b"ck4", 100)).is_some());
+    }
+
+    #[test]
+    fn range_tombstone_liveness_handles_boundary_markers() {
+        let mut transform = RangeTombstoneLivenessTransform::new(0);
+
+        transform.apply_to_marker(RangeTombstoneMarker::Open {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveStart,
+                values: b"ck1".to_vec(),
+            },
+            deletion: DeletionTime::new(100, 100),
+        });
+        assert!(transform.apply_to_row(live_row(b"ck1", 150)).is_some());
+
+        transform.apply_to_marker(RangeTombstoneMarker::Boundary {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveEnd,
+                values: b"ck2".to_vec(),
+            },
+            close_deletion: DeletionTime::new(100, 100),
+            open_deletion: DeletionTime::new(300, 300),
+        });
+
+        assert!(transform.apply_to_row(live_row(b"ck2", 200)).is_none());
+        assert!(transform.apply_to_row(live_row(b"ck3", 400)).is_some());
+    }
+
+    #[test]
+    fn range_tombstone_liveness_prunes_shadowed_cells() {
+        let mut transform = RangeTombstoneLivenessTransform::new(0);
+        transform.apply_to_partition(b"pk", DeletionTime::new(200, 200));
+
+        let mut row = RowData::new(b"ck".to_vec());
+        row.add_cell(CellData {
+            column: "old".to_string(),
+            value: Some(b"old".to_vec()),
+            timestamp: 100,
+            ttl: NO_TTL,
+            local_deletion_time: i32::MAX,
+            path: None,
+        });
+        row.add_cell(CellData {
+            column: "new".to_string(),
+            value: Some(b"new".to_vec()),
+            timestamp: 300,
+            ttl: NO_TTL,
+            local_deletion_time: i32::MAX,
+            path: None,
+        });
+
+        let row = transform.apply_to_row(row).unwrap();
+        assert!(!row.columns.contains_key("old"));
+        assert!(row.columns.contains_key("new"));
     }
 }

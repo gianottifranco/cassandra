@@ -128,6 +128,32 @@ impl Parser {
         }
     }
 
+    fn expect_role_name(&mut self, allow_quoted_ident: bool) -> Result<String, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::Ident(s) | TokenKind::StringLiteral(s) => {
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::QuotedIdent(s) if allow_quoted_ident => {
+                self.advance();
+                Ok(s)
+            }
+            TokenKind::QuotedIdent(_) => Err(self.error(
+                "quoted identifiers are not supported for USER names; use ROLE".to_string(),
+            )),
+            TokenKind::Keyword(kw) => {
+                if is_unreserved_keyword(kw) {
+                    let name = format!("{:?}", kw).to_lowercase();
+                    self.advance();
+                    Ok(name)
+                } else {
+                    Err(self.error(format!("expected role name, got keyword {:?}", kw)))
+                }
+            }
+            _ => Err(self.error(format!("expected role name, got {}", self.peek_kind()))),
+        }
+    }
+
     fn expect_eof(&self) -> Result<(), ParseError> {
         if *self.peek_kind() == TokenKind::Eof {
             Ok(())
@@ -171,6 +197,7 @@ impl Parser {
             TokenKind::Keyword(Keyword::Revoke) => self.parse_revoke(),
             TokenKind::Keyword(Keyword::List) => self.parse_list(),
             TokenKind::Keyword(Keyword::Describe) => self.parse_describe(),
+            TokenKind::Keyword(Keyword::Comment) => self.parse_comment(),
             _ => Err(self.error(format!("unexpected token: {}", self.peek_kind()))),
         }
     }
@@ -365,7 +392,7 @@ impl Parser {
 
     fn parse_truncate(&mut self) -> Result<Statement, ParseError> {
         self.expect_keyword(Keyword::Truncate)?;
-        self.eat_keyword(Keyword::Table); // optional TABLE keyword
+        self.eat_ident_ci("COLUMNFAMILY");
         let (ks, name) = self.parse_table_name()?;
         Ok(Statement::Truncate(TruncateStatement {
             keyspace: ks,
@@ -390,10 +417,11 @@ impl Parser {
             TokenKind::Keyword(Keyword::Function) => self.parse_create_function(or_replace),
             TokenKind::Keyword(Keyword::Aggregate) => self.parse_create_aggregate(or_replace),
             TokenKind::Keyword(Keyword::Trigger) => self.parse_create_trigger(),
-            TokenKind::Keyword(Keyword::Role) => self.parse_create_role(),
+            TokenKind::Keyword(Keyword::Role) => self.parse_create_role(false),
+            TokenKind::Keyword(Keyword::User) => self.parse_create_role(true),
             TokenKind::Keyword(Keyword::Materialized) => self.parse_create_materialized_view(),
             _ => Err(self.error(format!(
-                "expected KEYSPACE, TABLE, INDEX, TYPE, FUNCTION, AGGREGATE, TRIGGER, ROLE, or MATERIALIZED after CREATE, got {}",
+                "expected KEYSPACE, TABLE, INDEX, TYPE, FUNCTION, AGGREGATE, TRIGGER, ROLE, USER, or MATERIALIZED after CREATE, got {}",
                 self.peek_kind()
             ))),
         }
@@ -661,17 +689,28 @@ impl Parser {
                     operation,
                 }))
             }
-            TokenKind::Keyword(Keyword::Role) => {
-                self.expect_keyword(Keyword::Role)?;
-                let name = self.expect_ident()?;
+            TokenKind::Keyword(Keyword::Role) | TokenKind::Keyword(Keyword::User) => {
+                let is_user = self.eat_keyword(Keyword::User);
+                if !is_user {
+                    self.expect_keyword(Keyword::Role)?;
+                }
+                let if_exists = self.parse_if_exists();
+                let name = self.expect_role_name(!is_user)?;
                 let mut password = None;
+                let mut hashed_password = None;
                 let mut superuser = None;
                 let mut login = None;
-                let options = HashMap::new();
+                let mut datacenter_access = None;
+                let mut cidr_access = None;
+                let mut options = HashMap::new();
                 if self.eat_keyword(Keyword::With) {
                     loop {
-                        if self.eat_keyword(Keyword::Password) {
-                            self.expect(TokenKind::Eq)?;
+                        if self.eat_keyword(Keyword::Hashed) {
+                            self.expect_keyword(Keyword::Password)?;
+                            self.parse_password_equals(is_user)?;
+                            hashed_password = Some(self.parse_string_literal()?);
+                        } else if self.eat_keyword(Keyword::Password) {
+                            self.parse_password_equals(is_user)?;
                             password = Some(self.parse_string_literal()?);
                         } else if self.eat_keyword(Keyword::Superuser) {
                             self.expect(TokenKind::Eq)?;
@@ -679,6 +718,13 @@ impl Parser {
                         } else if self.eat_keyword(Keyword::Login) {
                             self.expect(TokenKind::Eq)?;
                             login = Some(self.parse_boolean()?);
+                        } else if self.eat_ident_ci("ACCESS") {
+                            self.parse_role_access_option(
+                                &mut datacenter_access,
+                                &mut cidr_access,
+                            )?;
+                        } else if self.eat_ident_ci("OPTIONS") {
+                            options = self.parse_role_options()?;
                         } else {
                             break;
                         }
@@ -689,9 +735,13 @@ impl Parser {
                 }
                 Ok(Statement::AlterRole(AlterRole {
                     name,
+                    if_exists,
                     password,
+                    hashed_password,
                     superuser,
                     login,
+                    datacenter_access,
+                    cidr_access,
                     options,
                 }))
             }
@@ -748,8 +798,9 @@ impl Parser {
                     options: opts,
                 }))
             }
-            _ => Err(self
-                .error("expected KEYSPACE, TABLE, ROLE, TYPE, or MATERIALIZED after ALTER".into())),
+            _ => Err(self.error(
+                "expected KEYSPACE, TABLE, ROLE, USER, TYPE, or MATERIALIZED after ALTER".into(),
+            )),
         }
     }
 
@@ -824,10 +875,13 @@ impl Parser {
                 let (ks, table) = self.parse_table_name()?;
                 Ok(Statement::DropTrigger(DropTrigger { name, if_exists, keyspace: ks, table }))
             }
-            TokenKind::Keyword(Keyword::Role) => {
-                self.expect_keyword(Keyword::Role)?;
+            TokenKind::Keyword(Keyword::Role) | TokenKind::Keyword(Keyword::User) => {
+                let is_user = self.eat_keyword(Keyword::User);
+                if !is_user {
+                    self.expect_keyword(Keyword::Role)?;
+                }
                 let if_exists = self.parse_if_exists();
-                let name = self.expect_ident()?;
+                let name = self.expect_role_name(!is_user)?;
                 Ok(Statement::DropRole(DropRole { name, if_exists }))
             }
             TokenKind::Keyword(Keyword::Materialized) => {
@@ -837,7 +891,7 @@ impl Parser {
                 let (ks, name) = self.parse_table_name()?;
                 Ok(Statement::DropMaterializedView(DropMaterializedView { keyspace: ks, name, if_exists }))
             }
-            _ => Err(self.error("expected KEYSPACE, TABLE, INDEX, TYPE, FUNCTION, AGGREGATE, TRIGGER, ROLE, or MATERIALIZED after DROP".into())),
+            _ => Err(self.error("expected KEYSPACE, TABLE, INDEX, TYPE, FUNCTION, AGGREGATE, TRIGGER, ROLE, USER, or MATERIALIZED after DROP".into())),
         }
     }
 
@@ -944,26 +998,82 @@ impl Parser {
     }
 
     fn parse_selector(&mut self) -> Result<Selector, ParseError> {
+        self.parse_selector_allow_alias(true)
+    }
+
+    fn parse_selector_allow_alias(&mut self, allow_alias: bool) -> Result<Selector, ParseError> {
         let name = self.expect_ident()?;
         // Check for function call.
         if self.eat_if(TokenKind::LParen) {
             if *self.peek_kind() == TokenKind::Star {
                 self.advance();
                 self.expect(TokenKind::RParen)?;
+                if allow_alias && self.eat_keyword(Keyword::As) {
+                    let alias = self.expect_ident()?;
+                    return Ok(Selector::Alias {
+                        selector: Box::new(Selector::Count),
+                        alias,
+                    });
+                }
                 return Ok(Selector::Count);
+            }
+            if name.eq_ignore_ascii_case("count")
+                && matches!(self.peek_kind(), TokenKind::IntegerLiteral(1))
+            {
+                self.advance();
+                self.expect(TokenKind::RParen)?;
+                if allow_alias && self.eat_keyword(Keyword::As) {
+                    let alias = self.expect_ident()?;
+                    return Ok(Selector::Alias {
+                        selector: Box::new(Selector::Count),
+                        alias,
+                    });
+                }
+                return Ok(Selector::Count);
+            }
+            if name.eq_ignore_ascii_case("cast") {
+                let selector = self.parse_selector_allow_alias(false)?;
+                self.expect_keyword(Keyword::As)?;
+                let target = self.parse_cql_type()?;
+                self.expect(TokenKind::RParen)?;
+                let sel = Selector::Cast {
+                    selector: Box::new(selector),
+                    target,
+                };
+                if allow_alias && self.eat_keyword(Keyword::As) {
+                    let alias = self.expect_ident()?;
+                    return Ok(Selector::Alias {
+                        selector: Box::new(sel),
+                        alias,
+                    });
+                }
+                return Ok(sel);
             }
             let mut args = Vec::new();
             if *self.peek_kind() != TokenKind::RParen {
                 loop {
-                    args.push(self.parse_selector()?);
+                    args.push(self.parse_selector_allow_alias(false)?);
                     if !self.eat_if(TokenKind::Comma) {
                         break;
                     }
                 }
             }
             self.expect(TokenKind::RParen)?;
-            let sel = Selector::Function(name, args);
-            if self.eat_keyword(Keyword::As) {
+            let sel = if is_writetime_or_ttl_selector(&name) {
+                match args.as_slice() {
+                    [Selector::Column(column)] => {
+                        Selector::WritetimeOrTtl(name.to_ascii_lowercase(), column.clone())
+                    }
+                    _ => {
+                        return Err(
+                            self.error(format!("{} selector expects exactly one column", name))
+                        );
+                    }
+                }
+            } else {
+                Selector::Function(name, args)
+            };
+            if allow_alias && self.eat_keyword(Keyword::As) {
                 let alias = self.expect_ident()?;
                 return Ok(Selector::Alias {
                     selector: Box::new(sel),
@@ -972,7 +1082,7 @@ impl Parser {
             }
             return Ok(sel);
         }
-        if self.eat_keyword(Keyword::As) {
+        if allow_alias && self.eat_keyword(Keyword::As) {
             let alias = self.expect_ident()?;
             return Ok(Selector::Alias {
                 selector: Box::new(Selector::Column(name)),
@@ -993,6 +1103,7 @@ impl Parser {
 
         if self.eat_keyword(Keyword::Json) {
             let json_val = self.parse_term()?;
+            let json_default = self.parse_json_default()?;
             if self.eat_keyword(Keyword::If) {
                 self.expect_keyword(Keyword::Not)?;
                 self.expect_keyword(Keyword::Exists)?;
@@ -1006,6 +1117,7 @@ impl Parser {
                 columns: Vec::new(),
                 values: Vec::new(),
                 json: Some(json_val),
+                json_default,
                 using,
             }));
         }
@@ -1040,8 +1152,22 @@ impl Parser {
             columns,
             values,
             json: None,
+            json_default: JsonDefault::Null,
             using,
         }))
+    }
+
+    fn parse_json_default(&mut self) -> Result<JsonDefault, ParseError> {
+        if !self.eat_keyword(Keyword::Default) {
+            return Ok(JsonDefault::Null);
+        }
+        if self.eat_keyword(Keyword::Null) {
+            return Ok(JsonDefault::Null);
+        }
+        if self.eat_keyword(Keyword::Unset) {
+            return Ok(JsonDefault::Unset);
+        }
+        Err(self.error("expected NULL or UNSET after INSERT JSON DEFAULT".into()))
     }
 
     // ─── UPDATE ─────────────────────────────────────────────────────────
@@ -1116,7 +1242,7 @@ impl Parser {
 
         self.expect_keyword(Keyword::From)?;
         let (ks, table) = self.parse_table_name()?;
-        let using = self.parse_using()?;
+        let using = self.parse_delete_using()?;
 
         self.expect_keyword(Keyword::Where)?;
         let where_clause = self.parse_where_clause()?;
@@ -1140,6 +1266,14 @@ impl Parser {
             if_exists,
             if_conditions,
         }))
+    }
+
+    fn parse_delete_using(&mut self) -> Result<Vec<UsingClause>, ParseError> {
+        if !self.eat_keyword(Keyword::Using) {
+            return Ok(Vec::new());
+        }
+        self.expect_keyword(Keyword::Timestamp)?;
+        Ok(vec![UsingClause::Timestamp(self.parse_term()?)])
     }
 
     // ─── BATCH ──────────────────────────────────────────────────────────
@@ -1227,7 +1361,7 @@ impl Parser {
             if *self.peek_kind() == TokenKind::Keyword(Keyword::Apply) {
                 break;
             }
-            let stmt = self.parse_statement()?;
+            let stmt = self.parse_batch_statement_objective()?;
             self.eat_if(TokenKind::Semicolon);
             statements.push(stmt);
         }
@@ -1242,6 +1376,18 @@ impl Parser {
         }))
     }
 
+    fn parse_batch_statement_objective(&mut self) -> Result<Statement, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::Keyword(Keyword::Insert) => self.parse_insert(),
+            TokenKind::Keyword(Keyword::Update) => self.parse_update(),
+            TokenKind::Keyword(Keyword::Delete) => self.parse_delete(),
+            _ => Err(self.error(format!(
+                "expected INSERT, UPDATE, DELETE, or APPLY in BATCH, got {}",
+                self.peek_kind()
+            ))),
+        }
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────
 
     fn parse_table_name(&mut self) -> Result<(Option<String>, String), ParseError> {
@@ -1252,6 +1398,14 @@ impl Parser {
         } else {
             Ok((None, first))
         }
+    }
+
+    fn parse_dotted_name(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut parts = vec![self.expect_ident()?];
+        while self.eat_if(TokenKind::Dot) {
+            parts.push(self.expect_ident()?);
+        }
+        Ok(parts)
     }
 
     fn parse_if_not_exists(&mut self) -> bool {
@@ -1283,10 +1437,10 @@ impl Parser {
     fn parse_where_clause(&mut self) -> Result<Vec<Relation>, ParseError> {
         let mut relations = Vec::new();
         loop {
-            let col = if self.eat_if(TokenKind::LParen) {
+            let (col, collection_key) = if self.eat_if(TokenKind::LParen) {
                 let columns = self.parse_ident_list()?;
                 self.expect(TokenKind::RParen)?;
-                format!("({})", columns.join(","))
+                (format!("({})", columns.join(",")), None)
             } else {
                 let ident = self.expect_ident()?;
                 if ident.eq_ignore_ascii_case("token") && self.eat_if(TokenKind::LParen) {
@@ -1294,13 +1448,26 @@ impl Parser {
                         self.parse_ident_list()?;
                     }
                     self.expect(TokenKind::RParen)?;
-                    "token".to_string()
+                    ("token".to_string(), None)
                 } else {
-                    ident
+                    let collection_key = if self.eat_if(TokenKind::LBracket) {
+                        let key = self.parse_term()?;
+                        self.expect(TokenKind::RBracket)?;
+                        Some(key)
+                    } else {
+                        None
+                    };
+                    (ident, collection_key)
                 }
             };
             let op = self.parse_relation_op()?;
-            let value = self.parse_term()?;
+            let mut value = self.parse_term()?;
+            if let Some(key) = collection_key {
+                value = Term::CollectionElement {
+                    key: Box::new(key),
+                    value: Box::new(value),
+                };
+            }
             relations.push(Relation {
                 column: col,
                 op,
@@ -1401,6 +1568,14 @@ impl Parser {
         }
     }
 
+    fn expect_ident_ci(&mut self, expected: &str) -> Result<(), ParseError> {
+        if self.eat_ident_ci(expected) {
+            Ok(())
+        } else {
+            Err(self.error(format!("expected {expected}, got {}", self.peek_kind())))
+        }
+    }
+
     fn parse_ann_vector_literal(&mut self) -> Result<Vec<f32>, ParseError> {
         self.expect(TokenKind::LBracket)?;
         let mut values = Vec::new();
@@ -1483,7 +1658,17 @@ impl Parser {
                 Ok(Term::BindMarker(BindMarker::Named(name)))
             }
             TokenKind::LParen => {
+                let start = self.pos;
                 self.advance();
+                if let Ok(cql_type) = self.parse_cql_type() {
+                    if self.eat_if(TokenKind::RParen) && is_term_start(self.peek_kind()) {
+                        let inner = self.parse_term()?;
+                        return Ok(Term::TypeHint(cql_type, Box::new(inner)));
+                    }
+                }
+
+                self.pos = start;
+                self.expect(TokenKind::LParen)?;
                 let mut terms = Vec::new();
                 if *self.peek_kind() != TokenKind::RParen {
                     loop {
@@ -1537,6 +1722,7 @@ impl Parser {
                 self.expect(TokenKind::RBrace)?;
                 Ok(Term::CollectionLiteral(items))
             }
+            TokenKind::Keyword(Keyword::Cast) => self.parse_cast_term(),
             TokenKind::Ident(name) => {
                 let name = name.clone();
                 self.advance();
@@ -1573,6 +1759,16 @@ impl Parser {
                 self.peek_kind()
             ))),
         }
+    }
+
+    fn parse_cast_term(&mut self) -> Result<Term, ParseError> {
+        self.expect_keyword(Keyword::Cast)?;
+        self.expect(TokenKind::LParen)?;
+        let inner = self.parse_term()?;
+        self.expect_keyword(Keyword::As)?;
+        let target = self.parse_cql_type()?;
+        self.expect(TokenKind::RParen)?;
+        Ok(Term::TypeHint(target, Box::new(inner)))
     }
 
     fn parse_cql_type(&mut self) -> Result<CqlTypeName, ParseError> {
@@ -1679,6 +1875,21 @@ impl Parser {
         }
         self.expect(TokenKind::RBrace)?;
         Ok(map)
+    }
+
+    fn parse_string_set(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(TokenKind::LBrace)?;
+        let mut values = Vec::new();
+        if *self.peek_kind() != TokenKind::RBrace {
+            loop {
+                values.push(self.parse_string_literal()?);
+                if !self.eat_if(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace)?;
+        Ok(values)
     }
 
     fn parse_option_value(&mut self) -> Result<String, ParseError> {
@@ -1930,18 +2141,29 @@ impl Parser {
 
     // ─── CREATE ROLE ────────────────────────────────────────────────────
 
-    fn parse_create_role(&mut self) -> Result<Statement, ParseError> {
-        self.expect_keyword(Keyword::Role)?;
+    fn parse_create_role(&mut self, is_user: bool) -> Result<Statement, ParseError> {
+        if is_user {
+            self.expect_keyword(Keyword::User)?;
+        } else {
+            self.expect_keyword(Keyword::Role)?;
+        }
         let if_not_exists = self.parse_if_not_exists();
-        let name = self.expect_ident()?;
+        let name = self.expect_role_name(!is_user)?;
         let mut password = None;
+        let mut hashed_password = None;
         let mut superuser = None;
-        let mut login = None;
-        let options = HashMap::new();
+        let mut login = if is_user { Some(true) } else { None };
+        let mut datacenter_access = None;
+        let mut cidr_access = None;
+        let mut options = HashMap::new();
         if self.eat_keyword(Keyword::With) {
             loop {
-                if self.eat_keyword(Keyword::Password) {
-                    self.expect(TokenKind::Eq)?;
+                if self.eat_keyword(Keyword::Hashed) {
+                    self.expect_keyword(Keyword::Password)?;
+                    self.parse_password_equals(is_user)?;
+                    hashed_password = Some(self.parse_string_literal()?);
+                } else if self.eat_keyword(Keyword::Password) {
+                    self.parse_password_equals(is_user)?;
                     password = Some(self.parse_string_literal()?);
                 } else if self.eat_keyword(Keyword::Superuser) {
                     self.expect(TokenKind::Eq)?;
@@ -1949,6 +2171,10 @@ impl Parser {
                 } else if self.eat_keyword(Keyword::Login) {
                     self.expect(TokenKind::Eq)?;
                     login = Some(self.parse_boolean()?);
+                } else if self.eat_ident_ci("ACCESS") {
+                    self.parse_role_access_option(&mut datacenter_access, &mut cidr_access)?;
+                } else if self.eat_ident_ci("OPTIONS") {
+                    options = self.parse_role_options()?;
                 } else {
                     break;
                 }
@@ -1961,10 +2187,56 @@ impl Parser {
             name,
             if_not_exists,
             password,
+            hashed_password,
             superuser,
             login,
+            datacenter_access,
+            cidr_access,
             options,
         }))
+    }
+
+    fn parse_password_equals(&mut self, optional: bool) -> Result<(), ParseError> {
+        if self.eat_if(TokenKind::Eq) || optional {
+            Ok(())
+        } else {
+            Err(self.error(format!("expected =, got {}", self.peek_kind())))
+        }
+    }
+
+    fn parse_role_options(&mut self) -> Result<HashMap<String, String>, ParseError> {
+        self.expect(TokenKind::Eq)?;
+        self.parse_map_literal_strings()
+    }
+
+    fn parse_role_access_option(
+        &mut self,
+        datacenter_access: &mut Option<RoleAccess>,
+        cidr_access: &mut Option<RoleAccess>,
+    ) -> Result<(), ParseError> {
+        if self.eat_ident_ci("TO") {
+            if self.eat_keyword(Keyword::All) {
+                self.expect_ident_ci("DATACENTERS")?;
+                *datacenter_access = Some(RoleAccess::All);
+            } else {
+                self.expect_ident_ci("DATACENTERS")?;
+                *datacenter_access = Some(RoleAccess::Restricted(self.parse_string_set()?));
+            }
+            return Ok(());
+        }
+
+        if self.eat_keyword(Keyword::From) {
+            if self.eat_keyword(Keyword::All) {
+                self.expect_ident_ci("CIDRS")?;
+                *cidr_access = Some(RoleAccess::All);
+            } else {
+                self.expect_ident_ci("CIDRS")?;
+                *cidr_access = Some(RoleAccess::Restricted(self.parse_string_set()?));
+            }
+            return Ok(());
+        }
+
+        Err(self.error("expected ACCESS TO DATACENTERS or ACCESS FROM CIDRS".to_string()))
     }
 
     // ─── CREATE MATERIALIZED VIEW ───────────────────────────────────────
@@ -2021,7 +2293,7 @@ impl Parser {
         if to != "to" {
             return Err(self.error(format!("expected TO, got {}", to)));
         }
-        let role = self.expect_ident()?;
+        let role = self.expect_role_name(true)?;
         Ok(Statement::Grant(GrantStatement {
             permissions,
             resource,
@@ -2035,7 +2307,7 @@ impl Parser {
         self.expect_keyword(Keyword::On)?;
         let resource = self.parse_resource()?;
         self.expect_keyword(Keyword::From)?;
-        let role = self.expect_ident()?;
+        let role = self.expect_role_name(true)?;
         Ok(Statement::Revoke(RevokeStatement {
             permissions,
             resource,
@@ -2048,9 +2320,49 @@ impl Parser {
             self.eat_keyword(Keyword::Permissions);
             return Ok(vec!["ALL".to_string()]);
         }
-        let perm = self.expect_ident()?;
-        self.eat_keyword(Keyword::Permission);
-        Ok(vec![perm.to_uppercase()])
+        let mut permissions = Vec::new();
+        loop {
+            let perm = self.parse_permission_name()?;
+            self.eat_keyword(Keyword::Permission);
+            permissions.push(perm.to_uppercase());
+            if !self.eat_if(TokenKind::Comma) {
+                break;
+            }
+        }
+        Ok(permissions)
+    }
+
+    fn parse_permission_name(&mut self) -> Result<String, ParseError> {
+        match self.peek_kind().clone() {
+            TokenKind::Ident(name) => {
+                self.advance();
+                Ok(name)
+            }
+            TokenKind::Keyword(Keyword::Select) => {
+                self.advance();
+                Ok("SELECT".to_string())
+            }
+            TokenKind::Keyword(Keyword::Create) => {
+                self.advance();
+                Ok("CREATE".to_string())
+            }
+            TokenKind::Keyword(Keyword::Alter) => {
+                self.advance();
+                Ok("ALTER".to_string())
+            }
+            TokenKind::Keyword(Keyword::Drop) => {
+                self.advance();
+                Ok("DROP".to_string())
+            }
+            TokenKind::Keyword(Keyword::Describe) => {
+                self.advance();
+                Ok("DESCRIBE".to_string())
+            }
+            _ => Err(self.error(format!(
+                "expected permission name, got {}",
+                self.peek_kind()
+            ))),
+        }
     }
 
     fn parse_resource(&mut self) -> Result<Resource, ParseError> {
@@ -2059,10 +2371,16 @@ impl Parser {
                 // ALL KEYSPACES
                 return Ok(Resource::AllKeyspaces);
             }
+            if self.eat_ident_ci("KEYSPACES") {
+                return Ok(Resource::AllKeyspaces);
+            }
             if self.eat_keyword(Keyword::Roles) {
                 return Ok(Resource::AllRoles);
             }
             if self.eat_keyword(Keyword::Function) {
+                return Ok(Resource::AllFunctions);
+            }
+            if self.eat_ident_ci("FUNCTIONS") {
                 return Ok(Resource::AllFunctions);
             }
             return Ok(Resource::AllKeyspaces);
@@ -2079,7 +2397,7 @@ impl Parser {
             });
         }
         if self.eat_keyword(Keyword::Role) {
-            let name = self.expect_ident()?;
+            let name = self.expect_role_name(true)?;
             return Ok(Resource::Role(name));
         }
         // Default: try as table reference
@@ -2096,7 +2414,7 @@ impl Parser {
         self.expect_keyword(Keyword::List)?;
         if self.eat_keyword(Keyword::Roles) {
             let of_role = if self.eat_keyword(Keyword::Of) {
-                Some(self.expect_ident()?)
+                Some(self.expect_role_name(true)?)
             } else {
                 None
             };
@@ -2113,7 +2431,7 @@ impl Parser {
                 None
             };
             let of_role = if self.eat_keyword(Keyword::Of) {
-                Some(self.expect_ident()?)
+                Some(self.expect_role_name(true)?)
             } else {
                 None
             };
@@ -2123,7 +2441,23 @@ impl Parser {
                 of_role,
             }))
         } else {
-            Err(self.error("expected ROLES or PERMISSIONS after LIST".into()))
+            let permissions = self.parse_permission_list()?;
+            self.eat_keyword(Keyword::Permissions);
+            let resource = if self.eat_keyword(Keyword::On) {
+                Some(self.parse_resource()?)
+            } else {
+                None
+            };
+            let of_role = if self.eat_keyword(Keyword::Of) {
+                Some(self.expect_role_name(true)?)
+            } else {
+                None
+            };
+            Ok(Statement::ListPermissions(ListPermissionsStatement {
+                permissions,
+                resource,
+                of_role,
+            }))
         }
     }
 
@@ -2184,12 +2518,102 @@ impl Parser {
 
         Ok(Statement::Describe(DescribeStatement { target }))
     }
+
+    // ─── COMMENT ON ────────────────────────────────────────────────────
+
+    fn parse_comment(&mut self) -> Result<Statement, ParseError> {
+        self.expect_keyword(Keyword::Comment)?;
+        self.expect_keyword(Keyword::On)?;
+
+        let target = if self.eat_keyword(Keyword::Keyspace) {
+            CommentTarget::Keyspace(self.expect_ident()?)
+        } else if self.eat_keyword(Keyword::Table) {
+            let (keyspace, table) = self.parse_table_name()?;
+            CommentTarget::Table { keyspace, table }
+        } else if self.eat_keyword(Keyword::Column) {
+            match self.parse_dotted_name()?.as_slice() {
+                [table, column] => CommentTarget::Column {
+                    keyspace: None,
+                    table: table.clone(),
+                    column: column.clone(),
+                },
+                [keyspace, table, column] => CommentTarget::Column {
+                    keyspace: Some(keyspace.clone()),
+                    table: table.clone(),
+                    column: column.clone(),
+                },
+                _ => {
+                    return Err(self.error(
+                        "COMMENT ON COLUMN expects table.column or keyspace.table.column".into(),
+                    ));
+                }
+            }
+        } else if self.eat_keyword(Keyword::Type) {
+            let (keyspace, name) = self.parse_table_name()?;
+            CommentTarget::Type { keyspace, name }
+        } else if self.eat_keyword(Keyword::Field) {
+            match self.parse_dotted_name()?.as_slice() {
+                [type_name, field] => CommentTarget::Field {
+                    keyspace: None,
+                    type_name: type_name.clone(),
+                    field: field.clone(),
+                },
+                [keyspace, type_name, field] => CommentTarget::Field {
+                    keyspace: Some(keyspace.clone()),
+                    type_name: type_name.clone(),
+                    field: field.clone(),
+                },
+                _ => {
+                    return Err(self.error(
+                        "COMMENT ON FIELD expects type.field or keyspace.type.field".into(),
+                    ));
+                }
+            }
+        } else {
+            return Err(self.error(
+                "expected KEYSPACE, TABLE, COLUMN, TYPE, or FIELD after COMMENT ON".into(),
+            ));
+        };
+
+        self.expect_keyword(Keyword::Is)?;
+        let comment = self.parse_string_literal()?;
+        Ok(Statement::Comment(CommentStatement { target, comment }))
+    }
+}
+
+fn is_writetime_or_ttl_selector(name: &str) -> bool {
+    name.eq_ignore_ascii_case("writetime")
+        || name.eq_ignore_ascii_case("maxwritetime")
+        || name.eq_ignore_ascii_case("ttl")
+}
+
+fn is_term_start(kind: &TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::StringLiteral(_)
+            | TokenKind::IntegerLiteral(_)
+            | TokenKind::FloatLiteral(_)
+            | TokenKind::BlobLiteral(_)
+            | TokenKind::UuidLiteral(_)
+            | TokenKind::BooleanLiteral(_)
+            | TokenKind::NullLiteral
+            | TokenKind::QuestionMark
+            | TokenKind::NamedBind(_)
+            | TokenKind::LParen
+            | TokenKind::LBracket
+            | TokenKind::LBrace
+            | TokenKind::Ident(_)
+            | TokenKind::Keyword(Keyword::Cast)
+            | TokenKind::Minus
+    )
 }
 
 fn is_unreserved_keyword(kw: Keyword) -> bool {
     matches!(
         kw,
         Keyword::Json
+            | Keyword::Default
+            | Keyword::Unset
             | Keyword::Clustering
             | Keyword::Compact
             | Keyword::Storage
@@ -2247,6 +2671,8 @@ fn is_unreserved_keyword(kw: Keyword) -> bool {
             | Keyword::Let
             | Keyword::Returning
             | Keyword::Commit
+            | Keyword::Comment
+            | Keyword::Field
     )
 }
 
@@ -2390,6 +2816,44 @@ mod tests {
     }
 
     #[test]
+    fn parse_select_with_token_multi_column_and_collection_restrictions() {
+        let stmt = parse("SELECT * FROM users WHERE token(id) > 0").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.where_clause[0].column, "token");
+                assert_eq!(s.where_clause[0].op, RelationOp::Gt);
+            }
+            _ => panic!("expected Select"),
+        }
+
+        let stmt = parse("SELECT * FROM users WHERE (ck1, ck2) >= (1, 2)").unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                assert_eq!(s.where_clause[0].column, "(ck1,ck2)");
+                assert_eq!(s.where_clause[0].op, RelationOp::Gte);
+                assert!(matches!(
+                    s.where_clause[0].value,
+                    Term::TupleLiteral(ref values) if values.len() == 2
+                ));
+            }
+            _ => panic!("expected Select"),
+        }
+
+        let stmt = parse("SELECT * FROM users WHERE tags CONTAINS 'x' ALLOW FILTERING").unwrap();
+        match stmt {
+            Statement::Select(s) => assert_eq!(s.where_clause[0].op, RelationOp::Contains),
+            _ => panic!("expected Select"),
+        }
+
+        let stmt =
+            parse("SELECT * FROM users WHERE attrs CONTAINS KEY 'k' ALLOW FILTERING").unwrap();
+        match stmt {
+            Statement::Select(s) => assert_eq!(s.where_clause[0].op, RelationOp::ContainsKey),
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
     fn parse_select_with_limit() {
         let stmt = parse("SELECT * FROM t LIMIT 10").unwrap();
         match stmt {
@@ -2411,6 +2875,53 @@ mod tests {
     }
 
     #[test]
+    fn parse_select_writetime_ttl_and_function_aliases() {
+        let stmt =
+            parse("SELECT writetime(name), ttl(name) AS ttl_name, count(*), count(1) AS one_count, cast(id AS text) AS id_text FROM events")
+                .unwrap();
+        match stmt {
+            Statement::Select(s) => {
+                let SelectColumns::Named(selectors) = s.columns else {
+                    panic!("expected named selectors");
+                };
+                assert_eq!(
+                    selectors[0],
+                    Selector::WritetimeOrTtl("writetime".to_string(), "name".to_string())
+                );
+                assert_eq!(
+                    selectors[1],
+                    Selector::Alias {
+                        selector: Box::new(Selector::WritetimeOrTtl(
+                            "ttl".to_string(),
+                            "name".to_string()
+                        )),
+                        alias: "ttl_name".to_string(),
+                    }
+                );
+                assert_eq!(selectors[2], Selector::Count);
+                assert_eq!(
+                    selectors[3],
+                    Selector::Alias {
+                        selector: Box::new(Selector::Count),
+                        alias: "one_count".to_string(),
+                    }
+                );
+                assert_eq!(
+                    selectors[4],
+                    Selector::Alias {
+                        selector: Box::new(Selector::Cast {
+                            selector: Box::new(Selector::Column("id".to_string())),
+                            target: CqlTypeName::Simple("text".to_string()),
+                        }),
+                        alias: "id_text".to_string(),
+                    }
+                );
+            }
+            _ => panic!("expected Select"),
+        }
+    }
+
+    #[test]
     fn parse_insert() {
         let stmt = parse("INSERT INTO t (id, name) VALUES (?, 'Alice')").unwrap();
         match stmt {
@@ -2423,12 +2934,71 @@ mod tests {
     }
 
     #[test]
+    fn parse_type_hint_and_cast_terms() {
+        assert_eq!(
+            parse_term("(bigint) 1").unwrap(),
+            Term::TypeHint(
+                CqlTypeName::Simple("bigint".to_string()),
+                Box::new(Term::Literal(Literal::Integer(1)))
+            )
+        );
+        assert_eq!(
+            parse_term("cast(1 AS text)").unwrap(),
+            Term::TypeHint(
+                CqlTypeName::Simple("text".to_string()),
+                Box::new(Term::Literal(Literal::Integer(1)))
+            )
+        );
+
+        let stmt = parse("INSERT INTO t (id, value) VALUES ((bigint) ?, cast(1 AS text))").unwrap();
+        match stmt {
+            Statement::Insert(i) => {
+                assert!(matches!(i.values[0], Term::TypeHint(_, _)));
+                assert!(matches!(i.values[1], Term::TypeHint(_, _)));
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
     fn parse_update() {
         let stmt = parse("UPDATE t SET name = 'Bob' WHERE id = ?").unwrap();
         match stmt {
             Statement::Update(u) => {
                 assert_eq!(u.assignments.len(), 1);
                 assert_eq!(u.assignments[0].column, "name");
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn parse_lwt_collection_element_conditions() {
+        let stmt = parse(
+            "UPDATE t SET value = 2 WHERE id = 1 IF attrs['state'] = 'open' AND scores[0] = 7",
+        )
+        .unwrap();
+        match stmt {
+            Statement::Update(update) => {
+                assert_eq!(update.if_conditions.len(), 2);
+                assert_eq!(update.if_conditions[0].column, "attrs");
+                assert!(matches!(
+                    update.if_conditions[0].value,
+                    Term::CollectionElement {
+                        key: ref map_key,
+                        value: ref map_value
+                    } if matches!(**map_key, Term::Literal(Literal::String(ref value)) if value == "state")
+                        && matches!(**map_value, Term::Literal(Literal::String(ref value)) if value == "open")
+                ));
+                assert_eq!(update.if_conditions[1].column, "scores");
+                assert!(matches!(
+                    update.if_conditions[1].value,
+                    Term::CollectionElement {
+                        key: ref list_key,
+                        value: ref list_value
+                    } if matches!(**list_key, Term::Literal(Literal::Integer(0)))
+                        && matches!(**list_value, Term::Literal(Literal::Integer(7)))
+                ));
             }
             _ => panic!("expected Update"),
         }
@@ -2480,6 +3050,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_delete_allows_only_using_timestamp_like_java() {
+        let stmt = parse("DELETE FROM t USING TIMESTAMP 123 WHERE id = 1").unwrap();
+        match stmt {
+            Statement::Delete(d) => {
+                assert!(matches!(
+                    d.using.as_slice(),
+                    [UsingClause::Timestamp(Term::Literal(Literal::Integer(123)))]
+                ));
+            }
+            _ => panic!("expected Delete"),
+        }
+
+        let err = parse("DELETE FROM t USING TTL 60 WHERE id = 1").unwrap_err();
+        assert!(err.message.contains("expected Timestamp"));
+    }
+
+    #[test]
     fn parse_drop_keyspace() {
         let stmt = parse("DROP KEYSPACE IF EXISTS test").unwrap();
         match stmt {
@@ -2505,7 +3092,7 @@ mod tests {
 
     #[test]
     fn parse_truncate() {
-        let stmt = parse("TRUNCATE TABLE ks.t").unwrap();
+        let stmt = parse("TRUNCATE ks.t").unwrap();
         match stmt {
             Statement::Truncate(t) => {
                 assert_eq!(t.keyspace, Some("ks".into()));
@@ -2513,6 +3100,17 @@ mod tests {
             }
             _ => panic!("expected Truncate"),
         }
+
+        let stmt = parse("TRUNCATE COLUMNFAMILY ks.t").unwrap();
+        match stmt {
+            Statement::Truncate(t) => {
+                assert_eq!(t.keyspace, Some("ks".into()));
+                assert_eq!(t.table, "t");
+            }
+            _ => panic!("expected Truncate"),
+        }
+
+        assert!(parse("TRUNCATE TABLE ks.t").is_err());
     }
 
     #[test]
@@ -2555,6 +3153,33 @@ mod tests {
         let stmt = parse("INSERT INTO t (id) VALUES (1) IF NOT EXISTS").unwrap();
         match stmt {
             Statement::Insert(i) => assert!(i.if_not_exists),
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_json() {
+        let stmt =
+            parse(r#"INSERT INTO t JSON '{"id": 1, "name": "alice"}' IF NOT EXISTS"#).unwrap();
+        match stmt {
+            Statement::Insert(i) => {
+                assert!(i.if_not_exists);
+                assert!(i.columns.is_empty());
+                assert!(matches!(i.json, Some(Term::Literal(Literal::String(_)))));
+                assert_eq!(i.json_default, JsonDefault::Null);
+            }
+            _ => panic!("expected Insert"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_json_default_unset() {
+        let stmt = parse(r#"INSERT INTO t JSON '{"id": 1}' DEFAULT UNSET"#).unwrap();
+        match stmt {
+            Statement::Insert(i) => {
+                assert!(matches!(i.json, Some(Term::Literal(Literal::String(_)))));
+                assert_eq!(i.json_default, JsonDefault::Unset);
+            }
             _ => panic!("expected Insert"),
         }
     }
@@ -2756,9 +3381,50 @@ mod tests {
     }
 
     #[test]
+    fn parse_alter_type_operations() {
+        let stmt = parse("ALTER TYPE ks.address ADD country text").unwrap();
+        match stmt {
+            Statement::AlterType(at) => {
+                assert_eq!(at.keyspace.as_deref(), Some("ks"));
+                assert_eq!(at.name, "address");
+                assert!(matches!(
+                    at.operation,
+                    AlterTypeOp::AddField(ref name, CqlTypeName::Simple(ref typ))
+                        if name == "country" && typ == "text"
+                ));
+            }
+            _ => panic!("expected AlterType ADD"),
+        }
+
+        let stmt = parse("ALTER TYPE ks.address RENAME zip TO postal_code").unwrap();
+        match stmt {
+            Statement::AlterType(at) => {
+                assert!(matches!(
+                    at.operation,
+                    AlterTypeOp::RenameField(ref from, ref to)
+                        if from == "zip" && to == "postal_code"
+                ));
+            }
+            _ => panic!("expected AlterType RENAME"),
+        }
+
+        let stmt = parse("ALTER TYPE ks.address ALTER postal_code TYPE bigint").unwrap();
+        match stmt {
+            Statement::AlterType(at) => {
+                assert!(matches!(
+                    at.operation,
+                    AlterTypeOp::AlterFieldType(ref name, CqlTypeName::Simple(ref typ))
+                        if name == "postal_code" && typ == "bigint"
+                ));
+            }
+            _ => panic!("expected AlterType ALTER"),
+        }
+    }
+
+    #[test]
     fn parse_create_role() {
         let stmt = parse(
-            "CREATE ROLE admin WITH PASSWORD = 'secret' AND SUPERUSER = true AND LOGIN = true",
+            "CREATE ROLE admin WITH PASSWORD = 'secret' AND SUPERUSER = true AND LOGIN = true AND ACCESS TO DATACENTERS {'dc1', 'dc2'} AND ACCESS FROM ALL CIDRS",
         )
         .unwrap();
         match stmt {
@@ -2767,8 +3433,151 @@ mod tests {
                 assert_eq!(cr.password, Some("secret".into()));
                 assert_eq!(cr.superuser, Some(true));
                 assert_eq!(cr.login, Some(true));
+                assert_eq!(
+                    cr.datacenter_access,
+                    Some(RoleAccess::Restricted(vec!["dc1".into(), "dc2".into()]))
+                );
+                assert_eq!(cr.cidr_access, Some(RoleAccess::All));
             }
             _ => panic!("expected CreateRole"),
+        }
+    }
+
+    #[test]
+    fn parse_role_hashed_password_options() {
+        let stmt = parse("CREATE ROLE admin WITH HASHED PASSWORD = '$2b$12$hash' AND LOGIN = true")
+            .unwrap();
+        match stmt {
+            Statement::CreateRole(cr) => {
+                assert_eq!(cr.name, "admin");
+                assert_eq!(cr.password, None);
+                assert_eq!(cr.hashed_password, Some("$2b$12$hash".into()));
+                assert_eq!(cr.login, Some(true));
+            }
+            _ => panic!("expected CreateRole"),
+        }
+
+        let stmt = parse("ALTER ROLE admin WITH HASHED PASSWORD = '$2b$12$newhash'").unwrap();
+        match stmt {
+            Statement::AlterRole(ar) => {
+                assert_eq!(ar.name, "admin");
+                assert_eq!(ar.password, None);
+                assert_eq!(ar.hashed_password, Some("$2b$12$newhash".into()));
+            }
+            _ => panic!("expected AlterRole"),
+        }
+    }
+
+    #[test]
+    fn parse_role_custom_options() {
+        let stmt = parse("CREATE ROLE r WITH OPTIONS = {'a':'b', 'b':1}").unwrap();
+        match stmt {
+            Statement::CreateRole(cr) => {
+                assert_eq!(cr.name, "r");
+                assert_eq!(cr.options.get("a").map(String::as_str), Some("b"));
+                assert_eq!(cr.options.get("b").map(String::as_str), Some("1"));
+            }
+            _ => panic!("expected CreateRole"),
+        }
+
+        let stmt = parse("ALTER ROLE r WITH LOGIN = true AND OPTIONS = {'region':'west'}").unwrap();
+        match stmt {
+            Statement::AlterRole(ar) => {
+                assert_eq!(ar.name, "r");
+                assert_eq!(ar.login, Some(true));
+                assert_eq!(ar.options.get("region").map(String::as_str), Some("west"));
+            }
+            _ => panic!("expected AlterRole"),
+        }
+
+        assert!(parse("CREATE ROLE r WITH OPTIONS = 'term'").is_err());
+        assert!(parse("ALTER ROLE r WITH OPTIONS = 99").is_err());
+    }
+
+    #[test]
+    fn parse_user_aliases_to_role_statements() {
+        let stmt = parse("CREATE USER IF NOT EXISTS alice WITH HASHED PASSWORD '$2b$12$userhash'")
+            .unwrap();
+        match stmt {
+            Statement::CreateRole(cr) => {
+                assert_eq!(cr.name, "alice");
+                assert!(cr.if_not_exists);
+                assert_eq!(cr.login, Some(true));
+                assert_eq!(cr.hashed_password.as_deref(), Some("$2b$12$userhash"));
+            }
+            _ => panic!("expected CreateRole"),
+        }
+
+        let stmt = parse("ALTER USER IF EXISTS alice WITH PASSWORD 'secret'").unwrap();
+        match stmt {
+            Statement::AlterRole(ar) => {
+                assert_eq!(ar.name, "alice");
+                assert!(ar.if_exists);
+                assert_eq!(ar.password.as_deref(), Some("secret"));
+            }
+            _ => panic!("expected AlterRole"),
+        }
+
+        let stmt = parse("DROP USER IF EXISTS alice").unwrap();
+        match stmt {
+            Statement::DropRole(dr) => {
+                assert_eq!(dr.name, "alice");
+                assert!(dr.if_exists);
+            }
+            _ => panic!("expected DropRole"),
+        }
+    }
+
+    #[test]
+    fn parse_role_and_user_literal_name_forms() {
+        let stmt = parse("CREATE ROLE 'r1'").unwrap();
+        match stmt {
+            Statement::CreateRole(cr) => assert_eq!(cr.name, "r1"),
+            _ => panic!("expected CreateRole"),
+        }
+
+        let stmt = parse(r#"ALTER ROLE "RoleName" WITH PASSWORD = 'secret'"#).unwrap();
+        match stmt {
+            Statement::AlterRole(ar) => assert_eq!(ar.name, "RoleName"),
+            _ => panic!("expected AlterRole"),
+        }
+
+        let stmt = parse("DROP ROLE $$ r1 ' x $ x ' $$").unwrap();
+        match stmt {
+            Statement::DropRole(dr) => assert_eq!(dr.name, " r1 ' x $ x ' "),
+            _ => panic!("expected DropRole"),
+        }
+
+        let stmt = parse("GRANT ALTER ON ROLE 'source' TO $$ target $$").unwrap();
+        match stmt {
+            Statement::Grant(grant) => {
+                assert_eq!(grant.role, " target ");
+                assert_eq!(grant.resource, Resource::Role("source".to_string()));
+            }
+            _ => panic!("expected Grant"),
+        }
+
+        assert!(parse(r#"CREATE USER "u1""#).is_err());
+        assert!(parse(r#"ALTER USER "u1" WITH PASSWORD 'secret'"#).is_err());
+        assert!(parse(r#"DROP USER "u1""#).is_err());
+    }
+
+    #[test]
+    fn parse_alter_role_access_restrictions() {
+        let stmt = parse("ALTER ROLE analyst WITH ACCESS TO ALL DATACENTERS AND ACCESS FROM CIDRS {'region1', 'region2'}").unwrap();
+        match stmt {
+            Statement::AlterRole(ar) => {
+                assert_eq!(ar.name, "analyst");
+                assert_eq!(ar.datacenter_access, Some(RoleAccess::All));
+                assert_eq!(
+                    ar.cidr_access,
+                    Some(RoleAccess::Restricted(vec![
+                        "region1".into(),
+                        "region2".into()
+                    ]))
+                );
+            }
+            _ => panic!("expected AlterRole"),
         }
     }
 
@@ -2781,6 +3590,83 @@ mod tests {
                 assert_eq!(dr.name, "test_role");
             }
             _ => panic!("expected DropRole"),
+        }
+    }
+
+    #[test]
+    fn parse_grant_and_list_permissions() {
+        let stmt = parse("GRANT SELECT ON TABLE ks.events TO analyst").unwrap();
+        match stmt {
+            Statement::Grant(grant) => {
+                assert_eq!(grant.permissions, vec!["SELECT"]);
+                assert_eq!(grant.role, "analyst");
+                assert!(matches!(
+                    grant.resource,
+                    Resource::Table {
+                        keyspace: Some(ref keyspace),
+                        ref table
+                    } if keyspace == "ks" && table == "events"
+                ));
+            }
+            _ => panic!("expected Grant"),
+        }
+
+        let stmt =
+            parse("GRANT MODIFY PERMISSION, SELECT PERMISSION ON ALL KEYSPACES TO 'analyst'")
+                .unwrap();
+        match stmt {
+            Statement::Grant(grant) => {
+                assert_eq!(grant.permissions, vec!["MODIFY", "SELECT"]);
+                assert_eq!(grant.role, "analyst");
+                assert_eq!(grant.resource, Resource::AllKeyspaces);
+            }
+            _ => panic!("expected Grant"),
+        }
+
+        let stmt = parse("REVOKE CREATE, ALTER ON ROLE $$source$$ FROM $$ target $$").unwrap();
+        match stmt {
+            Statement::Revoke(revoke) => {
+                assert_eq!(revoke.permissions, vec!["CREATE", "ALTER"]);
+                assert_eq!(revoke.role, " target ");
+                assert_eq!(revoke.resource, Resource::Role("source".to_string()));
+            }
+            _ => panic!("expected Revoke"),
+        }
+
+        let stmt = parse("LIST SELECT PERMISSION ON TABLE ks.events OF analyst").unwrap();
+        match stmt {
+            Statement::ListPermissions(list) => {
+                assert_eq!(list.permissions, vec!["SELECT"]);
+                assert_eq!(list.of_role.as_deref(), Some("analyst"));
+                assert!(matches!(
+                    list.resource,
+                    Some(Resource::Table {
+                        keyspace: Some(ref keyspace),
+                        ref table
+                    }) if keyspace == "ks" && table == "events"
+                ));
+            }
+            _ => panic!("expected ListPermissions"),
+        }
+
+        let stmt = parse("LIST ALL PERMISSIONS ON ALL ROLES OF $$ r '1' $$").unwrap();
+        match stmt {
+            Statement::ListPermissions(list) => {
+                assert_eq!(list.permissions, vec!["ALL"]);
+                assert_eq!(list.resource, Some(Resource::AllRoles));
+                assert_eq!(list.of_role.as_deref(), Some(" r '1' "));
+            }
+            _ => panic!("expected ListPermissions"),
+        }
+
+        let stmt = parse("LIST ALTER, DROP PERMISSION ON ROLE 'source' OF \"target\"").unwrap();
+        match stmt {
+            Statement::ListPermissions(list) => {
+                assert_eq!(list.permissions, vec!["ALTER", "DROP"]);
+                assert_eq!(list.resource, Some(Resource::Role("source".to_string())));
+                assert_eq!(list.of_role.as_deref(), Some("target"));
+            }
+            _ => panic!("expected ListPermissions"),
         }
     }
 
@@ -2820,6 +3706,83 @@ mod tests {
     fn parse_drop_materialized_view() {
         let stmt = parse("DROP MATERIALIZED VIEW IF EXISTS ks.my_view").unwrap();
         assert!(matches!(stmt, Statement::DropMaterializedView(_)));
+    }
+
+    #[test]
+    fn parse_comment_on_schema_elements() {
+        let stmt = parse("COMMENT ON KEYSPACE ks IS 'primary keyspace'").unwrap();
+        match stmt {
+            Statement::Comment(comment) => {
+                assert_eq!(comment.target, CommentTarget::Keyspace("ks".to_string()));
+                assert_eq!(comment.comment, "primary keyspace");
+            }
+            _ => panic!("expected Comment"),
+        }
+
+        let stmt = parse("COMMENT ON TABLE ks.events IS 'event table'").unwrap();
+        match stmt {
+            Statement::Comment(comment) => {
+                assert_eq!(
+                    comment.target,
+                    CommentTarget::Table {
+                        keyspace: Some("ks".to_string()),
+                        table: "events".to_string()
+                    }
+                );
+                assert_eq!(comment.comment, "event table");
+            }
+            _ => panic!("expected Comment"),
+        }
+
+        let stmt = parse("COMMENT ON COLUMN ks.events.name IS 'display name'").unwrap();
+        match stmt {
+            Statement::Comment(comment) => {
+                assert_eq!(
+                    comment.target,
+                    CommentTarget::Column {
+                        keyspace: Some("ks".to_string()),
+                        table: "events".to_string(),
+                        column: "name".to_string()
+                    }
+                );
+                assert_eq!(comment.comment, "display name");
+            }
+            _ => panic!("expected Comment"),
+        }
+    }
+
+    #[test]
+    fn parse_comment_on_user_type_and_field() {
+        let stmt = parse("COMMENT ON TYPE ks.address IS 'postal address'").unwrap();
+        match stmt {
+            Statement::Comment(comment) => {
+                assert_eq!(
+                    comment.target,
+                    CommentTarget::Type {
+                        keyspace: Some("ks".to_string()),
+                        name: "address".to_string()
+                    }
+                );
+                assert_eq!(comment.comment, "postal address");
+            }
+            _ => panic!("expected Comment"),
+        }
+
+        let stmt = parse("COMMENT ON FIELD ks.address.street IS 'street line'").unwrap();
+        match stmt {
+            Statement::Comment(comment) => {
+                assert_eq!(
+                    comment.target,
+                    CommentTarget::Field {
+                        keyspace: Some("ks".to_string()),
+                        type_name: "address".to_string(),
+                        field: "street".to_string()
+                    }
+                );
+                assert_eq!(comment.comment, "street line");
+            }
+            _ => panic!("expected Comment"),
+        }
     }
 
     #[test]
@@ -2888,5 +3851,22 @@ mod tests {
         let cql = "BEGIN BATCH INSERT INTO t (id) VALUES (1); APPLY BATCH";
         let stmt = parse(cql).unwrap();
         assert!(matches!(stmt, Statement::Batch(_)));
+    }
+
+    #[test]
+    fn parse_batch_rejects_non_mutation_statement_like_java() {
+        let cql = "BEGIN BATCH SELECT * FROM t; APPLY BATCH";
+        let err = parse(cql).unwrap_err();
+        assert!(
+            err.message
+                .contains("expected INSERT, UPDATE, DELETE, or APPLY in BATCH")
+        );
+
+        let cql = "BEGIN BATCH USE ks; APPLY BATCH";
+        let err = parse(cql).unwrap_err();
+        assert!(
+            err.message
+                .contains("expected INSERT, UPDATE, DELETE, or APPLY in BATCH")
+        );
     }
 }

@@ -245,7 +245,7 @@ mod tests {
 
     #[test]
     fn serialize_round_trip() {
-        let v = VectorValue::new(vec![1.0, -2.5, 3.14, 0.0]);
+        let v = VectorValue::new(vec![1.0, -2.5, std::f32::consts::PI, 0.0]);
         let bytes = v.serialize();
         assert_eq!(bytes.len(), 16); // 4 floats * 4 bytes
 
@@ -253,7 +253,7 @@ mod tests {
         assert_eq!(decoded.values.len(), 4);
         assert!((decoded.values[0] - 1.0).abs() < f32::EPSILON);
         assert!((decoded.values[1] - (-2.5)).abs() < f32::EPSILON);
-        assert!((decoded.values[2] - 3.14).abs() < 0.001);
+        assert!((decoded.values[2] - std::f32::consts::PI).abs() < 0.001);
         assert!((decoded.values[3] - 0.0).abs() < f32::EPSILON);
     }
 

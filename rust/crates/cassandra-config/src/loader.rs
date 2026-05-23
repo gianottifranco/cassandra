@@ -87,4 +87,12 @@ native_transport_port: 9042
     fn load_missing_file() {
         assert!(load_config("/nonexistent/cassandra.yaml").is_err());
     }
+
+    #[test]
+    fn load_repository_cassandra_yaml() {
+        let yaml = include_str!("../../../../conf/cassandra.yaml");
+        let cfg = load_config_from_str(yaml).unwrap();
+        assert_eq!(cfg.cluster_name, "Test Cluster");
+        assert_eq!(cfg.audit_logging_options.unwrap().logger, "BinAuditLogger");
+    }
 }

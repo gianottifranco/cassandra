@@ -133,10 +133,10 @@ pub trait Partitioner: Send + Sync {
 /// `org.apache.cassandra.dht.Token.TokenFactory`
 pub trait TokenFactory: Send + Sync {
     /// Parse a token from its string representation.
-    fn from_string(&self, s: &str) -> Option<Token>;
+    fn parse_string(&self, s: &str) -> Option<Token>;
 
     /// Create a token from its byte representation.
-    fn from_bytes(&self, bytes: &[u8]) -> Option<Token>;
+    fn parse_bytes(&self, bytes: &[u8]) -> Option<Token>;
 
     /// Serialize a token to its string representation.
     fn to_string(&self, token: Token) -> String;
@@ -150,11 +150,11 @@ pub trait TokenFactory: Send + Sync {
 pub struct LongTokenFactory;
 
 impl TokenFactory for LongTokenFactory {
-    fn from_string(&self, s: &str) -> Option<Token> {
+    fn parse_string(&self, s: &str) -> Option<Token> {
         s.parse::<i64>().ok().map(Token::from_raw)
     }
 
-    fn from_bytes(&self, bytes: &[u8]) -> Option<Token> {
+    fn parse_bytes(&self, bytes: &[u8]) -> Option<Token> {
         if bytes.len() >= 8 {
             let mut buf = [0u8; 8];
             buf.copy_from_slice(&bytes[..8]);
@@ -545,7 +545,7 @@ mod tests {
         let ownership = p.describe_ownership(&tokens);
         assert_eq!(ownership.len(), 3);
         // Each should own roughly 1/3 of the ring
-        for (_, frac) in &ownership {
+        for frac in ownership.values() {
             assert!(*frac > 0.2 && *frac < 0.45, "fraction={}", frac);
         }
     }
@@ -563,16 +563,15 @@ mod tests {
         let factory = LongTokenFactory;
         let token = Token::from_raw(12345);
         let s = factory.to_string(token);
-        assert_eq!(factory.from_string(&s), Some(token));
+        assert_eq!(factory.parse_string(&s), Some(token));
         let bytes = factory.to_bytes(token);
-        assert_eq!(factory.from_bytes(&bytes), Some(token));
+        assert_eq!(factory.parse_bytes(&bytes), Some(token));
     }
 
     #[test]
     fn random_token_in_range() {
         let p = Murmur3Partitioner;
-        // Just verify it doesn't panic and returns a valid token
         let t = p.random_token();
-        assert!(t.value() >= i64::MIN && t.value() <= i64::MAX);
+        assert_eq!(Token::from_raw(t.value()), t);
     }
 }

@@ -26,7 +26,9 @@
 use cassandra_cluster_metadata::Endpoint;
 use cassandra_messaging::{MessagingService, frame::Message, verb::Verb};
 use cassandra_storage::memtable::partition::PartitionData;
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tracing::{debug, info};
 
@@ -68,6 +70,30 @@ pub struct ReadRepairMutation {
     pub partition_key: Vec<u8>,
     /// The reconciled data to write.
     pub data: PartitionData,
+}
+
+/// Result of dispatching staged read repair mutations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadRepairExecutionResult {
+    /// Number of repair mutations attempted.
+    pub attempted: usize,
+    /// Number of replicas that acknowledged the repair.
+    pub acknowledged: usize,
+    /// Number of repairs that failed or timed out.
+    pub failed: usize,
+    /// Targets that failed to acknowledge.
+    pub failed_targets: Vec<Endpoint>,
+}
+
+impl ReadRepairExecutionResult {
+    fn empty() -> Self {
+        Self {
+            attempted: 0,
+            acknowledged: 0,
+            failed: 0,
+            failed_targets: Vec::new(),
+        }
+    }
 }
 
 /// Read repair handler that collects mutations and dispatches them.
@@ -140,56 +166,188 @@ impl ReadRepairHandler {
     ///
     /// `BlockingReadRepair.repairPartition()` → serializes as Mutation
     pub async fn execute_repairs(&mut self, messaging: Option<Arc<MessagingService>>) -> usize {
+        self.execute_repairs_with_timeout(messaging, Duration::from_secs(2))
+            .await
+            .acknowledged
+    }
+
+    /// Execute all pending repairs and return detailed live-dispatch outcome.
+    ///
+    /// Failed or timed-out repairs are retained in `pending` so callers can
+    /// inspect or retry them. A `ReadRepairResponse` failure frame is treated as
+    /// a failed repair, matching the blocking read repair requirement that stale
+    /// replicas acknowledge the mutation before it is considered complete.
+    pub async fn execute_repairs_with_timeout(
+        &mut self,
+        messaging: Option<Arc<MessagingService>>,
+        timeout: Duration,
+    ) -> ReadRepairExecutionResult {
         let count = self.pending.len();
-        if count > 0 {
-            info!(
-                count,
-                strategy = ?self.strategy,
-                "Executing read repair mutations"
-            );
-            if let Some(msg_svc) = messaging {
-                for repair in self.pending.drain(..) {
-                    let payload = serialize_repair_payload(&repair);
-                    let msg = Message::request(Verb::ReadRepair, msg_svc.next_id(), payload);
-                    match self.strategy {
-                        ReadRepairStrategy::Blocking => {
-                            // Block until repair is acknowledged.
-                            match msg_svc
-                                .send_and_wait(
-                                    repair.target.addr(),
-                                    msg,
-                                    std::time::Duration::from_secs(2),
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    debug!(
-                                        target_ep = %repair.target,
-                                        "Read repair acknowledged"
-                                    )
-                                }
-                                Err(e) => {
-                                    debug!(
-                                        target_ep = %repair.target,
-                                        error = %e,
-                                        "Read repair failed"
-                                    )
-                                }
-                            }
+        if count == 0 {
+            return ReadRepairExecutionResult::empty();
+        }
+
+        info!(
+            count,
+            strategy = ?self.strategy,
+            "Executing read repair mutations"
+        );
+
+        let Some(msg_svc) = messaging else {
+            self.pending.clear();
+            return ReadRepairExecutionResult {
+                attempted: count,
+                acknowledged: count,
+                failed: 0,
+                failed_targets: Vec::new(),
+            };
+        };
+
+        let mut result = ReadRepairExecutionResult {
+            attempted: count,
+            acknowledged: 0,
+            failed: 0,
+            failed_targets: Vec::new(),
+        };
+        let mut still_pending = Vec::new();
+
+        for repair in self.pending.drain(..) {
+            let payload = serialize_repair_payload(&repair);
+            let msg = Message::request(Verb::ReadRepair, msg_svc.next_id(), payload);
+            match self.strategy {
+                ReadRepairStrategy::Blocking => {
+                    match msg_svc
+                        .send_and_wait(repair.target.addr(), msg, timeout)
+                        .await
+                    {
+                        Ok(response) if !response.is_failure() => {
+                            result.acknowledged += 1;
+                            debug!(
+                                target_ep = %repair.target,
+                                "Read repair acknowledged"
+                            );
                         }
-                        ReadRepairStrategy::None => unreachable!("checked by is_enabled"),
+                        Ok(response) => {
+                            result.failed += 1;
+                            result.failed_targets.push(repair.target);
+                            debug!(
+                                target_ep = %repair.target,
+                                verb = %response.header.verb,
+                                "Read repair returned failure response"
+                            );
+                            still_pending.push(repair);
+                        }
+                        Err(e) => {
+                            result.failed += 1;
+                            result.failed_targets.push(repair.target);
+                            debug!(
+                                target_ep = %repair.target,
+                                error = %e,
+                                "Read repair failed"
+                            );
+                            still_pending.push(repair);
+                        }
                     }
                 }
-            } else {
-                self.pending.clear();
+                ReadRepairStrategy::None => unreachable!("checked by is_enabled"),
             }
         }
-        count
+
+        self.pending = still_pending;
+        result
     }
 
     /// Number of pending repairs.
     pub fn pending_count(&self) -> usize {
         self.pending.len()
+    }
+}
+
+/// Queue-backed scheduler for asynchronous read repair dispatch.
+///
+/// The read path can enqueue repair mutations after response reconciliation and
+/// let a background worker call `drain_once`. Failed repairs are placed back on
+/// the queue in order, so transient internode failures do not silently discard
+/// repair work.
+#[derive(Clone)]
+pub struct AsyncReadRepairScheduler {
+    strategy: ReadRepairStrategy,
+    pending: Arc<Mutex<VecDeque<ReadRepairMutation>>>,
+}
+
+impl AsyncReadRepairScheduler {
+    pub fn new(strategy: ReadRepairStrategy) -> Self {
+        Self {
+            strategy,
+            pending: Arc::new(Mutex::new(VecDeque::new())),
+        }
+    }
+
+    /// Enqueue one read repair mutation.
+    pub fn enqueue(&self, repair: ReadRepairMutation) {
+        if self.strategy == ReadRepairStrategy::None {
+            return;
+        }
+
+        self.pending
+            .lock()
+            .expect("read repair scheduler lock")
+            .push_back(repair);
+    }
+
+    /// Move all staged repairs from a handler into the async scheduler.
+    pub fn enqueue_from_handler(&self, handler: &mut ReadRepairHandler) -> usize {
+        if self.strategy == ReadRepairStrategy::None {
+            handler.pending.clear();
+            return 0;
+        }
+
+        let mut pending = self.pending.lock().expect("read repair scheduler lock");
+        let count = handler.pending.len();
+        pending.extend(handler.pending.drain(..));
+        count
+    }
+
+    /// Number of queued repairs.
+    pub fn pending_count(&self) -> usize {
+        self.pending
+            .lock()
+            .expect("read repair scheduler lock")
+            .len()
+    }
+
+    /// Attempt one async repair pass.
+    ///
+    /// This drains the current queue snapshot, dispatches it using the same
+    /// live-internode semantics as `ReadRepairHandler`, and requeues failures.
+    pub async fn drain_once(
+        &self,
+        messaging: Option<Arc<MessagingService>>,
+        timeout: Duration,
+    ) -> ReadRepairExecutionResult {
+        let repairs: Vec<ReadRepairMutation> = {
+            let mut pending = self.pending.lock().expect("read repair scheduler lock");
+            pending.drain(..).collect()
+        };
+
+        if repairs.is_empty() {
+            return ReadRepairExecutionResult::empty();
+        }
+
+        let mut handler = ReadRepairHandler::new(self.strategy);
+        handler.pending = repairs;
+        let result = handler
+            .execute_repairs_with_timeout(messaging, timeout)
+            .await;
+
+        if !handler.pending.is_empty() {
+            self.pending
+                .lock()
+                .expect("read repair scheduler lock")
+                .extend(handler.pending);
+        }
+
+        result
     }
 }
 
@@ -270,6 +428,13 @@ mod tests {
         ))
     }
 
+    fn free_addr() -> SocketAddr {
+        std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    }
+
     #[test]
     fn read_repair_strategy_parse() {
         assert_eq!(
@@ -321,6 +486,161 @@ mod tests {
         let count = handler.execute_repairs(None).await;
         assert_eq!(count, 2);
         assert_eq!(handler.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn execute_repairs_with_timeout_retains_failed_repairs() {
+        let mut handler = ReadRepairHandler::new(ReadRepairStrategy::Blocking);
+        let messaging = Arc::new(MessagingService::new(free_addr()));
+        let target = Endpoint::new(free_addr());
+
+        handler.stage_repair(
+            target,
+            "ks".into(),
+            "t1".into(),
+            b"pk".to_vec(),
+            PartitionData::new(),
+        );
+
+        let result = handler
+            .execute_repairs_with_timeout(Some(messaging), Duration::from_millis(1))
+            .await;
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 0);
+        assert_eq!(result.failed, 1);
+        assert_eq!(result.failed_targets, vec![target]);
+        assert_eq!(handler.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_repairs_with_timeout_treats_failure_response_as_failure() {
+        let remote_addr = free_addr();
+        let remote_service = Arc::new(MessagingService::new(remote_addr));
+        remote_service.register_handler(
+            Verb::ReadRepair,
+            Arc::new(|msg| Some(Message::failure(msg.header.message_id, b"nope".to_vec()))),
+        );
+        Arc::clone(&remote_service).start_listener().await.unwrap();
+
+        let mut handler = ReadRepairHandler::new(ReadRepairStrategy::Blocking);
+        let messaging = Arc::new(MessagingService::new(free_addr()));
+        let target = Endpoint::new(remote_addr);
+        handler.stage_repair(
+            target,
+            "ks".into(),
+            "t1".into(),
+            b"pk".to_vec(),
+            PartitionData::new(),
+        );
+
+        let result = handler
+            .execute_repairs_with_timeout(Some(messaging), Duration::from_secs(1))
+            .await;
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 0);
+        assert_eq!(result.failed, 1);
+        assert_eq!(handler.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_repairs_with_timeout_clears_acknowledged_repairs() {
+        let remote_addr = free_addr();
+        let remote_service = Arc::new(MessagingService::new(remote_addr));
+        remote_service.register_handler(
+            Verb::ReadRepair,
+            Arc::new(|msg| {
+                Some(Message::response(
+                    msg.header.message_id,
+                    Verb::ReadRepairResponse,
+                    Vec::new(),
+                ))
+            }),
+        );
+        Arc::clone(&remote_service).start_listener().await.unwrap();
+
+        let mut handler = ReadRepairHandler::new(ReadRepairStrategy::Blocking);
+        let messaging = Arc::new(MessagingService::new(free_addr()));
+        handler.stage_repair(
+            Endpoint::new(remote_addr),
+            "ks".into(),
+            "t1".into(),
+            b"pk".to_vec(),
+            PartitionData::new(),
+        );
+
+        let result = handler
+            .execute_repairs_with_timeout(Some(messaging), Duration::from_secs(1))
+            .await;
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(handler.pending_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn async_scheduler_requeues_failed_repairs() {
+        let scheduler = AsyncReadRepairScheduler::new(ReadRepairStrategy::Blocking);
+        let messaging = Arc::new(MessagingService::new(free_addr()));
+        let mut repair = make_repair_mutation();
+        repair.target = Endpoint::new(free_addr());
+        scheduler.enqueue(repair);
+
+        let result = scheduler
+            .drain_once(Some(messaging), Duration::from_millis(1))
+            .await;
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 0);
+        assert_eq!(result.failed, 1);
+        assert_eq!(scheduler.pending_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_scheduler_clears_acknowledged_repairs() {
+        let remote_addr = free_addr();
+        let remote_service = Arc::new(MessagingService::new(remote_addr));
+        remote_service.register_handler(
+            Verb::ReadRepair,
+            Arc::new(|msg| {
+                Some(Message::response(
+                    msg.header.message_id,
+                    Verb::ReadRepairResponse,
+                    Vec::new(),
+                ))
+            }),
+        );
+        Arc::clone(&remote_service).start_listener().await.unwrap();
+
+        let scheduler = AsyncReadRepairScheduler::new(ReadRepairStrategy::Blocking);
+        let messaging = Arc::new(MessagingService::new(free_addr()));
+        let mut repair = make_repair_mutation();
+        repair.target = Endpoint::new(remote_addr);
+        scheduler.enqueue(repair);
+
+        let result = scheduler
+            .drain_once(Some(messaging), Duration::from_secs(1))
+            .await;
+
+        assert_eq!(result.attempted, 1);
+        assert_eq!(result.acknowledged, 1);
+        assert_eq!(result.failed, 0);
+        assert_eq!(scheduler.pending_count(), 0);
+    }
+
+    #[test]
+    fn async_scheduler_moves_repairs_from_handler() {
+        let scheduler = AsyncReadRepairScheduler::new(ReadRepairStrategy::Blocking);
+        let mut handler = ReadRepairHandler::new(ReadRepairStrategy::Blocking);
+
+        handler.pending.push(make_repair_mutation());
+        handler.pending.push(make_repair_mutation());
+
+        assert_eq!(scheduler.enqueue_from_handler(&mut handler), 2);
+        assert_eq!(handler.pending_count(), 0);
+        assert_eq!(scheduler.pending_count(), 2);
     }
 
     #[test]

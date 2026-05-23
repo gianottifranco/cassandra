@@ -195,7 +195,6 @@ impl StreamSender {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::protocol::WirePartitions;
     use crate::transfer::{ChecksumAlgorithm, StreamTransfer};
     use cassandra_storage::memtable::partition::{Cell, PartitionData, Row};

@@ -17,6 +17,8 @@ use crate::compaction::merge_partitions;
 use crate::memtable::partition::PartitionData;
 use crate::sstable::format::SSTableId;
 
+pub type CompactedPartitions = Vec<(Vec<u8>, PartitionData)>;
+
 // ─── CompactionContext ──────────────────────────────────────────────────────
 
 /// Input parameters that accompany every compaction execution.
@@ -64,8 +66,8 @@ pub trait CompactionTask: Send + Sync {
     fn execute(
         &self,
         ctx: &CompactionContext,
-        partitions: Vec<Vec<(Vec<u8>, PartitionData)>>,
-    ) -> Result<(Vec<(Vec<u8>, PartitionData)>, CompactionResult), CompactionError>;
+        partitions: Vec<CompactedPartitions>,
+    ) -> Result<(CompactedPartitions, CompactionResult), CompactionError>;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -79,7 +81,7 @@ fn check_cancelled(ctx: &CompactionContext) -> Result<(), CompactionError> {
 }
 
 /// Count total partitions across all sources.
-fn count_input_partitions(sources: &[Vec<(Vec<u8>, PartitionData)>]) -> usize {
+fn count_input_partitions(sources: &[CompactedPartitions]) -> usize {
     sources.iter().map(|s| s.len()).sum()
 }
 

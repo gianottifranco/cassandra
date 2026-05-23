@@ -46,7 +46,8 @@ pub mod version_matrix;
 #[cfg(test)]
 mod tests {
     #[test]
-    fn crate_compiles() {
-        assert!(true);
+    fn exported_modules_are_reachable() {
+        let supported = crate::version_matrix::supported_paths();
+        assert!(!supported.is_empty());
     }
 }

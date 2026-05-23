@@ -225,16 +225,11 @@ mod tests {
 
         let svc = Arc::clone(&seed_messaging);
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let svc2 = Arc::clone(&svc);
-                        tokio::spawn(async move {
-                            let _ = svc2.dispatch_on_stream(stream).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let svc2 = Arc::clone(&svc);
+                tokio::spawn(async move {
+                    let _ = svc2.dispatch_on_stream(stream).await;
+                });
             }
         });
 

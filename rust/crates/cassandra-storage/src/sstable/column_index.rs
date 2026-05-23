@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::needless_range_loop)]
+
 //! Partition-internal row index blocks.
 //!
 //! ## Java Oracle

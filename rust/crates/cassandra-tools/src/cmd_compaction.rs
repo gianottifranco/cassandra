@@ -87,8 +87,8 @@ pub fn compaction_stats(client: &AdminClient) {
                     println!("Active compaction remaining time :        n/a");
                 } else {
                     println!(
-                        "{:<12} {:<20} {:<20} {:<12} {:<12} {}",
-                        "compaction type", "keyspace", "table", "completed", "total", "unit"
+                        "{:<12} {:<20} {:<20} {:<12} {:<12} unit",
+                        "compaction type", "keyspace", "table", "completed", "total"
                     );
                     for c in compactions {
                         let ctype = c.get("task_type").and_then(|v| v.as_str()).unwrap_or("?");
@@ -127,14 +127,8 @@ pub fn compaction_history(client: &AdminClient) {
                     return;
                 }
                 println!(
-                    "{:<38} {:<20} {:<20} {:<12} {:<12} {:<12} {}",
-                    "id",
-                    "keyspace",
-                    "table",
-                    "compacted_at",
-                    "bytes_in",
-                    "bytes_out",
-                    "rows_merged"
+                    "{:<38} {:<20} {:<20} {:<12} {:<12} {:<12} rows_merged",
+                    "id", "keyspace", "table", "compacted_at", "bytes_in", "bytes_out"
                 );
                 for entry in history {
                     let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("?");

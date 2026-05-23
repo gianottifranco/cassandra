@@ -59,7 +59,7 @@ mod tests {
     #[test]
     fn result_type_works() {
         let ok: AccordResult<u32> = Ok(42);
-        assert_eq!(ok.unwrap(), 42);
+        assert!(matches!(ok, Ok(42)));
 
         let err: AccordResult<u32> = Err(AccordError::Disabled);
         assert!(err.is_err());

@@ -16,7 +16,7 @@ use bytes::{Bytes, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
 use cassandra_native_protocol::frame::{
-    Frame, FrameCodec, FrameHeader, Opcode, PROTOCOL_V4, RESPONSE_FLAG, response_frame,
+    Frame, FrameCodec, FrameHeader, Opcode, PROTOCOL_V4, response_frame,
 };
 
 fn make_query_body() -> Bytes {

@@ -219,7 +219,7 @@ fn compaction_iterator_merge_integration() {
     assert_eq!(result[2].0, b"c");
 
     // "a" should have the newer value (ts=200)
-    let row_a = result[0].1.rows.get(&b"ck1".to_vec()).unwrap();
+    let row_a = result[0].1.rows.get(b"ck1".as_slice()).unwrap();
     assert_eq!(row_a.cells[0].value.as_deref(), Some(b"new".as_slice()));
 }
 

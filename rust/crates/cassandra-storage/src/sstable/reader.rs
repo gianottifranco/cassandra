@@ -22,7 +22,13 @@ use super::bloom::BloomFilter;
 use super::format::*;
 use super::key_cache::KeyCache;
 use super::metadata::MetadataSerializer;
+use super::tombstone_serializer::{
+    PARTITION_DELETION_MARKER, RANGE_TOMBSTONE_BOUND_MARKER, read_partition_deletion,
+    read_range_tombstone_marker,
+};
 use crate::memtable::partition::{Cell, PartitionData, Row};
+use crate::partitions::filtered_partition::FilteredPartition;
+use crate::rows::unfiltered::{RowData, Unfiltered};
 
 /// Index entry loaded from Index.db.
 #[derive(Debug, Clone)]
@@ -139,6 +145,16 @@ impl SSTableReader {
             if marker == END_OF_PARTITION {
                 break;
             }
+            if marker == PARTITION_DELETION_MARKER {
+                let deletion = read_partition_deletion(&mut reader)?;
+                partition
+                    .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                continue;
+            }
+            if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                let _ = read_range_tombstone_marker(&mut reader)?;
+                continue;
+            }
             if marker != ROW_MARKER {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -158,6 +174,38 @@ impl SSTableReader {
         }
 
         Ok(Some(partition))
+    }
+
+    /// Read a single partition by key as a materialized unfiltered stream.
+    ///
+    /// Unlike [`Self::get_partition`], this preserves range-tombstone markers
+    /// instead of requiring the simplified `PartitionData` representation.
+    pub fn get_filtered_partition(
+        &self,
+        partition_key: &[u8],
+    ) -> io::Result<Option<FilteredPartition>> {
+        if !self.bloom.might_contain(partition_key) {
+            return Ok(None);
+        }
+
+        let offset = match self
+            .index
+            .binary_search_by(|entry| entry.partition_key.as_slice().cmp(partition_key))
+        {
+            Ok(pos) => self.index[pos].data_offset,
+            Err(_) => return Ok(None),
+        };
+
+        let data_path = self.descriptor.component_path(Component::Data);
+        let mut reader = BufReader::new(File::open(&data_path)?);
+        reader.seek(SeekFrom::Start(offset))?;
+
+        let pk = read_bytes(&mut reader)?;
+        if pk != partition_key {
+            return Ok(None);
+        }
+
+        read_filtered_partition_body(pk, &mut reader).map(Some)
     }
 
     /// Iterate all partitions in this SSTable (for compaction / merge).
@@ -198,6 +246,16 @@ impl SSTableReader {
                 if marker == END_OF_PARTITION {
                     break;
                 }
+                if marker == PARTITION_DELETION_MARKER {
+                    let deletion = read_partition_deletion(&mut reader)?;
+                    partition
+                        .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                    continue;
+                }
+                if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                    let _ = read_range_tombstone_marker(&mut reader)?;
+                    continue;
+                }
                 if marker != ROW_MARKER {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -209,6 +267,38 @@ impl SSTableReader {
             }
 
             result.push((pk, partition));
+        }
+
+        Ok(result)
+    }
+
+    /// Iterate all partitions as materialized unfiltered streams.
+    pub fn iter_filtered_partitions(&self) -> io::Result<Vec<FilteredPartition>> {
+        let data_path = self.descriptor.component_path(Component::Data);
+        let mut reader = BufReader::new(File::open(&data_path)?);
+        reader.seek(SeekFrom::Start(5))?;
+
+        let mut result = Vec::new();
+        let file_size = std::fs::metadata(&data_path)?.len();
+
+        loop {
+            let pos = reader.stream_position()?;
+            if pos + 4 >= file_size {
+                break;
+            }
+
+            let pk_len = match reader.read_u32::<BigEndian>() {
+                Ok(l) => l,
+                Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            };
+            if pk_len == 0 {
+                break;
+            }
+
+            let mut pk = vec![0u8; pk_len as usize];
+            reader.read_exact(&mut pk)?;
+            result.push(read_filtered_partition_body(pk, &mut reader)?);
         }
 
         Ok(result)
@@ -296,6 +386,52 @@ pub fn read_row_from_reader<R: Read>(reader: &mut R) -> io::Result<Row> {
     read_row(reader)
 }
 
+pub(crate) fn read_filtered_partition_body<R: Read>(
+    partition_key: Vec<u8>,
+    reader: &mut R,
+) -> io::Result<FilteredPartition> {
+    let mut partition_deletion = cassandra_common::tombstone::DeletionTime::LIVE;
+    let mut static_row = None;
+    let mut items = Vec::new();
+
+    loop {
+        let marker = reader.read_u8()?;
+        if marker == END_OF_PARTITION {
+            break;
+        }
+        if marker == PARTITION_DELETION_MARKER {
+            partition_deletion = read_partition_deletion(reader)?;
+            continue;
+        }
+        if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+            items.push(Unfiltered::Marker(read_range_tombstone_marker(reader)?));
+            continue;
+        }
+        if marker != ROW_MARKER {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("unexpected marker: {marker:#x}"),
+            ));
+        }
+
+        let row = read_row(reader)?;
+        let mut row_data = RowData::from(&row);
+        if row_data.clustering_key.is_empty() {
+            row_data.is_static = true;
+            static_row = Some(row_data);
+        } else {
+            items.push(Unfiltered::Row(row_data));
+        }
+    }
+
+    Ok(FilteredPartition {
+        partition_key,
+        partition_deletion,
+        static_row,
+        items,
+    })
+}
+
 fn read_row<R: Read>(reader: &mut R) -> io::Result<Row> {
     // Clustering key
     let ck = read_bytes(reader)?;
@@ -372,7 +508,12 @@ fn read_cell<R: Read>(reader: &mut R) -> io::Result<Cell> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rows::unfiltered::{ClusteringBound, ClusteringBoundKind, RangeTombstoneMarker};
+    use crate::sstable::tombstone_serializer::write_range_tombstone_marker;
     use crate::sstable::writer::SSTableWriter;
+    use cassandra_common::tombstone::DeletionTime;
+    use crc32fast::Hasher;
+    use std::fs;
     use tempfile::TempDir;
 
     fn sample_partitions() -> Vec<(Vec<u8>, PartitionData)> {
@@ -397,6 +538,29 @@ mod tests {
             partitions.push((vec![i], pd));
         }
         partitions
+    }
+
+    fn inject_range_tombstone_marker(desc: &SSTableDescriptor, marker: &RangeTombstoneMarker) {
+        let data_path = desc.component_path(Component::Data);
+        let data = fs::read(&data_path).unwrap();
+        assert!(data.len() > 5);
+        let crc_offset = data.len() - 4;
+        let end_marker_offset = crc_offset - 1;
+        assert_eq!(data[end_marker_offset], END_OF_PARTITION);
+
+        let mut marker_bytes = Vec::new();
+        let mut marker_crc = Hasher::new();
+        write_range_tombstone_marker(&mut marker_bytes, marker, &mut marker_crc).unwrap();
+
+        let mut rewritten = Vec::new();
+        rewritten.extend_from_slice(&data[..end_marker_offset]);
+        rewritten.extend_from_slice(&marker_bytes);
+        rewritten.push(END_OF_PARTITION);
+
+        let mut crc = Hasher::new();
+        crc.update(&rewritten);
+        rewritten.extend_from_slice(&crc.finalize().to_be_bytes());
+        fs::write(data_path, rewritten).unwrap();
     }
 
     #[test]
@@ -504,5 +668,140 @@ mod tests {
         let row = p.rows.get(&b"ck1".to_vec()).unwrap();
         assert!(row.cells[0].is_tombstone);
         assert_eq!(row.cells[0].local_deletion_time, Some(200));
+    }
+
+    #[test]
+    fn partition_tombstone_roundtrip() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(123, 456);
+        pd.apply_row(Row {
+            clustering_key: b"ck1".to_vec(),
+            cells: vec![Cell {
+                column: "x".to_string(),
+                value: Some(b"v".to_vec()),
+                timestamp: 200,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
+            is_tombstone: false,
+            local_deletion_time: None,
+        });
+
+        let partitions = vec![(b"pk1".to_vec(), pd)];
+        SSTableWriter::new(desc.clone()).write(&partitions).unwrap();
+
+        let reader = SSTableReader::open(desc).unwrap();
+        let p = reader.get_partition(b"pk1").unwrap().unwrap();
+        assert_eq!(p.tombstone_timestamp, Some(123));
+        assert_eq!(p.tombstone_local_deletion_time, Some(456));
+    }
+
+    #[test]
+    fn iter_partitions_preserves_partition_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(321, 654);
+        let partitions = vec![(b"pk1".to_vec(), pd)];
+        SSTableWriter::new(desc.clone()).write(&partitions).unwrap();
+
+        let reader = SSTableReader::open(desc).unwrap();
+        let all = reader.iter_partitions().unwrap();
+        assert_eq!(all[0].1.tombstone_timestamp, Some(321));
+        assert_eq!(all[0].1.tombstone_local_deletion_time, Some(654));
+    }
+
+    #[test]
+    fn filtered_partition_preserves_range_tombstone_marker() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(111, 222);
+        pd.apply_row(Row {
+            clustering_key: b"ck1".to_vec(),
+            cells: vec![Cell {
+                column: "x".to_string(),
+                value: Some(b"v".to_vec()),
+                timestamp: 300,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
+            is_tombstone: false,
+            local_deletion_time: None,
+        });
+        SSTableWriter::new(desc.clone())
+            .write(&[(b"pk1".to_vec(), pd)])
+            .unwrap();
+
+        let marker = RangeTombstoneMarker::Boundary {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveEnd,
+                values: b"ck2".to_vec(),
+            },
+            close_deletion: DeletionTime::new(400, 444),
+            open_deletion: DeletionTime::new(500, 555),
+        };
+        inject_range_tombstone_marker(&desc, &marker);
+
+        let reader = SSTableReader::open(desc).unwrap();
+        let filtered = reader.get_filtered_partition(b"pk1").unwrap().unwrap();
+        assert_eq!(filtered.partition_key, b"pk1");
+        assert_eq!(filtered.partition_deletion, DeletionTime::new(111, 222));
+        assert_eq!(filtered.row_count(), 1);
+        assert!(filtered.items.iter().any(|item| matches!(
+            item,
+            Unfiltered::Marker(decoded) if decoded == &marker
+        )));
+
+        let simplified = reader.get_partition(b"pk1").unwrap().unwrap();
+        assert_eq!(simplified.rows.len(), 1);
+    }
+
+    #[test]
+    fn iter_filtered_partitions_preserves_range_tombstone_marker() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+
+        let mut pd = PartitionData::new();
+        pd.apply_row(Row {
+            clustering_key: b"ck1".to_vec(),
+            cells: vec![Cell {
+                column: "x".to_string(),
+                value: Some(b"v".to_vec()),
+                timestamp: 300,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
+            is_tombstone: false,
+            local_deletion_time: None,
+        });
+        SSTableWriter::new(desc.clone())
+            .write(&[(b"pk1".to_vec(), pd)])
+            .unwrap();
+
+        let marker = RangeTombstoneMarker::Open {
+            bound: ClusteringBound {
+                kind: ClusteringBoundKind::InclusiveStart,
+                values: b"ck1".to_vec(),
+            },
+            deletion: DeletionTime::new(400, 444),
+        };
+        inject_range_tombstone_marker(&desc, &marker);
+
+        let reader = SSTableReader::open(desc).unwrap();
+        let partitions = reader.iter_filtered_partitions().unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert!(partitions[0].items.iter().any(|item| matches!(
+            item,
+            Unfiltered::Marker(decoded) if decoded == &marker
+        )));
     }
 }

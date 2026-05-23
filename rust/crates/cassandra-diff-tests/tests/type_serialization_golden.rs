@@ -405,7 +405,6 @@ fn golden_udt() {
 #[test]
 fn comparison_ordering_int() {
     use cassandra_types::comparator::compare_bytes;
-    use std::cmp::Ordering;
 
     let values: Vec<i32> = vec![i32::MIN, -100, -1, 0, 1, 100, i32::MAX];
     for i in 0..values.len() {
@@ -427,7 +426,7 @@ fn comparison_ordering_int() {
 fn comparison_ordering_text() {
     use cassandra_types::comparator::compare_bytes;
 
-    let values = vec!["", "a", "aa", "ab", "b", "z"];
+    let values = ["", "a", "aa", "ab", "b", "z"];
     for i in 0..values.len() {
         for j in 0..values.len() {
             let expected = values[i].cmp(values[j]);

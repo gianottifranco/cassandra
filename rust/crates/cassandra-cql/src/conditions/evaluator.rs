@@ -7,6 +7,7 @@
 
 use crate::ast::{Literal, Relation, RelationOp, Term};
 use cassandra_types::CqlType;
+use cassandra_types::codec::CqlValue;
 use std::collections::HashMap;
 
 /// Result of evaluating IF conditions.
@@ -77,10 +78,21 @@ impl ConditionEvaluator {
 
             let current_value = row.get(col_idx).and_then(|v| v.as_deref());
             let cql_type = column_types.get(&condition.column);
-            let matches = if condition.op == RelationOp::In {
+            let matches = if let Term::CollectionElement { key, value } = &condition.value {
+                eval_collection_element_condition(condition.op, current_value, key, value, cql_type)
+            } else if condition.op == RelationOp::In {
                 eval_in_condition(current_value, &condition.value)
+            } else if matches!(condition.op, RelationOp::Contains | RelationOp::ContainsKey) {
+                eval_collection_contains_condition(
+                    condition.op,
+                    current_value,
+                    &condition.value,
+                    cql_type,
+                )
             } else {
-                let expected = term_to_bytes(&condition.value);
+                let expected = cql_type
+                    .and_then(|typ| term_to_typed_bytes(&condition.value, typ))
+                    .or_else(|| term_to_bytes(&condition.value));
                 eval_single_condition(condition.op, current_value, expected.as_deref(), cql_type)
             };
 
@@ -141,7 +153,114 @@ fn eval_single_condition(
             (Some(a), Some(b)) => a == b,
             _ => false,
         },
-        _ => false, // Contains, ContainsKey not used in IF conditions
+        _ => false,
+    }
+}
+
+fn eval_collection_element_condition(
+    op: RelationOp,
+    current: Option<&[u8]>,
+    key: &Term,
+    expected: &Term,
+    cql_type: Option<&CqlType>,
+) -> bool {
+    let (Some(current), Some(cql_type)) = (current, cql_type) else {
+        return false;
+    };
+
+    match cql_type {
+        CqlType::List(inner, _) => {
+            let Some(index) = collection_index(key) else {
+                return false;
+            };
+            let Ok(CqlValue::List(values)) = CqlValue::deserialize_value(cql_type, current) else {
+                return false;
+            };
+            let Some(actual) = values.get(index).map(CqlValue::serialize_value) else {
+                return false;
+            };
+            let expected = term_to_typed_bytes(expected, inner).or_else(|| term_to_bytes(expected));
+            eval_single_condition(op, Some(&actual), expected.as_deref(), Some(inner))
+        }
+        CqlType::Map(key_type, value_type, _) => {
+            let Some(key_value) = term_to_cql_value(key, key_type) else {
+                return false;
+            };
+            let Ok(CqlValue::Map(entries)) = CqlValue::deserialize_value(cql_type, current) else {
+                return false;
+            };
+            let Some((_, actual_value)) = entries
+                .iter()
+                .find(|(candidate, _)| candidate == &key_value)
+            else {
+                return false;
+            };
+            let actual = actual_value.serialize_value();
+            let expected =
+                term_to_typed_bytes(expected, value_type).or_else(|| term_to_bytes(expected));
+            eval_single_condition(op, Some(&actual), expected.as_deref(), Some(value_type))
+        }
+        _ => false,
+    }
+}
+
+fn eval_collection_contains_condition(
+    op: RelationOp,
+    current: Option<&[u8]>,
+    expected: &Term,
+    cql_type: Option<&CqlType>,
+) -> bool {
+    let (Some(current), Some(cql_type)) = (current, cql_type) else {
+        return false;
+    };
+
+    match (op, cql_type) {
+        (RelationOp::Contains, CqlType::List(inner, _) | CqlType::Set(inner, _)) => {
+            let Some(expected) =
+                term_to_typed_bytes(expected, inner).or_else(|| term_to_bytes(expected))
+            else {
+                return false;
+            };
+            let Ok(value) = CqlValue::deserialize_value(cql_type, current) else {
+                return false;
+            };
+            match value {
+                CqlValue::List(values) | CqlValue::Set(values) => values
+                    .iter()
+                    .any(|candidate| candidate.serialize_value() == expected),
+                _ => false,
+            }
+        }
+        (RelationOp::Contains, CqlType::Map(_, value_type, _)) => {
+            let Some(expected) =
+                term_to_typed_bytes(expected, value_type).or_else(|| term_to_bytes(expected))
+            else {
+                return false;
+            };
+            let Ok(CqlValue::Map(entries)) = CqlValue::deserialize_value(cql_type, current) else {
+                return false;
+            };
+            entries
+                .iter()
+                .any(|(_, value)| value.serialize_value() == expected)
+        }
+        (RelationOp::ContainsKey, CqlType::Map(key_type, _, _)) => {
+            let Some(expected) = term_to_cql_value(expected, key_type) else {
+                return false;
+            };
+            let Ok(CqlValue::Map(entries)) = CqlValue::deserialize_value(cql_type, current) else {
+                return false;
+            };
+            entries.iter().any(|(key, _)| key == &expected)
+        }
+        _ => false,
+    }
+}
+
+fn collection_index(term: &Term) -> Option<usize> {
+    match term {
+        Term::Literal(Literal::Integer(value)) => usize::try_from(*value).ok(),
+        _ => None,
     }
 }
 
@@ -161,6 +280,60 @@ fn term_to_byte_list(term: &Term) -> Vec<Option<Vec<u8>>> {
             values.iter().map(term_to_bytes).collect()
         }
         _ => vec![term_to_bytes(term)],
+    }
+}
+
+fn term_to_typed_bytes(term: &Term, cql_type: &CqlType) -> Option<Vec<u8>> {
+    term_to_cql_value(term, cql_type).map(|value| value.serialize_value())
+}
+
+fn term_to_cql_value(term: &Term, cql_type: &CqlType) -> Option<CqlValue> {
+    match (term, cql_type) {
+        (Term::Literal(Literal::Null), _) => Some(CqlValue::Null),
+        (Term::Literal(Literal::String(value)), CqlType::Ascii) => {
+            Some(CqlValue::Ascii(value.clone()))
+        }
+        (Term::Literal(Literal::String(value)), CqlType::Varchar) => {
+            Some(CqlValue::Varchar(value.clone()))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Bigint) => Some(CqlValue::Bigint(*value)),
+        (Term::Literal(Literal::Integer(value)), CqlType::Counter) => {
+            Some(CqlValue::Counter(*value))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Timestamp) => {
+            Some(CqlValue::Timestamp(*value))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Time) => Some(CqlValue::Time(*value)),
+        (Term::Literal(Literal::Integer(value)), CqlType::Int) => {
+            Some(CqlValue::Int(i32::try_from(*value).ok()?))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Smallint) => {
+            Some(CqlValue::Smallint(i16::try_from(*value).ok()?))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Tinyint) => {
+            Some(CqlValue::Tinyint(i8::try_from(*value).ok()?))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Float) => {
+            Some(CqlValue::Float(*value as f32))
+        }
+        (Term::Literal(Literal::Integer(value)), CqlType::Double) => {
+            Some(CqlValue::Double(*value as f64))
+        }
+        (Term::Literal(Literal::Float(value)), CqlType::Float) => {
+            Some(CqlValue::Float(*value as f32))
+        }
+        (Term::Literal(Literal::Float(value)), CqlType::Double) => Some(CqlValue::Double(*value)),
+        (Term::Literal(Literal::Boolean(value)), CqlType::Boolean) => {
+            Some(CqlValue::Boolean(*value))
+        }
+        (Term::Literal(Literal::Blob(value)), CqlType::Blob) => Some(CqlValue::Blob(value.clone())),
+        (Term::Literal(Literal::Uuid(value)), CqlType::Uuid) => uuid::Uuid::parse_str(value)
+            .ok()
+            .map(|uuid| CqlValue::Uuid(*uuid.as_bytes())),
+        (Term::Literal(Literal::Uuid(value)), CqlType::Timeuuid) => uuid::Uuid::parse_str(value)
+            .ok()
+            .map(|uuid| CqlValue::Timeuuid(*uuid.as_bytes())),
+        _ => None,
     }
 }
 
@@ -326,6 +499,111 @@ mod tests {
 
         let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
         assert!(!result.applied);
+    }
+
+    #[test]
+    fn collection_element_conditions_match_map_and_list_values() {
+        let mut columns = HashMap::new();
+        columns.insert("attrs".to_string(), 0);
+        columns.insert("scores".to_string(), 1);
+        let mut types = HashMap::new();
+        types.insert(
+            "attrs".to_string(),
+            CqlType::Map(
+                Box::new(CqlType::Varchar),
+                Box::new(CqlType::Varchar),
+                false,
+            ),
+        );
+        types.insert(
+            "scores".to_string(),
+            CqlType::List(Box::new(CqlType::Int), false),
+        );
+
+        let row = vec![
+            Some(
+                CqlValue::Map(vec![(
+                    CqlValue::Varchar("state".to_string()),
+                    CqlValue::Varchar("open".to_string()),
+                )])
+                .serialize_value(),
+            ),
+            Some(CqlValue::List(vec![CqlValue::Int(3), CqlValue::Int(7)]).serialize_value()),
+        ];
+        let conditions = vec![
+            Relation {
+                column: "attrs".to_string(),
+                op: RelationOp::Eq,
+                value: Term::CollectionElement {
+                    key: Box::new(Term::Literal(Literal::String("state".to_string()))),
+                    value: Box::new(Term::Literal(Literal::String("open".to_string()))),
+                },
+            },
+            Relation {
+                column: "scores".to_string(),
+                op: RelationOp::Eq,
+                value: Term::CollectionElement {
+                    key: Box::new(Term::Literal(Literal::Integer(1))),
+                    value: Box::new(Term::Literal(Literal::Integer(7))),
+                },
+            },
+        ];
+
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        assert!(result.applied);
+    }
+
+    #[test]
+    fn collection_contains_conditions_match_values_and_map_keys() {
+        let mut columns = HashMap::new();
+        columns.insert("tags".to_string(), 0);
+        columns.insert("attrs".to_string(), 1);
+        let mut types = HashMap::new();
+        types.insert(
+            "tags".to_string(),
+            CqlType::Set(Box::new(CqlType::Varchar), false),
+        );
+        types.insert(
+            "attrs".to_string(),
+            CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
+        );
+
+        let row = vec![
+            Some(
+                CqlValue::Set(vec![
+                    CqlValue::Varchar("hot".to_string()),
+                    CqlValue::Varchar("ready".to_string()),
+                ])
+                .serialize_value(),
+            ),
+            Some(
+                CqlValue::Map(vec![(
+                    CqlValue::Varchar("count".to_string()),
+                    CqlValue::Int(3),
+                )])
+                .serialize_value(),
+            ),
+        ];
+        let conditions = vec![
+            Relation {
+                column: "tags".to_string(),
+                op: RelationOp::Contains,
+                value: Term::Literal(Literal::String("ready".to_string())),
+            },
+            Relation {
+                column: "attrs".to_string(),
+                op: RelationOp::ContainsKey,
+                value: Term::Literal(Literal::String("count".to_string())),
+            },
+            Relation {
+                column: "attrs".to_string(),
+                op: RelationOp::Contains,
+                value: Term::Literal(Literal::Integer(3)),
+            },
+        ];
+
+        let result = ConditionEvaluator::eval_conditions(&conditions, &columns, &types, Some(&row));
+        assert!(result.applied);
     }
 
     #[test]

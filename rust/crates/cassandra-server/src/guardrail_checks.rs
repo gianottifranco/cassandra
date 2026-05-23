@@ -290,6 +290,7 @@ fn count_columns(mutation: &cassandra_coordinator::CoordinatedMutation) -> usize
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
     use cassandra_config::ThresholdGuardrail;

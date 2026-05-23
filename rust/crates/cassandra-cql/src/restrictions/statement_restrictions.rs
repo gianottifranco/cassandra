@@ -139,6 +139,14 @@ mod tests {
             ))
             .add_column(ColumnMetadata::regular("v", CqlType::Varchar))
             .add_column(ColumnMetadata::regular("n", CqlType::Int))
+            .add_column(ColumnMetadata::regular(
+                "tags",
+                CqlType::List(Box::new(CqlType::Int), false),
+            ))
+            .add_column(ColumnMetadata::regular(
+                "attrs",
+                CqlType::Map(Box::new(CqlType::Varchar), Box::new(CqlType::Int), false),
+            ))
             .build()
     }
 
@@ -201,6 +209,33 @@ mod tests {
         assert!(matches!(
             result.non_key_restrictions[0].kind,
             RestrictionKind::Like
+        ));
+    }
+
+    #[test]
+    fn non_key_contains_with_filtering() {
+        let table = test_table();
+        let relations = vec![rel("pk", RelationOp::Eq), rel("tags", RelationOp::Contains)];
+        let result = build(&relations, &table, true).unwrap();
+        assert!(result.needs_filtering);
+        assert!(matches!(
+            result.non_key_restrictions[0].kind,
+            RestrictionKind::Contains
+        ));
+    }
+
+    #[test]
+    fn non_key_contains_key_with_filtering() {
+        let table = test_table();
+        let relations = vec![
+            rel("pk", RelationOp::Eq),
+            rel("attrs", RelationOp::ContainsKey),
+        ];
+        let result = build(&relations, &table, true).unwrap();
+        assert!(result.needs_filtering);
+        assert!(matches!(
+            result.non_key_restrictions[0].kind,
+            RestrictionKind::ContainsKey
         ));
     }
 

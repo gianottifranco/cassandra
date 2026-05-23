@@ -97,6 +97,20 @@ pub fn is_compatible_with(from: &CqlType, to: &CqlType) -> bool {
         (CqlType::Vector(from_inner, from_dims), CqlType::Vector(to_inner, to_dims)) => {
             from_dims == to_dims && is_compatible_with(from_inner, to_inner)
         }
+        (CqlType::Composite(from_types), CqlType::Composite(to_types)) => {
+            from_types.len() >= to_types.len()
+                && from_types
+                    .iter()
+                    .zip(to_types.iter())
+                    .all(|(from, to)| is_compatible_with(from, to))
+        }
+        (CqlType::DynamicComposite(from_aliases), CqlType::DynamicComposite(to_aliases)) => {
+            to_aliases.iter().all(|(alias, to_type)| {
+                from_aliases
+                    .get(alias)
+                    .is_some_and(|from_type| is_compatible_with(from_type, to_type))
+            })
+        }
 
         // Frozen/unfrozen: frozen is compatible with same frozen state
         // Reversed: unwrap and check inner

@@ -256,18 +256,13 @@ impl ReloadableTlsAcceptor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use tempfile::TempDir;
 
     fn generate_self_signed() -> (String, String) {
-        let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        let cert = cert_params
-            .self_signed(&rcgen::KeyPair::generate().unwrap())
-            .unwrap();
         let key_pair = rcgen::KeyPair::generate().unwrap();
-        let cert_params2 = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        let cert2 = cert_params2.self_signed(&key_pair).unwrap();
-        (cert2.pem(), key_pair.serialize_pem())
+        let cert_params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        let cert = cert_params.self_signed(&key_pair).unwrap();
+        (cert.pem(), key_pair.serialize_pem())
     }
 
     fn write_pem_files(dir: &TempDir) -> (PathBuf, PathBuf) {

@@ -5,7 +5,6 @@
 use cassandra_storage::commitlog::{CellMutation, CommitLogConfig, Mutation, MutationRow};
 use cassandra_storage::engine::{EngineConfig, StorageEngine};
 
-use std::sync::Arc;
 use tempfile::TempDir;
 
 fn test_engine(dir: &std::path::Path) -> StorageEngine {

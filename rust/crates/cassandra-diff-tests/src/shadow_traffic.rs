@@ -370,10 +370,7 @@ mod tests {
 
         assert_eq!(report.total_entries, 1);
         assert_eq!(report.errors, 1);
-        assert!(matches!(
-            report.divergences.first().map(|r| &r.status),
-            None
-        ));
+        assert!(report.divergences.first().map(|r| &r.status).is_none());
     }
 
     #[test]

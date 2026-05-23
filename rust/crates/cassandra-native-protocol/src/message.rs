@@ -23,6 +23,9 @@
 use crate::types::Consistency;
 use std::collections::HashMap;
 
+/// CQL version accepted during STARTUP and advertised in SUPPORTED.
+pub const SUPPORTED_CQL_VERSION: &str = "3.4.7";
+
 /// Parsed request/response message.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -75,8 +78,9 @@ pub struct QueryMessage {
 #[derive(Debug, Clone)]
 pub struct QueryParams {
     pub consistency: Consistency,
-    pub flags: u8,
+    pub flags: u32,
     pub values: Vec<Option<Vec<u8>>>,
+    pub value_names: Option<Vec<String>>,
     pub page_size: Option<i32>,
     pub paging_state: Option<Vec<u8>>,
     pub serial_consistency: Option<Consistency>,
@@ -91,6 +95,7 @@ impl Default for QueryParams {
             consistency: Consistency::One,
             flags: 0,
             values: Vec::new(),
+            value_names: None,
             page_size: None,
             paging_state: None,
             serial_consistency: None,
@@ -103,20 +108,23 @@ impl Default for QueryParams {
 
 /// Query parameter flags.
 pub mod query_flags {
-    pub const VALUES: u8 = 0x01;
-    pub const SKIP_METADATA: u8 = 0x02;
-    pub const PAGE_SIZE: u8 = 0x04;
-    pub const PAGING_STATE: u8 = 0x08;
-    pub const SERIAL_CONSISTENCY: u8 = 0x10;
-    pub const TIMESTAMP: u8 = 0x20;
-    pub const NAMES_FOR_VALUES: u8 = 0x40;
-    pub const KEYSPACE: u8 = 0x80; // v5+
+    pub const VALUES: u32 = 0x01;
+    pub const SKIP_METADATA: u32 = 0x02;
+    pub const PAGE_SIZE: u32 = 0x04;
+    pub const PAGING_STATE: u32 = 0x08;
+    pub const SERIAL_CONSISTENCY: u32 = 0x10;
+    pub const TIMESTAMP: u32 = 0x20;
+    pub const NAMES_FOR_VALUES: u32 = 0x40;
+    pub const KEYSPACE: u32 = 0x80; // v5+
+    pub const NOW_IN_SECONDS: u32 = 0x100; // v5+
 }
 
 #[derive(Debug, Clone)]
 pub struct PrepareMessage {
     pub query: String,
     pub keyspace: Option<String>,
+    /// Custom payload sent by the client (frame flag CUSTOM_PAYLOAD).
+    pub custom_payload: Option<HashMap<String, Vec<u8>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -135,6 +143,8 @@ pub struct BatchMessage {
     pub consistency: Consistency,
     pub serial_consistency: Option<Consistency>,
     pub timestamp: Option<i64>,
+    pub keyspace: Option<String>,
+    pub now_in_seconds: Option<i32>,
     /// Custom payload sent by the client (frame flag CUSTOM_PAYLOAD).
     pub custom_payload: Option<HashMap<String, Vec<u8>>>,
 }
@@ -333,6 +343,7 @@ impl ColumnType {
             CqlType::Tinyint => ColumnType::Tinyint,
             CqlType::Duration => ColumnType::Duration,
             CqlType::Empty => ColumnType::Blob,
+            CqlType::Composite(_) | CqlType::DynamicComposite(_) => ColumnType::Blob,
             CqlType::List(inner, _) => ColumnType::List(Box::new(Self::from_cql_type(inner))),
             CqlType::Set(inner, _) => ColumnType::Set(Box::new(Self::from_cql_type(inner))),
             CqlType::Map(k, v, _) => ColumnType::Map(

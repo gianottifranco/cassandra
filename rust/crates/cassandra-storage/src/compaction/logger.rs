@@ -79,9 +79,8 @@ impl CompactionLogger {
     /// `tracing::info!` event (if enabled).
     pub fn log_event(&self, event: &CompactionEvent) -> std::io::Result<()> {
         if let Some(ref path) = self.log_path {
-            let json = serde_json::to_string(event).map_err(|e| {
-                std::io::Error::new(std::io::ErrorKind::Other, format!("JSON error: {e}"))
-            })?;
+            let json = serde_json::to_string(event)
+                .map_err(|e| std::io::Error::other(format!("JSON error: {e}")))?;
             let mut file = OpenOptions::new().create(true).append(true).open(path)?;
             writeln!(file, "{}", json)?;
         }

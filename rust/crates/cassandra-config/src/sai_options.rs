@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::field_reassign_with_default)]
+
 //! Storage Attached Index (SAI) configuration options.
 //!
 //! ## Java Oracle
@@ -124,7 +126,7 @@ pub fn validate_index_definition(
     // Validate vector_dimensions range
     if let Some(dims_str) = options.get("vector_dimensions") {
         match dims_str.parse::<u32>() {
-            Ok(dims) if dims == 0 => {
+            Ok(0) => {
                 warnings.push("vector_dimensions must be > 0".to_string());
             }
             Ok(dims) if dims > 8192 => {

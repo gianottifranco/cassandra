@@ -17,9 +17,10 @@ use cassandra_common::Token;
 use crate::coordinator::RepairType;
 
 /// How repair sessions are parallelized across replicas.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RepairParallelism {
     /// One range repaired at a time across the cluster.
+    #[default]
     Sequential,
     /// All ranges repaired concurrently.
     Parallel,
@@ -34,12 +35,6 @@ impl fmt::Display for RepairParallelism {
             Self::Parallel => write!(f, "parallel"),
             Self::DatacenterAware => write!(f, "dc_parallel"),
         }
-    }
-}
-
-impl Default for RepairParallelism {
-    fn default() -> Self {
-        Self::Sequential
     }
 }
 

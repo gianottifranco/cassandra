@@ -582,7 +582,7 @@ mod tests {
                 b"pk",
                 b"version=2".to_vec(),
                 || async { Some(b"version=1".to_vec()) },
-                |current| current.map_or(false, |v| v == b"version=1"),
+                |current| current.is_some_and(|v| v == b"version=1"),
             )
             .await;
 

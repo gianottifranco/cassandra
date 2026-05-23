@@ -121,7 +121,7 @@ pub fn run(file: &str, size_mb: u64) {
 
     // Calculate how many output files we need and partitions per file
     let num_files = ((file_size as f64) / (target_bytes as f64)).ceil() as usize;
-    let partitions_per_file = (total_partitions + num_files - 1) / num_files;
+    let partitions_per_file = total_partitions.div_ceil(num_files);
 
     println!(
         "Splitting {} partitions into ~{} file(s) ({} partitions each)",

@@ -169,6 +169,16 @@ impl RoleManager for SystemAuthRoleManager {
                 is_tombstone: false,
             });
         }
+        if let Some(hashed_password) = options.hashed_password {
+            cells.push(CellMutation {
+                column: "salted_hash".into(),
+                value: Some(hashed_password.as_bytes().to_vec()),
+                timestamp: Self::now(),
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            });
+        }
 
         if cells.is_empty() {
             return Ok(());

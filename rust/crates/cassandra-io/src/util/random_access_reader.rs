@@ -126,7 +126,7 @@ impl RandomAccessReader {
             let holder = self
                 .rebufferer
                 .rebuffer(self.position)
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                .map_err(|e| io::Error::other(e.to_string()))?;
             self.buffer = Some(holder);
         }
 
@@ -341,14 +341,14 @@ mod tests {
         let mut data = Vec::new();
         use byteorder::WriteBytesExt;
         data.write_i16::<BigEndian>(1234).unwrap();
-        data.write_f32::<BigEndian>(3.14).unwrap();
-        data.write_f64::<BigEndian>(2.718281828).unwrap();
+        data.write_f32::<BigEndian>(std::f32::consts::PI).unwrap();
+        data.write_f64::<BigEndian>(std::f64::consts::E).unwrap();
 
         let (_tmp, mut reader) = make_reader(&data, 64);
 
         assert_eq!(reader.read_short().unwrap(), 1234);
-        assert!((reader.read_float().unwrap() - 3.14).abs() < 1e-5);
-        assert!((reader.read_double().unwrap() - 2.718281828).abs() < 1e-9);
+        assert!((reader.read_float().unwrap() - std::f32::consts::PI).abs() < 1e-5);
+        assert!((reader.read_double().unwrap() - std::f64::consts::E).abs() < 1e-9);
     }
 
     #[test]

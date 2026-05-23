@@ -501,6 +501,9 @@ impl RoleManager for PersistentRoleManager {
         if let Some(password) = options.password {
             role.hashed_password = Some(hash_password(&password)?);
         }
+        if let Some(hashed_password) = options.hashed_password {
+            role.hashed_password = Some(hashed_password);
+        }
         if let Some(network_permissions) = options.network_permissions {
             role.network_permissions = Some(network_permissions);
         }

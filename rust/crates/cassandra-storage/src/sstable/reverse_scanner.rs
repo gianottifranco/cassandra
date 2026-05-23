@@ -17,6 +17,10 @@ use byteorder::{BigEndian, ReadBytesExt};
 
 use super::format::*;
 use super::reader::read_row_from_reader;
+use super::tombstone_serializer::{
+    PARTITION_DELETION_MARKER, RANGE_TOMBSTONE_BOUND_MARKER, read_partition_deletion,
+    read_range_tombstone_marker,
+};
 use crate::memtable::partition::PartitionData;
 
 /// A partition returned by the reverse scanner.
@@ -142,6 +146,16 @@ impl ReverseScanner {
             let marker = reader.read_u8()?;
             if marker == END_OF_PARTITION {
                 break;
+            }
+            if marker == PARTITION_DELETION_MARKER {
+                let deletion = read_partition_deletion(&mut reader)?;
+                partition
+                    .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                continue;
+            }
+            if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                let _ = read_range_tombstone_marker(&mut reader)?;
+                continue;
             }
             if marker != ROW_MARKER {
                 return Err(io::Error::new(
@@ -280,5 +294,22 @@ mod tests {
             assert_eq!(f.0, r.0);
             assert_eq!(f.1.rows.len(), r.1.rows.len());
         }
+    }
+
+    #[test]
+    fn reverse_scan_preserves_partition_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(123, 456);
+        SSTableWriter::new(desc.clone())
+            .write(&[(b"pk".to_vec(), pd)])
+            .unwrap();
+
+        let mut scanner = ReverseScanner::open(desc).unwrap();
+        let partition = scanner.next_partition().unwrap().unwrap();
+        assert_eq!(partition.data.tombstone_timestamp, Some(123));
+        assert_eq!(partition.data.tombstone_local_deletion_time, Some(456));
     }
 }

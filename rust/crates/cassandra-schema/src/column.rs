@@ -103,6 +103,9 @@ pub struct ColumnMetadata {
     /// Column-level CHECK constraints.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub constraints: Vec<ColumnConstraintMetadata>,
+    /// Column comment metadata.
+    #[serde(default)]
+    pub comment: String,
 }
 
 impl ColumnMetadata {
@@ -123,6 +126,7 @@ impl ColumnMetadata {
             clustering_order,
             masked_with,
             constraints: Vec::new(),
+            comment: String::new(),
         }
     }
 
@@ -188,6 +192,12 @@ impl ColumnMetadata {
     /// Add column-level CHECK constraints.
     pub fn with_constraints(mut self, constraints: Vec<ColumnConstraintMetadata>) -> Self {
         self.constraints = constraints;
+        self
+    }
+
+    /// Add column comment metadata.
+    pub fn with_comment(mut self, comment: impl Into<String>) -> Self {
+        self.comment = comment.into();
         self
     }
 

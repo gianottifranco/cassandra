@@ -16,13 +16,14 @@
 
 //! Token ring tokens for consistent hashing.
 //!
-//! Currently only the Murmur3Partitioner is implemented (the overwhelmingly
-//! dominant choice in production). Other partitioners (Random, ByteOrdered)
-//! can be added behind feature flags.
+//! Murmur3 is the default production partitioner, with Random and
+//! ByteOrdered compatibility implemented in `crate::partitioner`.
 //!
 //! ## Java Oracle
 //!
 //! - `org.apache.cassandra.dht.Murmur3Partitioner`
+//! - `org.apache.cassandra.dht.RandomPartitioner`
+//! - `org.apache.cassandra.dht.ByteOrderedPartitioner`
 //! - `org.apache.cassandra.dht.Murmur3Partitioner.LongToken`
 
 use std::fmt;

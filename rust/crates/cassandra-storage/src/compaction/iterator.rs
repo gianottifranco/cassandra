@@ -206,10 +206,7 @@ impl CompactionIterator {
             }
 
             // Collect all other entries with the same partition key.
-            while heap
-                .peek()
-                .map_or(false, |e| e.partition_key == current_key)
-            {
+            while heap.peek().is_some_and(|e| e.partition_key == current_key) {
                 let same = heap.pop().unwrap();
 
                 // Merge partition-level tombstone.

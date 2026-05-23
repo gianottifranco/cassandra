@@ -50,16 +50,13 @@ pub fn apply_filters(partition: PartitionData, options: &ScanOptions) -> Partiti
 
     // 1. Clustering filter: retain only rows whose clustering key is selected.
     if let Some(ref cf) = options.clustering_filter {
-        rows = rows.into_iter().filter(|(ck, _)| cf.selects(ck)).collect();
+        rows.retain(|ck, _| cf.selects(ck));
     }
 
     // 2. Row filter: evaluate expressions on cell values.
     if let Some(ref rf) = options.row_filter {
         if !rf.is_empty() {
-            rows = rows
-                .into_iter()
-                .filter(|(_, row)| evaluate_row_filter(row, rf))
-                .collect();
+            rows.retain(|_, row| evaluate_row_filter(row, rf));
         }
     }
 
@@ -504,7 +501,7 @@ mod tests {
         // Data limit: 2 rows -> a, c (exactly 2)
         // Column filter: only "name" column
         assert_eq!(filtered.rows.len(), 2);
-        for (_, row) in &filtered.rows {
+        for row in filtered.rows.values() {
             assert_eq!(row.cells.len(), 1);
             assert_eq!(row.cells[0].column, "name");
             assert_eq!(row.cells[0].value.as_deref(), Some(b"alice".as_slice()));

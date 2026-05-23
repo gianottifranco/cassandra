@@ -25,7 +25,7 @@ impl BloomFilter {
         let num_bits = optimal_num_bits(expected_items, fp_rate);
         let num_hashes = optimal_num_hashes(num_bits, expected_items);
 
-        let words = (num_bits + 63) / 64;
+        let words = num_bits.div_ceil(64);
         Self {
             bits: vec![0u64; words],
             num_bits,

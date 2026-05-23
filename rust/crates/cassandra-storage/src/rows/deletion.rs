@@ -66,7 +66,19 @@ impl MutableDeletionInfo {
     pub fn range_tombstone_covering(&self, clustering_key: &[u8]) -> Option<&RangeTombstone> {
         self.range_tombstones
             .iter()
-            .find(|rt| clustering_key >= rt.start.as_slice() && clustering_key <= rt.end.as_slice())
+            .filter(|rt| rt.covers(clustering_key))
+            .max_by(|a, b| a.deletion.cmp(&b.deletion))
+    }
+
+    /// Return the active deletion for a clustering key, combining partition and range tombstones.
+    pub fn active_deletion_for(&self, clustering_key: &[u8]) -> DeletionTime {
+        let mut deletion = self.partition_deletion;
+        if let Some(range_tombstone) = self.range_tombstone_covering(clustering_key) {
+            if range_tombstone.deletion.supersedes(&deletion) {
+                deletion = range_tombstone.deletion;
+            }
+        }
+        deletion
     }
 }
 
@@ -113,6 +125,43 @@ mod tests {
         assert!(di.range_tombstone_covering(&[15]).is_some());
         assert!(di.range_tombstone_covering(&[5]).is_none());
         assert!(di.range_tombstone_covering(&[25]).is_none());
+    }
+
+    #[test]
+    fn range_tombstone_covering_returns_newest_deletion() {
+        let mut di = MutableDeletionInfo::live();
+        di.add_range_tombstone(RangeTombstone::new(
+            vec![10],
+            vec![20],
+            DeletionTime::new(100, 100),
+        ));
+        di.add_range_tombstone(RangeTombstone::new(
+            vec![15],
+            vec![25],
+            DeletionTime::new(300, 300),
+        ));
+
+        let covering = di.range_tombstone_covering(&[18]).unwrap();
+        assert_eq!(covering.deletion.marked_for_delete_at, 300);
+    }
+
+    #[test]
+    fn active_deletion_combines_partition_and_range_tombstones() {
+        let mut di = MutableDeletionInfo::with_partition_deletion(DeletionTime::new(200, 200));
+        di.add_range_tombstone(RangeTombstone::new(
+            vec![10],
+            vec![20],
+            DeletionTime::new(100, 100),
+        ));
+        di.add_range_tombstone(RangeTombstone::new(
+            vec![30],
+            vec![40],
+            DeletionTime::new(300, 300),
+        ));
+
+        assert_eq!(di.active_deletion_for(&[15]).marked_for_delete_at, 200);
+        assert_eq!(di.active_deletion_for(&[35]).marked_for_delete_at, 300);
+        assert_eq!(di.active_deletion_for(&[50]).marked_for_delete_at, 200);
     }
 
     #[test]

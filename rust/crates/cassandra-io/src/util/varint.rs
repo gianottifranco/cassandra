@@ -81,14 +81,14 @@ pub fn encode_unsigned_vint(value: u64, buf: &mut [u8]) -> usize {
     let total_extra_bits = extra * 8;
 
     // Prefix mask: e.g. extra=1 -> 0x80, extra=2 -> 0xC0 ...
-    let prefix: u8 = !((1u16 << (8 - extra)) as u8 - 1) as u8;
+    let prefix: u8 = !((1u16 << (8 - extra)) as u8 - 1);
     let first_data = ((value >> total_extra_bits) as u8) & ((1u8 << data_bits_in_first) - 1);
     buf[0] = prefix | first_data;
 
     // Remaining bytes, big-endian.
-    for i in 1..size {
+    for (i, byte) in buf.iter_mut().enumerate().take(size).skip(1) {
         let shift = (size - 1 - i) * 8;
-        buf[i] = (value >> shift) as u8;
+        *byte = (value >> shift) as u8;
     }
     size
 }
@@ -115,8 +115,8 @@ pub fn decode_unsigned_vint(buf: &[u8]) -> (u64, usize) {
     let mask = (1u8 << data_bits_in_first) - 1;
     let mut value = (first & mask) as u64;
 
-    for i in 1..size {
-        value = (value << 8) | (buf[i] as u64);
+    for byte in buf.iter().take(size).skip(1) {
+        value = (value << 8) | (*byte as u64);
     }
     (value, size)
 }
@@ -159,8 +159,8 @@ pub fn read_unsigned_vint(reader: &mut (impl Read + ?Sized)) -> io::Result<u64> 
 
     let mut rest = [0u8; 8];
     reader.read_exact(&mut rest[..extra])?;
-    for i in 0..extra {
-        value = (value << 8) | (rest[i] as u64);
+    for byte in rest.iter().take(extra) {
+        value = (value << 8) | (*byte as u64);
     }
     Ok(value)
 }

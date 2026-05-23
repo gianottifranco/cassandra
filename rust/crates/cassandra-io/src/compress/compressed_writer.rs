@@ -18,7 +18,7 @@ use byteorder::{BigEndian, WriteBytesExt};
 use crc32fast::Hasher as Crc32Hasher;
 
 use crate::compress::metadata::{CompressionMetadata, CompressionParams};
-use crate::compress::{ICompressor, create_compressor};
+use crate::compress::{ICompressor, create_compressor_with_options};
 
 /// A sequential writer that transparently compresses data in fixed-size chunks.
 pub struct CompressedSequentialWriter {
@@ -36,7 +36,8 @@ impl CompressedSequentialWriter {
     /// Opens `path` for writing and prepares a chunk-compressed stream.
     pub fn new(path: impl AsRef<Path>, params: &CompressionParams) -> io::Result<Self> {
         let file = File::create(path)?;
-        let compressor = create_compressor(params.compressor_type);
+        let compressor = create_compressor_with_options(params.compressor_type, &params.options)
+            .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(Self {
             inner: file,
             compressor,
@@ -62,7 +63,7 @@ impl CompressedSequentialWriter {
         let mut compressed = Vec::new();
         self.compressor
             .compress(&self.uncompressed_buffer, &mut compressed)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| io::Error::other(e.to_string()))?;
 
         // CRC-32 of the compressed bytes
         let mut crc = Crc32Hasher::new();

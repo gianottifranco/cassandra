@@ -73,6 +73,13 @@ impl FromStr for DataSize {
                 .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
             return Ok(Self::from_kibibytes(v));
         }
+        if let Some(num) = lower.strip_suffix('b') {
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid number: {}", num)))?;
+            return Ok(Self(v));
+        }
         // Plain number = bytes
         let v: u64 = s
             .parse()
@@ -132,6 +139,9 @@ impl Duration {
     pub fn from_hours(h: u64) -> Self {
         Self(h * 3600 * 1000)
     }
+    pub fn from_days(d: u64) -> Self {
+        Self(d * 24 * 3600 * 1000)
+    }
 }
 
 impl FromStr for Duration {
@@ -155,6 +165,13 @@ impl FromStr for Duration {
                 .parse()
                 .map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
             return Ok(Self::from_hours(v));
+        }
+        if let Some(num) = lower.strip_suffix('d') {
+            let v: u64 = num
+                .trim()
+                .parse()
+                .map_err(|_| ParseUnitError(format!("invalid: {}", num)))?;
+            return Ok(Self::from_days(v));
         }
         if let Some(num) = lower.strip_suffix('m') {
             let v: u64 = num
@@ -192,6 +209,8 @@ impl fmt::Display for Duration {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.0 == 0 {
             write!(f, "0ms")
+        } else if self.0 % 86_400_000 == 0 {
+            write!(f, "{}d", self.0 / 86_400_000)
         } else if self.0 % 3_600_000 == 0 {
             write!(f, "{}h", self.0 / 3_600_000)
         } else if self.0 % 60_000 == 0 {
@@ -335,6 +354,14 @@ mod tests {
     }
 
     #[test]
+    fn data_size_bytes_suffix() {
+        let ds: DataSize = "0B".parse().unwrap();
+        assert_eq!(ds.bytes(), 0);
+        let ds: DataSize = "512B".parse().unwrap();
+        assert_eq!(ds.bytes(), 512);
+    }
+
+    #[test]
     fn data_size_display() {
         assert_eq!(DataSize::from_mebibytes(128).to_string(), "128MiB");
         assert_eq!(DataSize::from_gibibytes(1).to_string(), "1GiB");
@@ -353,6 +380,12 @@ mod tests {
     }
 
     #[test]
+    fn duration_days() {
+        let d: Duration = "30d".parse().unwrap();
+        assert_eq!(d.millis(), 30 * 24 * 3600 * 1000);
+    }
+
+    #[test]
     fn duration_seconds() {
         let d: Duration = "30s".parse().unwrap();
         assert_eq!(d.seconds(), 30);
@@ -360,6 +393,7 @@ mod tests {
 
     #[test]
     fn duration_display() {
+        assert_eq!(Duration::from_days(2).to_string(), "2d");
         assert_eq!(Duration::from_hours(4).to_string(), "4h");
         assert_eq!(Duration::from_millis(500).to_string(), "500ms");
     }

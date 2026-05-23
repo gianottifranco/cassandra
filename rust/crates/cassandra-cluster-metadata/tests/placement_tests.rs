@@ -8,7 +8,8 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
 use cassandra_common::Token;
 use cassandra_common::partitioner::{
-    ByteOrderedPartitioner, LocalPartitioner, Murmur3Partitioner, Partitioner,
+    ByteOrderedPartitioner, LocalPartitioner, Murmur3Partitioner, Partitioner, RandomPartitioner,
+    create_partitioner,
 };
 use cassandra_common::token::TokenRange;
 
@@ -291,6 +292,29 @@ fn partitioner_split_and_ownership() {
     assert!(!p.preserves_order());
     assert!(ByteOrderedPartitioner.preserves_order());
     assert!(LocalPartitioner::default().preserves_order());
+}
+
+#[test]
+fn partitioner_factory_covers_legacy_random_and_byteordered() {
+    let random = create_partitioner("org.apache.cassandra.dht.RandomPartitioner");
+    assert_eq!(random.name(), "org.apache.cassandra.dht.RandomPartitioner");
+    assert!(!random.preserves_order());
+    assert!(random.get_token(b"account:1").value() >= 0);
+    assert_eq!(
+        random.get_token(b"account:1"),
+        random.get_token(b"account:1")
+    );
+
+    let short_random = create_partitioner("random");
+    assert_eq!(short_random.name(), RandomPartitioner.name());
+
+    let byteordered = create_partitioner("org.apache.cassandra.dht.ByteOrderedPartitioner");
+    assert_eq!(
+        byteordered.name(),
+        "org.apache.cassandra.dht.ByteOrderedPartitioner"
+    );
+    assert!(byteordered.preserves_order());
+    assert!(byteordered.get_token(b"\x00\x01") < byteordered.get_token(b"\x00\x02"));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -36,6 +36,10 @@ pub enum StreamTopologyError {
     PartialFailure { completed: u32, failed: u32 },
 }
 
+type EndpointRanges = (SocketAddr, String, Vec<(i64, i64)>);
+#[cfg(test)]
+type TestEndpointRanges = Vec<EndpointRanges>;
+
 /// Bootstrap stream: fetch ranges from existing nodes.
 pub struct BootstrapStream;
 
@@ -46,7 +50,7 @@ impl BootstrapStream {
     pub async fn execute(
         coordinator: &StreamCoordinator,
         transport: Arc<StreamTransport>,
-        sources: Vec<(SocketAddr, String, Vec<(i64, i64)>)>,
+        sources: Vec<EndpointRanges>,
     ) -> Result<CoordinatorResult, StreamTopologyError> {
         if sources.is_empty() {
             return Err(StreamTopologyError::NoSources);
@@ -83,7 +87,7 @@ impl DecommissionStream {
     pub async fn execute(
         coordinator: &StreamCoordinator,
         transport: Arc<StreamTransport>,
-        targets: Vec<(SocketAddr, String, Vec<(i64, i64)>)>,
+        targets: Vec<EndpointRanges>,
     ) -> Result<CoordinatorResult, StreamTopologyError> {
         if targets.is_empty() {
             return Err(StreamTopologyError::NoTargets);
@@ -197,7 +201,7 @@ mod tests {
 
     #[test]
     fn bootstrap_plan_construction() {
-        let sources: Vec<(SocketAddr, String, Vec<(i64, i64)>)> = vec![
+        let sources: TestEndpointRanges = vec![
             (
                 "127.0.0.1:7000".parse().unwrap(),
                 "ks1".into(),
@@ -268,7 +272,7 @@ mod tests {
 
         let mut plan = StreamPlan::new(StreamOperation::Rebuild);
         for ks in &["ks1", "ks2", "ks3"] {
-            plan = plan.request_ranges(peer.clone(), *ks, vec![], ranges.clone());
+            plan = plan.request_ranges(peer, *ks, vec![], ranges.clone());
         }
 
         // Same peer should produce a single session

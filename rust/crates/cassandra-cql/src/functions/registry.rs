@@ -74,8 +74,13 @@ impl FunctionRegistry {
     /// Create a new registry pre-populated with all built-in functions.
     pub fn with_builtins() -> Self {
         let registry = Self::new();
+        super::aggregates::register_all(&registry);
         super::time_uuid::register_all(&registry);
         super::token_cast_blob::register_all(&registry);
+        super::operation::register_all(&registry);
+        super::cluster_metadata::register_all(&registry);
+        super::collection::register_all(&registry);
+        super::format::register_all(&registry);
         super::math_json::register_all(&registry);
         super::vector_similarity::register_all(&registry);
         super::masking::register_all(&registry);
@@ -92,31 +97,71 @@ impl FunctionRegistry {
     /// Tries compatible overloads first, then variadic functions.
     pub fn resolve(&self, name: &str, arg_types: &[CqlType]) -> Option<Arc<dyn CqlFunction>> {
         let key = name.to_lowercase();
-        let overloads = self.functions.get(&key)?;
+        if let Some(overloads) = self.functions.get(&key) {
+            // Exact type match
+            for func in overloads.iter() {
+                let expected = func.arg_types();
+                if expected.len() == arg_types.len() {
+                    let matches = expected
+                        .iter()
+                        .zip(arg_types.iter())
+                        .all(|(e, a)| types_compatible(e, a));
+                    if matches {
+                        return Some(Arc::clone(func));
+                    }
+                }
+            }
 
-        // Exact type match
-        for func in overloads.iter() {
-            let expected = func.arg_types();
-            if expected.len() == arg_types.len() {
-                let matches = expected
-                    .iter()
-                    .zip(arg_types.iter())
-                    .all(|(e, a)| types_compatible(e, a));
-                if matches {
+            if let Some(function) = super::math_json::resolve_dynamic(name, arg_types) {
+                return Some(function);
+            }
+
+            // Fallback only for variadic/polymorphic functions such as token().
+            for func in overloads.iter() {
+                let expected = func.arg_types();
+                if expected.is_empty() {
                     return Some(Arc::clone(func));
                 }
             }
         }
 
-        // Fallback only for variadic/polymorphic functions such as token() and toJson().
-        for func in overloads.iter() {
-            let expected = func.arg_types();
-            if expected.is_empty() {
-                return Some(Arc::clone(func));
+        super::aggregates::resolve_dynamic(name, arg_types)
+            .or_else(|| super::math_json::resolve_dynamic(name, arg_types))
+            .or_else(|| super::collection::resolve_dynamic(name, arg_types))
+            .or_else(|| super::masking::resolve_dynamic(name, arg_types))
+    }
+
+    /// Resolve a function by name, argument types, and expected return type.
+    pub fn resolve_with_return(
+        &self,
+        name: &str,
+        arg_types: &[CqlType],
+        return_type: &CqlType,
+    ) -> Option<Arc<dyn CqlFunction>> {
+        let key = name.to_lowercase();
+        let overloads = self.functions.get(&key);
+
+        if let Some(overloads) = overloads {
+            for func in overloads.iter() {
+                let expected = func.arg_types();
+                if expected.len() == arg_types.len()
+                    && func.return_type() == *return_type
+                    && expected
+                        .iter()
+                        .zip(arg_types.iter())
+                        .all(|(e, a)| types_compatible(e, a))
+                {
+                    return Some(Arc::clone(func));
+                }
             }
         }
 
-        None
+        super::aggregates::resolve_dynamic(name, arg_types)
+            .or_else(|| super::math_json::resolve_with_return(name, arg_types, return_type))
+            .or_else(|| super::math_json::resolve_dynamic(name, arg_types))
+            .or_else(|| super::collection::resolve_dynamic(name, arg_types))
+            .or_else(|| super::masking::resolve_dynamic(name, arg_types))
+            .filter(|func| func.return_type() == *return_type)
     }
 
     /// Resolve by name only (for zero-arg functions or when types are unknown).
@@ -143,6 +188,9 @@ fn types_compatible(expected: &CqlType, actual: &CqlType) -> bool {
     if expected == actual {
         return true;
     }
+    if collection_wildcard_compatible(expected, actual) {
+        return true;
+    }
     // Numeric widening: int → bigint, float → double
     matches!(
         (expected, actual),
@@ -153,6 +201,19 @@ fn types_compatible(expected: &CqlType, actual: &CqlType) -> bool {
         (expected, actual),
         (CqlType::Vector(expected_inner, 0), CqlType::Vector(actual_inner, _))
             if expected_inner == actual_inner
+    )
+}
+
+fn collection_wildcard_compatible(expected: &CqlType, actual: &CqlType) -> bool {
+    matches!(
+        (expected, actual),
+        (CqlType::List(inner, false), CqlType::List(_, _))
+            | (CqlType::Set(inner, false), CqlType::Set(_, _))
+            if matches!(inner.as_ref(), CqlType::Empty)
+    ) || matches!(
+        (expected, actual),
+        (CqlType::Map(key, value, false), CqlType::Map(_, _, _))
+            if matches!(key.as_ref(), CqlType::Empty) && matches!(value.as_ref(), CqlType::Empty)
     )
 }
 

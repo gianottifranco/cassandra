@@ -204,7 +204,7 @@ proptest! {
         {
             let engine = StorageEngine::open(config).unwrap();
             let replayed = engine.replay_commitlog().unwrap();
-            prop_assert!(replayed >= 0, "Replay count should be non-negative");
+            prop_assert!(replayed <= write_count, "Replay count should not exceed writes");
         }
     }
 }

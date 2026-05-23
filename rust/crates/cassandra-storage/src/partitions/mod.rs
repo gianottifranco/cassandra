@@ -14,5 +14,8 @@ pub mod partition_update;
 
 pub use decorated_key::DecoratedKey;
 pub use filtered_partition::FilteredPartition;
-pub use iterators::{InMemoryRowIterator, UnfilteredPartitionIterator, UnfilteredRowIterator};
+pub use iterators::{
+    InMemoryPartitionIterator, InMemoryRowIterator, IteratorMergeError, MergedPartitionIterator,
+    MergedRowIterator, UnfilteredPartitionIterator, UnfilteredRowIterator,
+};
 pub use partition_update::PartitionUpdate;

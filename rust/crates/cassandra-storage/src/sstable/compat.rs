@@ -1,5 +1,7 @@
 // Licensed under Apache License, Version 2.0.
 
+#![allow(clippy::needless_as_bytes, clippy::needless_range_loop)]
+
 //! SSTable compatibility strategy and format documentation.
 //!
 //! ## Java Oracle
@@ -5040,11 +5042,7 @@ mod tests {
         assert_eq!(marker.body_length, Some(2));
         assert_eq!(marker.next_unfiltered_offset, data.len() as u64);
 
-        let mut invalid = Vec::new();
-        invalid.push(JAVA_UNFILTERED_IS_MARKER);
-        invalid.push(4);
-        invalid.push(1);
-        invalid.push(0);
+        let invalid = vec![JAVA_UNFILTERED_IS_MARKER, 4, 1, 0];
         assert!(parse_java_big_unfiltered_header_at(&invalid, 0, 0).is_err());
     }
 

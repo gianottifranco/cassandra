@@ -11,6 +11,10 @@ use std::io::{self, BufReader, Read, Seek, SeekFrom};
 use byteorder::{BigEndian, ReadBytesExt};
 
 use super::format::*;
+use super::tombstone_serializer::{
+    PARTITION_DELETION_MARKER, RANGE_TOMBSTONE_BOUND_MARKER, read_partition_deletion,
+    read_range_tombstone_marker,
+};
 use super::writer::SSTableWriter;
 use crate::memtable::partition::PartitionData;
 
@@ -100,6 +104,16 @@ impl SSTableScrubber {
             let marker = reader.read_u8()?;
             if marker == END_OF_PARTITION {
                 break;
+            }
+            if marker == PARTITION_DELETION_MARKER {
+                let deletion = read_partition_deletion(reader)?;
+                partition
+                    .set_tombstone(deletion.marked_for_delete_at, deletion.local_deletion_time);
+                continue;
+            }
+            if marker == RANGE_TOMBSTONE_BOUND_MARKER {
+                let _ = read_range_tombstone_marker(reader)?;
+                continue;
             }
             if marker != ROW_MARKER {
                 return Err(io::Error::new(
@@ -201,5 +215,26 @@ mod tests {
         let result = SSTableScrubber::scrub(&input, &output).unwrap();
         assert_eq!(result.partitions_recovered, 0);
         assert_eq!(result.partitions_skipped, 0);
+    }
+
+    #[test]
+    fn scrub_preserves_partition_tombstone() {
+        let dir = TempDir::new().unwrap();
+        let input = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+        let output = SSTableDescriptor::new(dir.path(), "ks", "t1", 2);
+
+        let mut pd = PartitionData::new();
+        pd.set_tombstone(123, 456);
+        SSTableWriter::new(input.clone())
+            .write(&[(b"pk".to_vec(), pd)])
+            .unwrap();
+
+        let result = SSTableScrubber::scrub(&input, &output).unwrap();
+        assert_eq!(result.partitions_recovered, 1);
+
+        let reader = SSTableReader::open(output).unwrap();
+        let partition = reader.get_partition(b"pk").unwrap().unwrap();
+        assert_eq!(partition.tombstone_timestamp, Some(123));
+        assert_eq!(partition.tombstone_local_deletion_time, Some(456));
     }
 }

@@ -8,6 +8,7 @@
 
 use crate::ast::Statement;
 use crate::parser;
+use cassandra_native_protocol::message::{ColumnSpec, ColumnType};
 use dashmap::DashMap;
 use md5::{Digest, Md5};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,15 +70,32 @@ impl PreparedCache {
         id
     }
 
-    /// Compute a result metadata ID from the query text.
-    ///
-    /// In a full implementation this would hash the actual result column specs,
-    /// but at prepare time we use the query text as a stable proxy. When the
-    /// schema changes the id is recomputed so clients can detect METADATA_CHANGED.
+    /// Compute a fallback result metadata ID from the query text.
     pub fn compute_result_metadata_id(query: &str) -> [u8; 16] {
         let mut hasher = Md5::new();
         hasher.update(b"result_metadata:");
         hasher.update(query.as_bytes());
+        let result = hasher.finalize();
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&result);
+        id
+    }
+
+    /// Compute a result metadata ID from the actual result column specs.
+    ///
+    /// Java computes the result metadata id from the serialized result metadata.
+    /// This implementation hashes the same logical fields that affect native
+    /// protocol result metadata: keyspace, table, column name, and recursive type.
+    pub fn compute_result_metadata_id_from_specs(specs: &[ColumnSpec]) -> [u8; 16] {
+        let mut hasher = Md5::new();
+        hasher.update(b"result_metadata_specs:v1");
+        hasher.update((specs.len() as u32).to_be_bytes());
+        for spec in specs {
+            hash_opt_str(&mut hasher, spec.ksname.as_deref());
+            hash_opt_str(&mut hasher, spec.tablename.as_deref());
+            hash_str(&mut hasher, &spec.name);
+            hash_column_type(&mut hasher, &spec.col_type);
+        }
         let result = hasher.finalize();
         let mut id = [0u8; 16];
         id.copy_from_slice(&result);
@@ -149,6 +167,13 @@ impl PreparedCache {
         })
     }
 
+    /// Update the cached result metadata id after prepare-time metadata inference.
+    pub fn update_result_metadata_id(&self, id: &[u8; 16], result_metadata_id: [u8; 16]) {
+        if let Some(mut entry) = self.cache.get_mut(id) {
+            entry.result_metadata_id = Some(result_metadata_id);
+        }
+    }
+
     /// Invalidate all entries with schema_version < new_version.
     ///
     /// This is called whenever a DDL statement changes the schema.
@@ -212,6 +237,54 @@ impl PreparedCache {
     }
 }
 
+fn hash_opt_str(hasher: &mut Md5, value: Option<&str>) {
+    match value {
+        Some(value) => {
+            hasher.update([1]);
+            hash_str(hasher, value);
+        }
+        None => hasher.update([0]),
+    }
+}
+
+fn hash_str(hasher: &mut Md5, value: &str) {
+    hasher.update((value.len() as u32).to_be_bytes());
+    hasher.update(value.as_bytes());
+}
+
+fn hash_column_type(hasher: &mut Md5, ty: &ColumnType) {
+    hasher.update(ty.id().to_be_bytes());
+    match ty {
+        ColumnType::Custom(name) => hash_str(hasher, name),
+        ColumnType::List(inner) | ColumnType::Set(inner) | ColumnType::Vector(inner, _) => {
+            hash_column_type(hasher, inner);
+            if let ColumnType::Vector(_, dims) = ty {
+                hasher.update(dims.to_be_bytes());
+            }
+        }
+        ColumnType::Map(key, value) => {
+            hash_column_type(hasher, key);
+            hash_column_type(hasher, value);
+        }
+        ColumnType::Udt { ks, name, fields } => {
+            hash_str(hasher, ks);
+            hash_str(hasher, name);
+            hasher.update((fields.len() as u32).to_be_bytes());
+            for (field_name, field_type) in fields {
+                hash_str(hasher, field_name);
+                hash_column_type(hasher, field_type);
+            }
+        }
+        ColumnType::Tuple(fields) => {
+            hasher.update((fields.len() as u32).to_be_bytes());
+            for field in fields {
+                hash_column_type(hasher, field);
+            }
+        }
+        _ => {}
+    }
+}
+
 impl Default for PreparedCache {
     fn default() -> Self {
         Self::new()
@@ -241,6 +314,10 @@ fn count_bind_markers(stmt: &Statement) -> usize {
                     count_in_term(k, count);
                     count_in_term(v, count);
                 }
+            }
+            Term::CollectionElement { key, value } => {
+                count_in_term(key, count);
+                count_in_term(value, count);
             }
             Term::TypeHint(_, inner) => count_in_term(inner, count),
             Term::Literal(_) => {}
