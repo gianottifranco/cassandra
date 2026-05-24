@@ -29,6 +29,7 @@
 //! cassandra-tools snapshot            Take a snapshot
 //! cassandra-tools listsnapshots       List available snapshots
 //! cassandra-tools clearsnapshot       Clear a snapshot
+//! cassandra-tools restoresnapshot     Restore a snapshot
 //! cassandra-tools compact             Force compaction
 //! cassandra-tools repair              Run repair
 //! cassandra-tools cleanup             Run cleanup
@@ -54,6 +55,7 @@
 //! ```
 
 // Existing SSTable modules
+mod audit_log_viewer;
 mod sstable_scrub;
 mod sstable_tools;
 mod sstable_upgrade;
@@ -64,6 +66,7 @@ mod admin_client;
 
 // CLI command modules (Units 2-9)
 mod cmd_cache_hints;
+mod cmd_cdc;
 mod cmd_cluster_info;
 mod cmd_compaction;
 mod cmd_config;
@@ -71,6 +74,7 @@ mod cmd_logging_security;
 mod cmd_snapshots;
 mod cmd_stats;
 mod cmd_topology;
+mod fqltool;
 mod table_formatter;
 
 // New offline SSTable tools (Unit 10)
@@ -83,6 +87,7 @@ mod sstable_split;
 
 // Utility tools (Unit 11)
 mod bootstrap_monitor;
+mod cassandra_stress;
 mod generate_tokens;
 mod hash_password;
 
@@ -153,6 +158,20 @@ enum Commands {
         /// Table.
         table: Option<String>,
     },
+    /// Verify SSTables for keyspace/table.
+    Verify {
+        /// Keyspace.
+        keyspace: Option<String>,
+        /// Table.
+        table: Option<String>,
+    },
+    /// Upgrade SSTables to current format via rewrite.
+    Upgradesstables {
+        /// Keyspace.
+        keyspace: Option<String>,
+        /// Table.
+        table: Option<String>,
+    },
     /// Show compaction statistics.
     Compactionstats,
     /// Show compaction history.
@@ -182,6 +201,11 @@ enum Commands {
         /// Keyspace.
         keyspace: Option<String>,
     },
+    /// Stop one operation by id, or all active operations.
+    Stop {
+        /// Operation ID to stop. If omitted, stops all active operations.
+        operation_id: Option<String>,
+    },
 
     // ── Snapshots (Unit 4) ────────────────────────────────────────
     /// Take a snapshot of keyspaces/tables.
@@ -200,6 +224,11 @@ enum Commands {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Restore a named snapshot.
+    Restoresnapshot {
+        /// Snapshot name to restore.
+        name: String,
+    },
     /// Import SSTables.
     Import {
         /// Keyspace.
@@ -215,6 +244,54 @@ enum Commands {
     Disablebackup,
     /// Show backup status.
     Statusbackup,
+    /// Read CDC raw segments from a directory (offline).
+    Cdcread {
+        /// CDC raw directory path.
+        dir: String,
+        /// Include incomplete segments as well (default: completed only).
+        #[arg(long, default_value_t = false)]
+        all_segments: bool,
+        /// Skip corrupt entries and continue.
+        #[arg(long, default_value_t = false)]
+        skip_corrupt: bool,
+        /// Directory containing TDE key files for decrypting encrypted CDC entries.
+        #[arg(long)]
+        key_directory: Option<String>,
+        /// Key alias inside the key directory (required with --key-directory).
+        #[arg(long)]
+        key_alias: Option<String>,
+        /// TDE cipher algorithm.
+        #[arg(long, default_value = "AES/CBC/PKCS5Padding")]
+        cipher: String,
+        /// TDE chunk length in KiB.
+        #[arg(long, default_value_t = 64)]
+        chunk_length_kb: u32,
+        /// Only print per-segment summary, not every mutation JSON.
+        #[arg(long, default_value_t = false)]
+        summary_only: bool,
+        /// Incremental batch size for completed-segment consumption.
+        #[arg(long)]
+        batch_size: Option<usize>,
+        /// Cursor state file for incremental batch resume.
+        #[arg(long)]
+        cursor_file: Option<String>,
+        /// Poll for new completed CDC data continuously (requires --batch-size).
+        #[arg(long, default_value_t = false)]
+        follow: bool,
+        /// Poll interval in milliseconds for --follow mode.
+        #[arg(long, default_value_t = 1000)]
+        poll_interval_ms: u64,
+        /// Optional cap on follow iterations (useful for scripted runs/tests).
+        #[arg(long)]
+        max_batches: Option<usize>,
+        /// Backpressure threshold: after this many non-empty follow batches in a row,
+        /// sleep for `--backpressure-sleep-ms`.
+        #[arg(long)]
+        max_consecutive_nonempty_batches: Option<usize>,
+        /// Backpressure sleep duration in milliseconds.
+        #[arg(long, default_value_t = 0)]
+        backpressure_sleep_ms: u64,
+    },
 
     // ── Topology (Unit 5) ─────────────────────────────────────────
     /// Decommission this node from the cluster.
@@ -264,11 +341,16 @@ enum Commands {
 
     // ── Statistics (Unit 6) ───────────────────────────────────────
     /// Show table statistics.
+    #[command(visible_alias = "cfstats")]
     Tablestats {
         /// Keyspace (optional).
         keyspace: Option<String>,
+        /// Table (optional; can be used with or without keyspace).
+        #[arg(long)]
+        table: Option<String>,
     },
     /// Show table histograms.
+    #[command(visible_alias = "cfhistograms")]
     Tablehistograms {
         /// Keyspace.
         keyspace: Option<String>,
@@ -637,6 +719,12 @@ fn main() {
         Commands::Scrub { keyspace, table } => {
             cmd_compaction::scrub(&client, keyspace.as_deref(), table.as_deref())
         }
+        Commands::Verify { keyspace, table } => {
+            cmd_compaction::verify(&client, keyspace.as_deref(), table.as_deref())
+        }
+        Commands::Upgradesstables { keyspace, table } => {
+            cmd_compaction::upgradesstables(&client, keyspace.as_deref(), table.as_deref())
+        }
         Commands::Compactionstats => cmd_compaction::compaction_stats(&client),
         Commands::Compactionhistory => cmd_compaction::compaction_history(&client),
         Commands::Enableautocompaction => cmd_compaction::enable_autocompaction(&client),
@@ -652,6 +740,9 @@ fn main() {
         Commands::Garbagecollect { keyspace } => {
             cmd_compaction::garbage_collect(&client, keyspace.as_deref())
         }
+        Commands::Stop { operation_id } => {
+            cmd_compaction::stop_operation(&client, operation_id.as_deref())
+        }
 
         // ── Snapshots ─────────────────────────────────────────────
         Commands::Snapshot { name, keyspaces } => {
@@ -659,6 +750,7 @@ fn main() {
         }
         Commands::Listsnapshots => cmd_snapshots::list_snapshots(&client),
         Commands::Clearsnapshot { name } => cmd_snapshots::clear_snapshot(&client, name),
+        Commands::Restoresnapshot { name } => cmd_snapshots::restore_snapshot(&client, &name),
         Commands::Import {
             keyspace,
             table,
@@ -667,6 +759,39 @@ fn main() {
         Commands::Enablebackup => cmd_snapshots::enable_backup(&client),
         Commands::Disablebackup => cmd_snapshots::disable_backup(&client),
         Commands::Statusbackup => cmd_snapshots::status_backup(&client),
+        Commands::Cdcread {
+            dir,
+            all_segments,
+            skip_corrupt,
+            key_directory,
+            key_alias,
+            cipher,
+            chunk_length_kb,
+            summary_only,
+            batch_size,
+            cursor_file,
+            follow,
+            poll_interval_ms,
+            max_batches,
+            max_consecutive_nonempty_batches,
+            backpressure_sleep_ms,
+        } => cmd_cdc::cdc_read(
+            &dir,
+            all_segments,
+            skip_corrupt,
+            key_directory.as_deref(),
+            key_alias.as_deref(),
+            &cipher,
+            chunk_length_kb,
+            summary_only,
+            batch_size,
+            cursor_file.as_deref(),
+            follow,
+            poll_interval_ms,
+            max_batches,
+            max_consecutive_nonempty_batches,
+            backpressure_sleep_ms,
+        ),
 
         // ── Topology ──────────────────────────────────────────────
         Commands::Decommission => cmd_topology::decommission(&client),
@@ -684,7 +809,9 @@ fn main() {
         Commands::Topologystatus => cmd_topology::topology_status(&client),
 
         // ── Statistics ────────────────────────────────────────────
-        Commands::Tablestats { keyspace } => cmd_stats::table_stats(&client, keyspace.as_deref()),
+        Commands::Tablestats { keyspace, table } => {
+            cmd_stats::table_stats(&client, keyspace.as_deref(), table.as_deref())
+        }
         Commands::Tablehistograms { keyspace, table } => {
             cmd_stats::table_histograms(&client, keyspace.as_deref(), table.as_deref())
         }
@@ -837,7 +964,19 @@ fn main() {
             match client.post_json("/api/v1/operations/sstableloader", &body) {
                 Ok(resp) => {
                     if let Some(id) = resp.get("operation_id") {
-                        println!("SSTable load started (operation {})", id);
+                        println!("SSTable load completed (operation {})", id);
+                        if let Some(imported_tables) = resp
+                            .get("imported_tables")
+                            .and_then(|value| value.as_array())
+                        {
+                            println!("Imported tables: {}", imported_tables.len());
+                        }
+                        if let Some(imported_sstables) = resp.get("imported_sstables") {
+                            println!("Imported SSTables: {}", imported_sstables);
+                        }
+                        if let Some(copied_files) = resp.get("copied_files") {
+                            println!("Copied files: {}", copied_files);
+                        }
                     } else {
                         println!("SSTable load request accepted: {}", resp);
                     }
@@ -855,16 +994,15 @@ fn main() {
 
         // ── Pass-through tools ────────────────────────────────────
         Commands::Auditlogviewer { args } => {
-            println!("Auditlogviewer: {:?}", args);
-            println!("Use the audit log viewer command implementation with the listed arguments.");
+            audit_log_viewer::run(&args);
         }
         Commands::Fqltool { args } => {
-            println!("fqltool: {:?}", args);
-            println!("Use the bundled fqltool binary with the listed arguments.");
+            if let Err(e) = fqltool::run_with_args(&args) {
+                eprintln!("Error running fqltool: {e}");
+            }
         }
         Commands::CassandraStress { args } => {
-            println!("cassandra-stress: {:?}", args);
-            println!("Use the Rust stress command implementation with the listed arguments.");
+            cassandra_stress::run(&args, &cli.host, cli.port);
         }
     }
 }

@@ -309,6 +309,286 @@ pub fn handle_autocompaction_status(_state: &AdminState) -> Response<Full<Bytes>
     )
 }
 
+/// POST /api/v1/compaction/verify — verify SSTables for a table or cluster-wide.
+pub async fn handle_verify(req: Request<Incoming>, state: &AdminState) -> Response<Full<Bytes>> {
+    use http_body_util::BodyExt;
+
+    let body_bytes = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": format!("Failed to read body: {}", e)}),
+            );
+        }
+    };
+
+    handle_verify_inner(&body_bytes, state)
+}
+
+fn handle_verify_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<Bytes>> {
+    #[derive(Default, serde::Deserialize)]
+    struct VerifyRequest {
+        #[serde(default)]
+        keyspace: Option<String>,
+        #[serde(default)]
+        table: Option<String>,
+    }
+
+    let payload = if body_bytes.is_empty() {
+        VerifyRequest::default()
+    } else {
+        match serde_json::from_slice::<VerifyRequest>(body_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({"error": format!("Invalid JSON: {}", e)}),
+                );
+            }
+        }
+    };
+
+    if payload.table.is_some() && payload.keyspace.is_none() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"error": "table requires keyspace"}),
+        );
+    }
+
+    let Some(engine) = state.storage_engine.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({"error": "storage engine not configured"}),
+        );
+    };
+
+    let description = match (payload.keyspace.as_ref(), payload.table.as_ref()) {
+        (Some(ks), Some(tbl)) => format!("Verify {ks}.{tbl}"),
+        _ => "Verify all SSTables".to_string(),
+    };
+    let op_id = state
+        .operations
+        .register(OperationType::Rebuild, description);
+
+    let response = match engine.refresh_sstables_from_disk() {
+        Ok(()) => {
+            match engine.verify_sstables(payload.keyspace.as_deref(), payload.table.as_deref()) {
+                Ok(report) => {
+                    let issues: Vec<serde_json::Value> = report
+                        .issues
+                        .iter()
+                        .take(50)
+                        .map(|issue| {
+                            json!({
+                                "keyspace": issue.keyspace,
+                                "table": issue.table,
+                                "generation": issue.generation,
+                                "severity": issue.severity,
+                                "component": issue.component,
+                                "message": issue.message,
+                            })
+                        })
+                        .collect();
+                    json_response(
+                        StatusCode::OK,
+                        &json!({
+                            "operation_id": op_id.to_string(),
+                            "status": "verify completed",
+                            "keyspace": payload.keyspace,
+                            "table": payload.table,
+                            "scanned_sstables": report.scanned_sstables,
+                            "valid_sstables": report.valid_sstables,
+                            "invalid_sstables": report.invalid_sstables,
+                            "issue_count": report.issue_count,
+                            "verified": report.invalid_sstables == 0,
+                            "issues": issues,
+                            "issues_truncated": report.issue_count > issues.len() as u64,
+                        }),
+                    )
+                }
+                Err(err) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &json!({"error": format!("verify failed: {err}")}),
+                ),
+            }
+        }
+        Err(err) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"error": format!("verify refresh failed: {err}")}),
+        ),
+    };
+
+    if response.status() == StatusCode::OK {
+        state.operations.update(&op_id, "COMPLETED", 100);
+    } else {
+        state.operations.update(&op_id, "FAILED", 100);
+    }
+    state.operations.remove(&op_id);
+    response
+}
+
+/// POST /api/v1/compaction/upgradesstables — rewrite SSTables through compaction flow.
+pub async fn handle_upgradesstables(
+    req: Request<Incoming>,
+    state: &AdminState,
+) -> Response<Full<Bytes>> {
+    use http_body_util::BodyExt;
+
+    let body_bytes = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": format!("Failed to read body: {}", e)}),
+            );
+        }
+    };
+
+    handle_upgradesstables_inner(&body_bytes, state)
+}
+
+fn handle_upgradesstables_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<Bytes>> {
+    #[derive(Default, serde::Deserialize)]
+    struct UpgradeSSTablesRequest {
+        #[serde(default)]
+        keyspace: Option<String>,
+        #[serde(default)]
+        table: Option<String>,
+    }
+
+    let payload = if body_bytes.is_empty() {
+        UpgradeSSTablesRequest::default()
+    } else {
+        match serde_json::from_slice::<UpgradeSSTablesRequest>(body_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({"error": format!("Invalid JSON: {}", e)}),
+                );
+            }
+        }
+    };
+
+    if payload.table.is_some() && payload.keyspace.is_none() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            &json!({"error": "table requires keyspace"}),
+        );
+    }
+
+    let Some(engine) = state.storage_engine.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({"error": "storage engine not configured"}),
+        );
+    };
+
+    let description = match (payload.keyspace.as_ref(), payload.table.as_ref()) {
+        (Some(ks), Some(tbl)) => format!("Upgrade SSTables {ks}.{tbl}"),
+        _ => "Upgrade SSTables all tables".to_string(),
+    };
+    let op_id = state
+        .operations
+        .register(OperationType::Rebuild, description);
+
+    let response = match (payload.keyspace.as_ref(), payload.table.as_ref()) {
+        (Some(ks), Some(tbl)) => match engine.flush_cf(&format!("{ks}.{tbl}")) {
+            Ok(()) => match engine.maybe_compact_table(ks, tbl) {
+                Ok(compaction_executed) => match engine.refresh_sstables_from_disk() {
+                    Ok(()) => json_response(
+                        StatusCode::OK,
+                        &json!({
+                            "operation_id": op_id.to_string(),
+                            "status": "upgradesstables completed",
+                            "keyspace": payload.keyspace,
+                            "table": payload.table,
+                            "compaction_executed": compaction_executed,
+                        }),
+                    ),
+                    Err(err) => json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &json!({"error": format!("upgradesstables refresh failed: {err}")}),
+                    ),
+                },
+                Err(err) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &json!({"error": format!("upgradesstables compaction failed: {err}")}),
+                ),
+            },
+            Err(err) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": format!("upgradesstables flush failed: {err}")}),
+            ),
+        },
+        (Some(ks), None) => match engine.flush_all() {
+            Ok(()) => match engine.maybe_compact_keyspace(ks) {
+                Ok(compaction_executed) => match engine.refresh_sstables_from_disk() {
+                    Ok(()) => json_response(
+                        StatusCode::OK,
+                        &json!({
+                            "operation_id": op_id.to_string(),
+                            "status": "upgradesstables completed",
+                            "keyspace": payload.keyspace,
+                            "table": payload.table,
+                            "compaction_executed": compaction_executed,
+                        }),
+                    ),
+                    Err(err) => json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &json!({"error": format!("upgradesstables refresh failed: {err}")}),
+                    ),
+                },
+                Err(err) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &json!({"error": format!("upgradesstables compaction failed: {err}")}),
+                ),
+            },
+            Err(err) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": format!("upgradesstables flush failed: {err}")}),
+            ),
+        },
+        _ => match engine.flush_all() {
+            Ok(()) => match engine.maybe_compact() {
+                Ok(compaction_executed) => match engine.refresh_sstables_from_disk() {
+                    Ok(()) => json_response(
+                        StatusCode::OK,
+                        &json!({
+                            "operation_id": op_id.to_string(),
+                            "status": "upgradesstables completed",
+                            "keyspace": payload.keyspace,
+                            "table": payload.table,
+                            "compaction_executed": compaction_executed,
+                        }),
+                    ),
+                    Err(err) => json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &json!({"error": format!("upgradesstables refresh failed: {err}")}),
+                    ),
+                },
+                Err(err) => json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    &json!({"error": format!("upgradesstables compaction failed: {err}")}),
+                ),
+            },
+            Err(err) => json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &json!({"error": format!("upgradesstables flush failed: {err}")}),
+            ),
+        },
+    };
+
+    if response.status() == StatusCode::OK {
+        state.operations.update(&op_id, "COMPLETED", 100);
+    } else {
+        state.operations.update(&op_id, "FAILED", 100);
+    }
+    state.operations.remove(&op_id);
+    response
+}
+
 /// GET /api/v1/compaction/throughput — compaction throughput setting.
 pub fn handle_get_compaction_throughput(_state: &AdminState) -> Response<Full<Bytes>> {
     json_response(
@@ -337,6 +617,87 @@ pub async fn handle_set_compaction_throughput(
     };
 
     handle_set_compaction_throughput_inner(&body_bytes)
+}
+
+/// POST /api/v1/operations/garbagecollect — trigger tombstone garbage collection.
+pub async fn handle_garbagecollect(
+    req: Request<Incoming>,
+    state: &AdminState,
+) -> Response<Full<Bytes>> {
+    use http_body_util::BodyExt;
+
+    let body_bytes = match req.into_body().collect().await {
+        Ok(collected) => collected.to_bytes(),
+        Err(e) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &json!({"error": format!("Failed to read body: {}", e)}),
+            );
+        }
+    };
+
+    handle_garbagecollect_inner(&body_bytes, state)
+}
+
+fn handle_garbagecollect_inner(body_bytes: &[u8], state: &AdminState) -> Response<Full<Bytes>> {
+    #[derive(Default, serde::Deserialize)]
+    struct GarbageCollectRequest {
+        #[serde(default)]
+        keyspace: Option<String>,
+    }
+
+    let payload = if body_bytes.is_empty() {
+        GarbageCollectRequest::default()
+    } else {
+        match serde_json::from_slice::<GarbageCollectRequest>(body_bytes) {
+            Ok(p) => p,
+            Err(e) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    &json!({"error": format!("Invalid JSON: {}", e)}),
+                );
+            }
+        }
+    };
+
+    let Some(engine) = state.storage_engine.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &json!({"error": "storage engine not configured"}),
+        );
+    };
+
+    let description = match payload.keyspace.as_ref() {
+        Some(ks) => format!("Garbage collect keyspace: {ks}"),
+        None => "Garbage collect all keyspaces".to_string(),
+    };
+    let op_id = state
+        .operations
+        .register(OperationType::Rebuild, description);
+
+    let response = match engine.maybe_compact() {
+        Ok(compaction_executed) => json_response(
+            StatusCode::OK,
+            &json!({
+                "operation_id": op_id.to_string(),
+                "status": "garbagecollect completed",
+                "keyspace": payload.keyspace,
+                "compaction_executed": compaction_executed,
+            }),
+        ),
+        Err(err) => json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &json!({"error": format!("garbagecollect failed: {err}")}),
+        ),
+    };
+
+    if response.status() == StatusCode::OK {
+        state.operations.update(&op_id, "COMPLETED", 100);
+    } else {
+        state.operations.update(&op_id, "FAILED", 100);
+    }
+    state.operations.remove(&op_id);
+    response
 }
 
 fn handle_set_compaction_throughput_inner(body_bytes: &[u8]) -> Response<Full<Bytes>> {
@@ -369,10 +730,13 @@ mod tests {
     use super::*;
     use http_body_util::BodyExt;
     use std::sync::Arc;
+    use tempfile::TempDir;
 
     use crate::operations::OperationTracker;
     use crate::prometheus_metrics::MetricsRegistry;
     use crate::virtual_tables::VirtualTableRegistry;
+    use cassandra_storage::commitlog::{CellMutation, CommitLogConfig, Mutation, MutationRow};
+    use cassandra_storage::engine::{EngineConfig, StorageEngine};
 
     fn test_state() -> AdminState {
         AdminState {
@@ -382,7 +746,61 @@ mod tests {
             repair_coordinator: None,
             storage_engine: None,
             schema_catalog: None,
+            topology_controller: None,
         }
+    }
+
+    fn test_state_with_engine() -> (AdminState, TempDir) {
+        let dir = TempDir::new().unwrap();
+        let engine = Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![dir.path().join("data")],
+                commitlog: CommitLogConfig {
+                    directory: dir.path().join("commitlog"),
+                    ..CommitLogConfig::default()
+                },
+                ..EngineConfig::default()
+            })
+            .unwrap(),
+        );
+        let state = AdminState {
+            metrics: Arc::new(MetricsRegistry::new()),
+            operations: Arc::new(OperationTracker::new()),
+            virtual_tables: Arc::new(VirtualTableRegistry::with_builtins()),
+            repair_coordinator: None,
+            storage_engine: Some(engine),
+            schema_catalog: None,
+            topology_controller: None,
+        };
+        (state, dir)
+    }
+
+    fn insert_and_flush(engine: &StorageEngine, keyspace: &str, table: &str, partition_key: &[u8]) {
+        let mutation = Mutation {
+            keyspace: keyspace.to_string(),
+            table: table.to_string(),
+            partition_key: partition_key.to_vec(),
+            rows: vec![MutationRow {
+                clustering_key: Vec::new(),
+                cells: vec![CellMutation {
+                    column: "name".to_string(),
+                    value: Some(b"value".to_vec()),
+                    timestamp: 1,
+                    ttl: 0,
+                    local_deletion_time: None,
+                    is_tombstone: false,
+                }],
+                is_tombstone: false,
+                local_deletion_time: None,
+            }],
+            timestamp: 1,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        };
+        engine.apply_mutation(&mutation).unwrap();
+        engine.flush_cf(&format!("{keyspace}.{table}")).unwrap();
     }
 
     fn response_json(resp: Response<Full<Bytes>>) -> serde_json::Value {
@@ -487,5 +905,106 @@ mod tests {
         let body = serde_json::to_vec(&json!({"throughput_mb_per_sec": 128})).unwrap();
         let resp = handle_set_compaction_throughput_inner(&body);
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn verify_without_engine_returns_unavailable() {
+        let state = test_state();
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1", "table": "tbl1"})).unwrap();
+        let resp = handle_verify_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn verify_with_engine_returns_ok() {
+        let (state, _dir) = test_state_with_engine();
+        let engine = state.storage_engine.as_ref().unwrap();
+        insert_and_flush(engine, "ks1", "tbl1", b"pk-verify-1");
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1", "table": "tbl1"})).unwrap();
+        let resp = handle_verify_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed = response_json(resp);
+        assert!(parsed["operation_id"].is_string());
+        assert_eq!(parsed["status"], "verify completed");
+        assert_eq!(parsed["keyspace"], "ks1");
+        assert_eq!(parsed["table"], "tbl1");
+        assert!(parsed["scanned_sstables"].is_number());
+        assert!(parsed["valid_sstables"].is_number());
+        assert!(parsed["invalid_sstables"].is_number());
+        assert!(parsed["issue_count"].is_number());
+        assert!(parsed["issues"].is_array());
+        assert!(parsed["verified"].is_boolean());
+    }
+
+    #[test]
+    fn verify_table_without_keyspace_returns_bad_request() {
+        let (state, _dir) = test_state_with_engine();
+        let body = serde_json::to_vec(&json!({"table": "tbl1"})).unwrap();
+        let resp = handle_verify_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn upgradesstables_without_engine_returns_unavailable() {
+        let state = test_state();
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1"})).unwrap();
+        let resp = handle_upgradesstables_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn upgradesstables_with_engine_returns_ok() {
+        let (state, _dir) = test_state_with_engine();
+        let engine = state.storage_engine.as_ref().unwrap();
+        insert_and_flush(engine, "ks1", "tbl1", b"pk-up-1");
+        insert_and_flush(engine, "ks1", "tbl1", b"pk-up-2");
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1", "table": "tbl1"})).unwrap();
+        let resp = handle_upgradesstables_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed = response_json(resp);
+        assert!(parsed["operation_id"].is_string());
+        assert_eq!(parsed["status"], "upgradesstables completed");
+        assert_eq!(parsed["keyspace"], "ks1");
+        assert_eq!(parsed["table"], "tbl1");
+        assert!(parsed["compaction_executed"].is_boolean());
+    }
+
+    #[test]
+    fn upgradesstables_table_without_keyspace_returns_bad_request() {
+        let (state, _dir) = test_state_with_engine();
+        let body = serde_json::to_vec(&json!({"table": "tbl1"})).unwrap();
+        let resp = handle_upgradesstables_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn garbagecollect_without_engine_returns_unavailable() {
+        let state = test_state();
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1"})).unwrap();
+        let resp = handle_garbagecollect_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn garbagecollect_invalid_json_returns_bad_request() {
+        let (state, _dir) = test_state_with_engine();
+        let resp = handle_garbagecollect_inner(b"{invalid", &state);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn garbagecollect_with_engine_returns_ok() {
+        let (state, _dir) = test_state_with_engine();
+        let engine = state.storage_engine.as_ref().unwrap();
+        insert_and_flush(engine, "ks1", "tbl1", b"pk-gc-1");
+        insert_and_flush(engine, "ks1", "tbl1", b"pk-gc-2");
+        let body = serde_json::to_vec(&json!({"keyspace": "ks1"})).unwrap();
+        let resp = handle_garbagecollect_inner(&body, &state);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let parsed = response_json(resp);
+        assert!(parsed["operation_id"].is_string());
+        assert_eq!(parsed["status"], "garbagecollect completed");
+        assert_eq!(parsed["keyspace"], "ks1");
+        assert!(parsed["compaction_executed"].is_boolean());
     }
 }

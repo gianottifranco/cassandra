@@ -9,9 +9,9 @@ services:
     hostname: cass-rust-1
     container_name: cassandra-rust-1
     ports:
-      - "9042:9042"     # Native protocol
-      - "9142:9142"     # Native protocol (TLS)
-      - "9180:9180"     # Prometheus metrics
+      - "${CASSANDRA_NODE1_PORT:-9042}:9042"     # Native protocol
+      - "${CASSANDRA_NODE1_TLS_PORT:-9142}:9142" # Native protocol (TLS)
+      - "${CASSANDRA_NODE1_METRICS_PORT:-9180}:9180" # Prometheus metrics
     environment:
       CASSANDRA_CLUSTER_NAME: "rust-prod-cluster"
       CASSANDRA_NUM_TOKENS: "256"
@@ -36,8 +36,8 @@ services:
     hostname: cass-rust-2
     container_name: cassandra-rust-2
     ports:
-      - "9043:9042"
-      - "9181:9180"
+      - "${CASSANDRA_NODE2_PORT:-9043}:9042"
+      - "${CASSANDRA_NODE2_METRICS_PORT:-9181}:9180"
     environment:
       CASSANDRA_CLUSTER_NAME: "rust-prod-cluster"
       CASSANDRA_NUM_TOKENS: "256"
@@ -64,8 +64,8 @@ services:
     hostname: cass-rust-3
     container_name: cassandra-rust-3
     ports:
-      - "9044:9042"
-      - "9182:9180"
+      - "${CASSANDRA_NODE3_PORT:-9044}:9042"
+      - "${CASSANDRA_NODE3_METRICS_PORT:-9182}:9180"
     environment:
       CASSANDRA_CLUSTER_NAME: "rust-prod-cluster"
       CASSANDRA_NUM_TOKENS: "256"

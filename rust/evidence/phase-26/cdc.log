@@ -1,0 +1,12 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.18s
+     Running unittests src/lib.rs (target/debug/deps/cassandra_diff_tests-dc9a8f77995a1772)
+
+running 5 tests
+test cdc_tests::tests::cdc_handoff_point ... ok
+test cdc_tests::tests::cdc_no_duplicates ... ok
+test cdc_tests::tests::cdc_segment_ordering ... ok
+test cdc_tests::tests::cdc_continuity_across_migration ... ok
+test cdc_tests::tests::cdc_gap_detection ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 186 filtered out; finished in 0.00s
+

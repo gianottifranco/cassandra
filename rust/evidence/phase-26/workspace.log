@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.15s
+     Running tests/workspace_tests.rs (target/debug/deps/workspace_tests-ca9c2ff01b857fd0)
+
+running 7 tests
+test all_crates_exist ... ok
+test version_consistency ... ok
+test all_crates_have_license_header ... ok
+test documentation_exists ... ok
+test error_code_compliance ... ok
+test feature_matrix_parseable ... ok
+test no_unsafe_in_phase1 ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.22s
+

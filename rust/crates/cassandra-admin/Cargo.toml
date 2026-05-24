@@ -25,6 +25,7 @@ cassandra-repair = { version = "0.1.0", path = "../cassandra-repair" }
 cassandra-cluster-metadata = { version = "0.1.0", path = "../cassandra-cluster-metadata" }
 cassandra-storage = { version = "0.1.0", path = "../cassandra-storage" }
 cassandra-schema = { version = "0.1.0", path = "../cassandra-schema" }
+cassandra-coordinator = { version = "0.1.0", path = "../cassandra-coordinator" }
 
 [features]
 sasi = ["cassandra-storage/sasi"]

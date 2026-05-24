@@ -1,0 +1,459 @@
+   Compiling cassandra-security v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-security)
+   Compiling hyper-rustls v0.27.7
+   Compiling reqwest v0.13.2
+   Compiling cassandra-messaging v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-messaging)
+   Compiling cassandra-cluster-metadata v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-cluster-metadata)
+   Compiling cassandra-streaming v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-streaming)
+   Compiling cassandra-repair v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-repair)
+   Compiling cassandra-admin v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-admin)
+   Compiling cassandra-tools v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-tools)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 6.05s
+     Running unittests src/lib.rs (target/debug/deps/cassandra_admin-ec39159a43dfdf94)
+
+running 173 tests
+test diagnostics::tests::event_display_impl ... ok
+test diagnostics::tests::event_serialization_roundtrip ... ok
+test diagnostics::tests::history_ring_buffer_evicts_oldest ... ok
+test diagnostics::tests::multiple_listeners_all_receive_events ... ok
+
+thread 'diagnostics::tests::panicking_listener_does_not_affect_others' (1643997) panicked at crates/cassandra-admin/src/diagnostics.rs:239:13:
+intentional panic in test listener
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test diagnostics::tests::recent_events_returns_latest ... ok
+test diagnostics::tests::panicking_listener_does_not_affect_others ... ok
+test diagnostics::tests::subscribe_and_publish_reaches_listener ... ok
+test diagnostics::tests::unsubscribe_stops_delivery ... ok
+test disk_management::tests::write_selection_prefers_lowest_usage_with_capacity ... ok
+test disk_management::tests::token_boundaries_select_configured_directory ... ok
+test disk_management::tests::rejects_boundaries_for_unknown_directory ... ok
+test disk_management::tests::refresh_usage_counts_nested_files ... ok
+test handlers_cache_hints::tests::disable_handoff_returns_ok ... ok
+test handlers_cache_hints::tests::invalidate_cache_invalid_type ... ok
+test handlers_cache_hints::tests::set_cache_capacity_missing_field ... ok
+test handlers_cache_hints::tests::pending_hints_returns_ok_with_builtins ... ok
+test handlers_cache_hints::tests::enable_handoff_returns_ok ... ok
+test handlers_cache_hints::tests::pause_handoff_returns_ok ... ok
+test handlers_cache_hints::tests::invalidate_cache_valid_type ... ok
+test handlers_cluster::tests::cluster_info_returns_ok ... ok
+test handlers_cluster::tests::cluster_ring_returns_ok ... ok
+test handlers_cluster::tests::cluster_status_returns_ok_with_nodes ... ok
+test handlers_cluster::tests::gossip_info_returns_ok_empty_endpoints ... ok
+test handlers_compaction::tests::cleanup_with_valid_body ... ok
+test handlers_compaction::tests::autocompaction_status_returns_enabled ... ok
+test handlers_cluster::tests::cluster_status_fallback_with_empty_registry ... ok
+test handlers_compaction::tests::compact_with_invalid_json ... ok
+test handlers_compaction::tests::compact_with_valid_body ... ok
+test handlers_compaction::tests::set_compaction_throughput_valid ... ok
+test handlers_cache_hints::tests::truncate_hints_returns_ok ... ok
+test handlers_cache_hints::tests::set_cache_capacity_valid ... ok
+test handlers_cluster::tests::describe_cluster_returns_ok_with_metadata ... ok
+test handlers_compaction::tests::compaction_stats_returns_ok ... ok
+test handlers_compaction::tests::disable_autocompaction_returns_ok ... ok
+test handlers_compaction::tests::enable_autocompaction_returns_ok ... ok
+test handlers_cache_hints::tests::resume_handoff_returns_ok ... ok
+test handlers_compaction::tests::compaction_stats_shows_active_operations ... ok
+test handlers_compaction::tests::compaction_history_returns_retained_rebuild_operations ... ok
+test handlers_compaction::tests::get_compaction_throughput_returns_default ... ok
+test handlers_cache_hints::tests::pending_hints_returns_empty_without_virtual_table ... ok
+test handlers_config::tests::set_config_rejects_invalid_json ... ok
+test handlers_config::tests::enable_gossip_returns_status ... ok
+test handlers_config::tests::disable_binary_returns_status ... ok
+test handlers_config::tests::binary_status_returns_running ... ok
+test handlers_config::tests::enable_binary_returns_status ... ok
+test handlers_config::tests::set_config_rejects_non_object ... ok
+test handlers_config::tests::reload_ssl_returns_status ... ok
+test handlers_config::tests::reload_triggers_returns_status ... ok
+test handlers_config::tests::reload_schema_returns_status ... ok
+test handlers_config::tests::set_config_returns_updated_keys ... ok
+test handlers_logging::tests::enable_fql_rejects_invalid_json ... ok
+test handlers_config::tests::gossip_status_returns_running ... ok
+test handlers_logging::tests::enable_fql_returns_log_dir ... ok
+test handlers_logging::tests::set_logging_level_rejects_invalid_json ... ok
+test handlers_logging::tests::disable_audit_log_returns_status ... ok
+test handlers_logging::tests::get_logging_levels_returns_ok ... ok
+test handlers_logging::tests::enable_audit_log_returns_status ... ok
+test handlers_logging::tests::set_trace_probability_rejects_negative ... ok
+test handlers_logging::tests::get_trace_probability_returns_zero ... ok
+test handlers_logging::tests::disable_fql_returns_status ... ok
+test handlers_config::tests::disable_gossip_returns_status ... ok
+test handlers_config::tests::get_config_returns_ok_with_virtual_table ... ok
+test handlers_logging::tests::get_audit_config_returns_config ... ok
+test handlers_snapshots::tests::backup_status_returns_disabled ... ok
+test handlers_snapshots::tests::enable_backup_returns_ok ... ok
+test handlers_config::tests::get_config_returns_defaults_without_virtual_table ... ok
+test handlers_snapshots::tests::list_snapshots_returns_ok ... ok
+test handlers_logging::tests::get_fql_config_returns_config ... ok
+test handlers_snapshots::tests::take_snapshot_invalid_json ... ok
+test handlers_snapshots::tests::disable_backup_returns_ok ... ok
+test handlers_stats::tests::client_stats_returns_ok ... ok
+test handlers_logging::tests::set_trace_probability_valid ... ok
+test handlers_logging::tests::set_logging_level_returns_success ... ok
+test handlers_stats::tests::proxy_histograms_returns_ok ... ok
+test handlers_snapshots::tests::clear_snapshot_specific_name ... ok
+test handlers_snapshots::tests::import_valid_body ... ok
+test handlers_stats::tests::table_stats_returns_ok_with_virtual_table ... ok
+test handlers_topology::tests::bootstrap_registers_operation ... ok
+test handlers_stats::tests::tp_stats_returns_ok ... ok
+test handlers_topology::tests::assassinate_with_valid_body ... ok
+test handlers_snapshots::tests::take_snapshot_with_valid_body ... ok
+test handlers_topology::tests::decommission_registers_operation ... ok
+test handlers_stats::tests::gc_stats_reports_no_gc ... ok
+test handlers_stats::tests::table_stats_returns_empty_without_virtual_table_or_engine ... ok
+test handlers_topology::tests::drain_returns_ok ... ok
+test handlers_topology::tests::join_returns_ok ... ok
+test handlers_topology::tests::netstats_returns_ok ... ok
+test handlers_stats::tests::table_histograms_returns_percentiles ... ok
+test handlers_topology::tests::removenode_invalid_json ... ok
+test handlers_topology::tests::refresh_with_valid_body ... ok
+test handlers_topology::tests::removenode_with_valid_body ... ok
+test handlers_stats::tests::top_partitions_returns_empty ... ok
+test http_admin::tests::not_found_response ... ok
+test handlers_logging::tests::set_trace_probability_rejects_out_of_range ... ok
+test handlers_topology::tests::topology_status_filters_operations ... ok
+test http_admin::tests::health_response ... ok
+test http_admin::tests::metrics_response ... ok
+test handlers_topology::tests::rebuild_with_source_dc ... ok
+test handlers_topology::tests::move_with_valid_body ... ok
+test http_admin::tests::operations_response ... ok
+test http_diagnostics::tests::diagnostic_event_info_roundtrip_serde ... ok
+test http_tracing_audit::tests::audit_config_returns_ok ... ok
+test http_tracing_audit::tests::tracing_session_detail_not_found ... ok
+test http_admin::tests::virtual_table_bad_path ... ok
+test http_admin::tests::virtual_table_found ... ok
+test http_diagnostics::tests::json_response_sets_content_type ... ok
+test http_tracing_audit::tests::tracing_session_detail_found ... ok
+test http_admin::tests::virtual_table_not_found ... ok
+test http_diagnostics::tests::handle_diagnostics_recent_empty_provider ... ok
+test http_diagnostics::tests::handle_diagnostics_recent_returns_ok ... ok
+test http_tracing_audit::tests::tracing_sessions_returns_ok ... ok
+test nodetool::tests::command_catalog_contains_admin_mapped_commands ... ok
+test nodetool::tests::table_formatter_aligns_columns ... ok
+test http_diagnostics::tests::handle_diagnostics_recent_respects_limit ... ok
+test nodetool::tests::table_stats_holder_aggregates_and_renders ... ok
+test operations::tests::register_and_list ... ok
+test operations::tests::remove_operation ... ok
+test operations::tests::update_progress ... ok
+test metrics::tests::admin_metrics_construction ... ok
+test http_tracing_audit::tests::tracing_sessions_respects_limit ... ok
+test prometheus_metrics::tests::commitlog_metrics_sync ... ok
+test prometheus_metrics::tests::exception_counter ... ok
+test prometheus_metrics::tests::cache_metrics_in_text_output ... ok
+test prometheus_metrics::tests::cache_metrics_sync ... ok
+test prometheus_metrics::tests::observe_latency ... ok
+test prometheus_metrics::tests::increment_counters ... ok
+test prometheus_metrics::tests::compaction_metrics_sync ... ok
+test prometheus_metrics::tests::messaging_metrics_sync ... ok
+test operations::tests::remove_records_history ... ok
+test prometheus_metrics::tests::paxos_metrics ... ok
+test prometheus_metrics::tests::gauge_operations ... ok
+test prometheus_metrics::tests::registry_creation ... ok
+test http_tracing_audit::tests::audit_config_body_contains_enabled ... ok
+test virtual_tables::tests::batch_metrics_table ... ok
+test prometheus_metrics::tests::table_level_metrics ... ok
+test prometheus_metrics::tests::tracing_and_tcm_metrics ... ok
+test route_table::tests::test_register_prefix ... ok
+test route_table::tests::test_dispatch_not_found ... ok
+test route_table::tests::test_register_sync_get ... ok
+test route_table::tests::test_route_table_creation ... ok
+test virtual_tables::tests::all_virtual_tables_have_unique_names ... ok
+test virtual_tables::tests::all_virtual_tables_have_columns ... ok
+test virtual_tables::tests::caches_table ... ok
+test virtual_tables::tests::custom_virtual_table ... ok
+test virtual_tables::tests::gossip_info_table ... ok
+test virtual_tables::tests::log_messages_table ... ok
+test virtual_tables::tests::local_info_table ... ok
+test virtual_tables::tests::peers_table ... ok
+test prometheus_metrics::tests::streaming_metrics_sync ... ok
+test virtual_tables::tests::queries_table ... ok
+test virtual_tables::tests::slow_queries_table ... ok
+test virtual_tables::tests::snapshots_table ... ok
+test virtual_tables::tests::sstable_tasks_empty ... ok
+test virtual_tables::tests::streaming_table ... ok
+test virtual_tables::tests::thread_pools_table ... ok
+test virtual_tables::tests::registry_with_builtins ... ok
+test virtual_tables::tests::clients_table_empty ... ok
+test virtual_tables::tests::cql_metrics_table ... ok
+test virtual_tables::tests::internode_tables ... ok
+test virtual_tables::tests::security_cache_keys_tables ... ok
+test virtual_tables_metrics::tests::cql_metrics_table_metadata ... ok
+test virtual_tables::tests::settings_table ... ok
+test virtual_tables_operations::tests::live_operations_table_metadata ... ok
+test virtual_tables_metrics::tests::storage_metrics_table_metadata ... ok
+test virtual_tables_operations::tests::sstable_tasks_table_empty_provider ... ok
+test virtual_tables::tests::registry_lookup ... ok
+test virtual_tables_operations::tests::sstable_tasks_table_rows ... ok
+test virtual_tables_operations::tests::sstable_tasks_table_metadata ... ok
+test virtual_tables_metrics::tests::cql_metrics_table_rows_reflect_registry ... ok
+test virtual_tables_metrics::tests::storage_metrics_table_rows_reflect_registry ... ok
+test virtual_tables_metrics::tests::rows_update_when_metrics_change ... ok
+test virtual_tables_operations::tests::live_operations_table_rows_from_tracker ... ok
+test virtual_tables_operations::tests::live_operations_table_empty_tracker ... ok
+
+test result: ok. 173 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.13s
+
+     Running unittests src/main.rs (target/debug/deps/cassandra_tools-5b50311798511fc4)
+
+running 120 tests
+test bootstrap_monitor::tests::test_format_progress_bar_clamps_above_100 ... ok
+test bootstrap_monitor::tests::test_format_progress_bar_hundred ... ok
+test bootstrap_monitor::tests::test_format_progress_bar_fifty ... ok
+test bootstrap_monitor::tests::test_format_progress_bar_zero ... ok
+test bootstrap_monitor::tests::test_format_progress_bar_small_width ... ok
+test bootstrap_monitor::tests::test_format_progress_bar_zero_width ... ok
+test bootstrap_monitor::tests::test_parse_bootstrap_operation ... ok
+test bootstrap_monitor::tests::test_parse_operation_missing_fields ... ok
+test cmd_cluster_info::tests::test_format_node_status_down_leaving ... ok
+test bootstrap_monitor::tests::test_run_function_signature ... ok
+test bootstrap_monitor::tests::test_parse_completed_bootstrap ... ok
+test bootstrap_monitor::tests::test_parse_empty_operations ... ok
+ID                            : abc-123
+Load                          : 42
+test cmd_cluster_info::tests::test_format_node_status_missing_fields ... ok
+test cmd_cluster_info::tests::test_print_field_string_value ... ok
+test cmd_cluster_info::tests::test_status_function_signature ... ok
+test cmd_compaction::tests::test_build_ks_table_body_all_fields ... ok
+test cmd_cluster_info::tests::test_format_node_status_short_codes ... ok
+test cmd_compaction::tests::test_build_ks_table_body_only_keyspace ... ok
+Compact started. Operation ID: abc-123
+test cmd_compaction::tests::test_print_operation_id_with_id ... ok
+test cmd_compaction::tests::test_function_signatures ... ok
+Flush submitted: {"status":"ok"}
+test cmd_compaction::tests::test_print_operation_id_without_id ... ok
+test cmd_cluster_info::tests::test_format_node_status_up_normal ... ok
+test cmd_compaction::tests::test_build_ks_table_body_no_optional ... ok
+Error fetching read timeout: Failed to connect to admin API at http://127.0.0.1:1/api/v1/config?key=read_request_timeout_in_ms
+test cmd_config::tests::test_get_timeout_connection_refused ... ok
+Error enabling hinted handoff: Failed to connect to admin API at http://127.0.0.1:1/api/v1/handoff/enable
+test cmd_cache_hints::tests::test_enable_handoff_connection_refused ... ok
+Error setting config 'key': Failed to connect to admin API at http://127.0.0.1:1/api/v1/config
+test cmd_config::tests::test_set_config_connection_refused ... ok
+Error fetching seeds: Failed to connect to admin API at http://127.0.0.1:1/api/v1/config?key=seed_provider
+test cmd_config::tests::test_get_seeds_connection_refused ... ok
+Error setting row cache capacity: Failed to connect to admin API at http://127.0.0.1:1/api/v1/cache/capacity
+test cmd_cache_hints::tests::test_set_cache_capacity_connection_refused ... ok
+test admin_client::tests::test_get_connection_refused ... ok
+Error enabling native transport: Failed to connect to admin API at http://127.0.0.1:1/api/v1/binary/enable
+test cmd_config::tests::test_enable_binary_connection_refused ... ok
+test admin_client::tests::test_client_custom_host ... ok
+test admin_client::tests::test_client_creation ... ok
+Error listing pending hints: Failed to connect to admin API at http://127.0.0.1:1/api/v1/hints/pending
+test cmd_cache_hints::tests::test_list_pending_hints_connection_refused ... ok
+Error invalidating key cache: Failed to connect to admin API at http://127.0.0.1:1/api/v1/cache/invalidate
+test cmd_cache_hints::tests::test_invalidate_cache_connection_refused ... ok
+Error fetching gossip status: Failed to connect to admin API at http://127.0.0.1:1/api/v1/gossip/status
+test cmd_config::tests::test_status_gossip_connection_refused ... ok
+test cmd_snapshots::tests::test_generate_snapshot_name_format ... ok
+test cmd_snapshots::tests::test_generate_snapshot_name_uniqueness ... ok
+Error fetching logging levels: Failed to connect to admin API at http://127.0.0.1:1/api/v1/logging/levels
+test cmd_logging_security::tests::test_get_logging_levels_connection_refused ... ok
+Error fetching trace probability: Failed to connect to admin API at http://127.0.0.1:1/api/v1/tracing/probability
+test cmd_logging_security::tests::test_get_trace_probability_connection_refused ... ok
+Error truncating hints: Failed to connect to admin API at http://127.0.0.1:1/api/v1/hints/truncate
+test cmd_cache_hints::tests::test_truncate_hints_connection_refused ... ok
+Error fetching config: Failed to connect to admin API at http://127.0.0.1:1/api/v1/config
+test cmd_config::tests::test_get_config_connection_refused ... ok
+Error setting trace probability: Failed to connect to admin API at http://127.0.0.1:1/api/v1/tracing/probability
+test cmd_logging_security::tests::test_set_trace_probability_connection_refused ... ok
+Error enabling audit logging: Failed to connect to admin API at http://127.0.0.1:1/api/v1/operations/enableauditlog
+test cmd_logging_security::tests::test_enable_audit_log_connection_refused ... ok
+Error setting logging level for 'org.apache.cassandra': Failed to connect to admin API at http://127.0.0.1:1/api/v1/logging/level
+test cmd_logging_security::tests::test_set_logging_level_connection_refused ... ok
+Requesting snapshot 'test-snap'...
+Error creating snapshot: Failed to connect to admin API at http://127.0.0.1:1/api/v1/operations/snapshot
+test cmd_snapshots::tests::test_snapshot_connection_refused ... ok
+Error enabling full query logging: Failed to connect to admin API at http://127.0.0.1:1/api/v1/operations/enablefql
+test cmd_logging_security::tests::test_enable_fql_connection_refused ... ok
+Clearing snapshot(s): nonexistent...
+Error clearing snapshot(s): Failed to connect to admin API at http://127.0.0.1:1/api/v1/snapshots?name=nonexistent
+test cmd_snapshots::tests::test_clear_snapshot_connection_refused ... ok
+Importing SSTables from '/tmp/sstables' into ks.tbl...
+Error importing SSTables: Failed to connect to admin API at http://127.0.0.1:1/api/v1/operations/import
+test cmd_snapshots::tests::test_import_connection_refused ... ok
+Error enabling backup: Failed to connect to admin API at http://127.0.0.1:1/api/v1/backup/enable
+test cmd_snapshots::tests::test_enable_backup_connection_refused ... ok
+Clearing snapshot(s): all...
+Error clearing snapshot(s): Failed to connect to admin API at http://127.0.0.1:1/api/v1/snapshots
+test cmd_snapshots::tests::test_clear_snapshot_all_connection_refused ... ok
+Error fetching failure detector info: Failed to connect to admin API at http://127.0.0.1:1/api/v1/stats/failure_detector_info
+test cmd_stats::tests::test_failure_detector_info_connection_refused ... ok
+Error fetching top partitions: Failed to connect to admin API at http://127.0.0.1:1/api/v1/stats/toppartitions?duration_ms=1000&keyspace=ks&table=tbl
+test cmd_stats::tests::test_top_partitions_connection_refused ... ok
+Error listing snapshots: Failed to connect to admin API at http://127.0.0.1:1/api/v1/snapshots
+test cmd_snapshots::tests::test_list_snapshots_connection_refused ... ok
+Error fetching thread pool stats: Failed to connect to admin API at http://127.0.0.1:1/api/v1/stats/tpstats
+test cmd_stats::tests::test_tp_stats_connection_refused ... ok
+Error fetching endpoints: Failed to connect to admin API at http://127.0.0.1:1/api/v1/stats/endpoints?keyspace=ks&table=tbl&key=key1
+test cmd_stats::tests::test_get_endpoints_connection_refused ... ok
+Test started (operation "abc-123")
+test cmd_topology::tests::test_print_operation_id_with_id ... ok
+Test completed successfully
+test cmd_topology::tests::test_print_operation_id_without_id ... ok
+Error getting backup status: Failed to connect to admin API at http://127.0.0.1:1/api/v1/backup/status
+test cmd_snapshots::tests::test_status_backup_connection_refused ... ok
+Error fetching table stats: Failed to connect to admin API at http://127.0.0.1:1/api/v1/stats/tables?keyspace=system
+test cmd_stats::tests::test_table_stats_with_keyspace ... ok
+Error getting netstats: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/netstats
+test cmd_topology::tests::test_netstats_connection_refused ... ok
+Draining node...
+Error draining: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/drain
+test cmd_topology::tests::test_drain_connection_refused ... ok
+Assassinating endpoint 10.0.0.1:7000...
+Joining ring...
+Error joining ring: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/join
+test cmd_topology::tests::test_join_connection_refused ... ok
+Error assassinating endpoint: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/assassinate
+test cmd_topology::tests::test_assassinate_connection_refused ... ok
+Resuming bootstrap...
+Generating tokens for 2 nodes with 4 vnodes per node (5 racks)
+
+Node 1 (rack 1):
+  initial_token: -9223372036854775808,-6917529027641081856,-4611686018427387904,-2305843009213693952
+
+Node 2 (rack 2):
+  initial_token: 0,2305843009213693952,4611686018427387904,6917529027641081856
+
+test generate_tokens::tests::test_racks_greater_than_nodes ... ok
+Moving node to token 12345...
+Error moving token: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/move
+test cmd_topology::tests::test_move_token_connection_refused ... ok
+test generate_tokens::tests::test_single_node_single_token ... ok
+Error resuming bootstrap: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/bootstrap
+Generating tokens for 3 nodes with 256 vnodes per node (3 racks)
+
+Node 1 (rack 1):
+  initial_token: -9223372036854775808,-9199352838842133163,-9175333640829490518,-9151314442816847872,-9127295244804205227,-9103276046791562582,-9079256848778919936,-9055237650766277291,-9031218452753634646,-9007199254740992000,-8983180056728349355,-8959160858715706710,-8935141660703064064,-8911122462690421419,-8887103264677778774,-8863084066665136128,-8839064868652493483,-8815045670639850838,-8791026472627208192,-8767007274614565547,-8742988076601922902,-8718968878589280256,-8694949680576637611,-8670930482563994966,-8646911284551352320,-8622892086538709675,-8598872888526067030,-8574853690513424384,-8550834492500781739,-8526815294488139094,-8502796096475496448,-8478776898462853803,-8454757700450211158,-8430738502437568512,-8406719304424925867,-8382700106412283222,-8358680908399640576,-8334661710386997931,-8310642512374355286,-8286623314361712640,-8262604116349069995,-8238584918336427350,-8214565720323784704,-8190546522311142059,-8166527324298499414,-8142508126285856768,-8118488928273214123,-8094469730260571478,-8070450532247928832,-8046431334235286187,-8022412136222643542,-7998392938210000896,-7974373740197358251,-7950354542184715606,-7926335344172072960,-7902316146159430315,-7878296948146787670,-7854277750134145024,-7830258552121502379,-7806239354108859734,-7782220156096217088,-7758200958083574443,-7734181760070931798,-7710162562058289152,-7686143364045646507,-7662124166033003862,-7638104968020361216,-7614085770007718571,-7590066571995075926,-7566047373982433280,-7542028175969790635,-7518008977957147990,-7493989779944505344,-7469970581931862699,-7445951383919220054,-7421932185906577408,-7397912987893934763,-7373893789881292118,-7349874591868649472,-7325855393856006827,-7301836195843364182,-7277816997830721536,-7253797799818078891,-7229778601805436246,-7205759403792793600,-7181740205780150955,-7157721007767508310,-7133701809754865664,-7109682611742223019,-7085663413729580374,-7061644215716937728,-7037625017704295083,-7013605819691652438,-6989586621679009792,-6965567423666367147,-6941548225653724502,-6917529027641081856,-6893509829628439211,-6869490631615796566,-6845471433603153920,-6821452235590511275,-6797433037577868630,-6773413839565225984,-6749394641552583339,-6725375443539940694,-6701356245527298048,-6677337047514655403,-6653317849502012758,-6629298651489370112,-6605279453476727467,-6581260255464084822,-6557241057451442176,-6533221859438799531,-6509202661426156886,-6485183463413514240,-6461164265400871595,-6437145067388228950,-6413125869375586304,-6389106671362943659,-6365087473350301014,-6341068275337658368,-6317049077325015723,-6293029879312373078,-6269010681299730432,-6244991483287087787,-6220972285274445142,-6196953087261802496,-6172933889249159851,-6148914691236517206,-6124895493223874560,-6100876295211231915,-6076857097198589270,-6052837899185946624,-6028818701173303979,-6004799503160661334,-5980780305148018688,-5956761107135376043,-5932741909122733398,-5908722711110090752,-5884703513097448107,-5860684315084805462,-5836665117072162816,-5812645919059520171,-5788626721046877526,-5764607523034234880,-5740588325021592235,-5716569127008949590,-5692549928996306944,-5668530730983664299,-5644511532971021654,-5620492334958379008,-5596473136945736363,-5572453938933093718,-5548434740920451072,-5524415542907808427,-5500396344895165782,-5476377146882523136,-5452357948869880491,-5428338750857237846,-5404319552844595200,-5380300354831952555,-5356281156819309910,-5332261958806667264,-5308242760794024619,-5284223562781381974,-5260204364768739328,-5236185166756096683,-5212165968743454038,-5188146770730811392,-5164127572718168747,-5140108374705526102,-5116089176692883456,-5092069978680240811,-5068050780667598166,-5044031582654955520,-5020012384642312875,-4995993186629670230,-4971973988617027584,-4947954790604384939,-4923935592591742294,-4899916394579099648,-4875897196566457003,-4851877998553814358,-4827858800541171712,-4803839602528529067,-4779820404515886422,-4755801206503243776,-4731782008490601131,-4707762810477958486,-4683743612465315840,-4659724414452673195,-4635705216440030550,-4611686018427387904,-4587666820414745259,-4563647622402102614,-4539628424389459968,-4515609226376817323,-4491590028364174678,-4467570830351532032,-4443551632338889387,-4419532434326246742,-4395513236313604096,-4371494038300961451,-4347474840288318806,-4323455642275676160,-4299436444263033515,-4275417246250390870,-4251398048237748224,-4227378850225105579,-4203359652212462934,-4179340454199820288,-4155321256187177643,-4131302058174534998,-4107282860161892352,-4083263662149249707,-4059244464136607062,-4035225266123964416,-4011206068111321771,-3987186870098679126,-3963167672086036480,-3939148474073393835,-3915129276060751190,-3891110078048108544,-3867090880035465899,-3843071682022823254,-3819052484010180608,-3795033285997537963,-3771014087984895318,-3746994889972252672,-3722975691959610027,-3698956493946967382,-3674937295934324736,-3650918097921682091,-3626898899909039446,-3602879701896396800,-3578860503883754155,-3554841305871111510,-3530822107858468864,-3506802909845826219,-3482783711833183574,-3458764513820540928,-3434745315807898283,-3410726117795255638,-3386706919782612992,-3362687721769970347,-3338668523757327702,-3314649325744685056,-3290630127732042411,-3266610929719399766,-3242591731706757120,-3218572533694114475,-3194553335681471830,-3170534137668829184,-3146514939656186539,-3122495741643543894,-3098476543630901248
+
+Node 2 (rack 2):
+  initial_token: -3074457345618258603,-3050438147605615958,-3026418949592973312,-3002399751580330667,-2978380553567688022,-2954361355555045376,-2930342157542402731,-2906322959529760086,-2882303761517117440,-2858284563504474795,-2834265365491832150,-2810246167479189504,-2786226969466546859,-2762207771453904214,-2738188573441261568,-2714169375428618923,-2690150177415976278,-2666130979403333632,-2642111781390690987,-2618092583378048342,-2594073385365405696,-2570054187352763051,-2546034989340120406,-2522015791327477760,-2497996593314835115,-2473977395302192470,-2449958197289549824,-2425938999276907179,-2401919801264264534,-2377900603251621888,-2353881405238979243,-2329862207226336598,-2305843009213693952,-2281823811201051307,-2257804613188408662,-2233785415175766016,-2209766217163123371,-2185747019150480726,-2161727821137838080,-2137708623125195435,-2113689425112552790,-2089670227099910144,-2065651029087267499,-2041631831074624854,-2017612633061982208,-1993593435049339563,-1969574237036696918,-1945555039024054272,-1921535841011411627,-1897516642998768982,-1873497444986126336,-1849478246973483691,-1825459048960841046,-1801439850948198400,-1777420652935555755,-1753401454922913110,-1729382256910270464,-1705363058897627819,-1681343860884985174,-1657324662872342528,-1633305464859699883,-1609286266847057238,-1585267068834414592,-1561247870821771947,-1537228672809129302,-1513209474796486656,-1489190276783844011,-1465171078771201366,-1441151880758558720,-1417132682745916075,-1393113484733273430,-1369094286720630784,-1345075088707988139,-1321055890695345494,-1297036692682702848,-1273017494670060203,-1248998296657417558,-1224979098644774912,-1200959900632132267,-1176940702619489622,-1152921504606846976,-1128902306594204331,-1104883108581561686,-1080863910568919040,-1056844712556276395,-1032825514543633750,-1008806316530991104,-984787118518348459,-960767920505705814,-936748722493063168,-912729524480420523,-888710326467777878,-864691128455135232,-840671930442492587,-816652732429849942,-792633534417207296,-768614336404564651,-744595138391922006,-720575940379279360,-696556742366636715,-672537544353994070,-648518346341351424,-624499148328708779,-600479950316066134,-576460752303423488,-552441554290780843,-528422356278138198,-504403158265495552,-480383960252852907,-456364762240210262,-432345564227567616,-408326366214924971,-384307168202282326,-360287970189639680,-336268772176997035,-312249574164354390,-288230376151711744,-264211178139069099,-240191980126426454,-216172782113783808,-192153584101141163,-168134386088498518,-144115188075855872,-120095990063213227,-96076792050570582,-72057594037927936,-48038396025285291,-24019198012642646,0,24019198012642645,48038396025285290,72057594037927936,96076792050570581,120095990063213226,144115188075855872,168134386088498517,192153584101141162,216172782113783808,240191980126426453,264211178139069098,288230376151711744,312249574164354389,336268772176997034,360287970189639680,384307168202282325,408326366214924970,432345564227567616,456364762240210261,480383960252852906,504403158265495552,528422356278138197,552441554290780842,576460752303423488,600479950316066133,624499148328708778,648518346341351424,672537544353994069,696556742366636714,720575940379279360,744595138391922005,768614336404564650,792633534417207296,816652732429849941,840671930442492586,864691128455135232,888710326467777877,912729524480420522,936748722493063168,960767920505705813,984787118518348458,1008806316530991104,1032825514543633749,1056844712556276394,1080863910568919040,1104883108581561685,1128902306594204330,1152921504606846976,1176940702619489621,1200959900632132266,1224979098644774912,1248998296657417557,1273017494670060202,1297036692682702848,1321055890695345493,1345075088707988138,1369094286720630784,1393113484733273429,1417132682745916074,1441151880758558720,1465171078771201365,1489190276783844010,1513209474796486656,1537228672809129301,1561247870821771946,1585267068834414592,1609286266847057237,1633305464859699882,1657324662872342528,1681343860884985173,1705363058897627818,1729382256910270464,1753401454922913109,1777420652935555754,1801439850948198400,1825459048960841045,1849478246973483690,1873497444986126336,1897516642998768981,1921535841011411626,1945555039024054272,1969574237036696917,1993593435049339562,2017612633061982208,2041631831074624853,2065651029087267498,2089670227099910144,2113689425112552789,2137708623125195434,2161727821137838080,2185747019150480725,2209766217163123370,2233785415175766016,2257804613188408661,2281823811201051306,2305843009213693952,2329862207226336597,2353881405238979242,2377900603251621888,2401919801264264533,2425938999276907178,2449958197289549824,2473977395302192469,2497996593314835114,2522015791327477760,2546034989340120405,2570054187352763050,2594073385365405696,2618092583378048341,2642111781390690986,2666130979403333632,2690150177415976277,2714169375428618922,2738188573441261568,2762207771453904213,2786226969466546858,2810246167479189504,2834265365491832149,2858284563504474794,2882303761517117440,2906322959529760085,2930342157542402730,2954361355555045376,2978380553567688021,3002399751580330666,3026418949592973312,3050438147605615957
+
+Node 3 (rack 3):
+  initial_token: 3074457345618258602,3098476543630901248,3122495741643543893,3146514939656186538,3170534137668829184,3194553335681471829,3218572533694114474,3242591731706757120,3266610929719399765,3290630127732042410,3314649325744685056,3338668523757327701,3362687721769970346,3386706919782612992,3410726117795255637,3434745315807898282,3458764513820540928,3482783711833183573,3506802909845826218,3530822107858468864,3554841305871111509,3578860503883754154,3602879701896396800,3626898899909039445,3650918097921682090,3674937295934324736,3698956493946967381,3722975691959610026,3746994889972252672,3771014087984895317,3795033285997537962,3819052484010180608,3843071682022823253,3867090880035465898,3891110078048108544,3915129276060751189,3939148474073393834,3963167672086036480,3987186870098679125,4011206068111321770,4035225266123964416,4059244464136607061,4083263662149249706,4107282860161892352,4131302058174534997,4155321256187177642,4179340454199820288,4203359652212462933,4227378850225105578,4251398048237748224,4275417246250390869,4299436444263033514,4323455642275676160,4347474840288318805,4371494038300961450,4395513236313604096,4419532434326246741,4443551632338889386,4467570830351532032,4491590028364174677,4515609226376817322,4539628424389459968,4563647622402102613,4587666820414745258,4611686018427387904,4635705216440030549,4659724414452673194,4683743612465315840,4707762810477958485,4731782008490601130,4755801206503243776,4779820404515886421,4803839602528529066,4827858800541171712,4851877998553814357,4875897196566457002,4899916394579099648,4923935592591742293,4947954790604384938,4971973988617027584,4995993186629670229,5020012384642312874,5044031582654955520,5068050780667598165,5092069978680240810,5116089176692883456,5140108374705526101,5164127572718168746,5188146770730811392,5212165968743454037,5236185166756096682,5260204364768739328,5284223562781381973,5308242760794024618,5332261958806667264,5356281156819309909,5380300354831952554,5404319552844595200,5428338750857237845,5452357948869880490,5476377146882523136,5500396344895165781,5524415542907808426,5548434740920451072,5572453938933093717,5596473136945736362,5620492334958379008,5644511532971021653,5668530730983664298,5692549928996306944,5716569127008949589,5740588325021592234,5764607523034234880,5788626721046877525,5812645919059520170,5836665117072162816,5860684315084805461,5884703513097448106,5908722711110090752,5932741909122733397,5956761107135376042,5980780305148018688,6004799503160661333,6028818701173303978,6052837899185946624,6076857097198589269,6100876295211231914,6124895493223874560,6148914691236517205,6172933889249159850,6196953087261802496,6220972285274445141,6244991483287087786,6269010681299730432,6293029879312373077,6317049077325015722,6341068275337658368,6365087473350301013,6389106671362943658,6413125869375586304,6437145067388228949,6461164265400871594,6485183463413514240,6509202661426156885,6533221859438799530,6557241057451442176,6581260255464084821,6605279453476727466,6629298651489370112,6653317849502012757,6677337047514655402,6701356245527298048,6725375443539940693,6749394641552583338,6773413839565225984,6797433037577868629,6821452235590511274,6845471433603153920,6869490631615796565,6893509829628439210,6917529027641081856,6941548225653724501,6965567423666367146,6989586621679009792,7013605819691652437,7037625017704295082,7061644215716937728,7085663413729580373,7109682611742223018,7133701809754865664,7157721007767508309,7181740205780150954,7205759403792793600,7229778601805436245,7253797799818078890,7277816997830721536,7301836195843364181,7325855393856006826,7349874591868649472,7373893789881292117,7397912987893934762,7421932185906577408,7445951383919220053,7469970581931862698,7493989779944505344,7518008977957147989,7542028175969790634,7566047373982433280,7590066571995075925,7614085770007718570,7638104968020361216,7662124166033003861,7686143364045646506,7710162562058289152,7734181760070931797,7758200958083574442,7782220156096217088,7806239354108859733,7830258552121502378,7854277750134145024,7878296948146787669,7902316146159430314,7926335344172072960,7950354542184715605,7974373740197358250,7998392938210000896,8022412136222643541,8046431334235286186,8070450532247928832,8094469730260571477,8118488928273214122,8142508126285856768,8166527324298499413,8190546522311142058,8214565720323784704,8238584918336427349,8262604116349069994,8286623314361712640,8310642512374355285,8334661710386997930,8358680908399640576,8382700106412283221,8406719304424925866,8430738502437568512,8454757700450211157,8478776898462853802,8502796096475496448,8526815294488139093,8550834492500781738,8574853690513424384,8598872888526067029,8622892086538709674,8646911284551352320,8670930482563994965,8694949680576637610,8718968878589280256,8742988076601922901,8767007274614565546,8791026472627208192,8815045670639850837,8839064868652493482,8863084066665136128,8887103264677778773,8911122462690421418,8935141660703064064,8959160858715706709,8983180056728349354,9007199254740992000,9031218452753634645,9055237650766277290,9079256848778919936,9103276046791562581,9127295244804205226,9151314442816847872,9175333640829490517,9199352838842133162
+
+test generate_tokens::tests::test_run_function_does_not_panic ... ok
+test generate_tokens::tests::test_tokens_are_sorted ... ok
+test generate_tokens::tests::test_two_nodes_tokens_cover_range ... ok
+Generating tokens for 0 nodes with 256 vnodes per node (1 racks)
+
+Error: nodes and tokens must be > 0
+test generate_tokens::tests::test_zero_nodes_prints_error ... ok
+Generating tokens for 3 nodes with 0 vnodes per node (1 racks)
+
+Error: nodes and tokens must be > 0
+test generate_tokens::tests::test_zero_tokens_prints_error ... ok
+test generate_tokens::tests::test_three_nodes_256_tokens_unique ... ok
+test cmd_topology::tests::test_bootstrap_resume_connection_refused ... ok
+Error: password cannot be empty
+test hash_password::tests::test_empty_password_prints_error ... ok
+Error fetching table stats: Failed to connect to admin API at http://127.0.0.1:1/api/v1/stats/tables
+test cmd_stats::tests::test_table_stats_connection_refused ... ok
+test hash_password::tests::test_invalid_rounds_return_error ... ok
+$2b$04$IdPlY2jSjYulQB8ZxYJ9Tuh27ghgJCpjJezNYeZv12PIb3QkpaqbO
+test hash_password::tests::test_run_with_valid_password_does_not_panic ... ok
+Aborting bootstrap...
+Error aborting bootstrap: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/bootstrap
+test cmd_topology::tests::test_abort_bootstrap_connection_refused ... ok
+Error: file not found: /nonexistent/path/ks-tbl-big-1-Data.db
+test sstable_expired_blockers::tests::test_file_not_found ... ok
+test sstable_expired_blockers::tests::test_parse_descriptor_bti_format ... ok
+test hash_password::tests::test_hash_format ... ok
+test sstable_expired_blockers::tests::test_parse_descriptor_invalid ... ok
+test sstable_expired_blockers::tests::test_parse_descriptor_valid ... ok
+Reset compaction level from 5 to 0 for /tmp/.tmpAJPlrE/ks-tbl-big-1-Data.db
+test sstable_level_reset::tests::test_level_reset_with_temp_file ... ok
+test sstable_level_reset::tests::test_parse_descriptor_invalid ... ok
+test sstable_level_reset::tests::test_parse_descriptor_valid ... ok
+test hash_password::tests::test_with_provided_password ... ok
+test sstable_offline_relevel::tests::test_compute_level_large ... ok
+test sstable_offline_relevel::tests::test_compute_level_medium ... ok
+test sstable_offline_relevel::tests::test_compute_level_small ... ok
+Decommissioning node...
+Error: not a directory: /nonexistent/directory
+test sstable_offline_relevel::tests::test_directory_not_found ... ok
+No SSTable data files found in /tmp/.tmp7boZK6
+test sstable_offline_relevel::tests::test_empty_directory ... ok
+Error: file not found: /nonexistent/path/ks-tbl-big-1-Data.db
+test sstable_partitions::tests::test_file_not_found ... ok
+test sstable_partitions::tests::test_parse_descriptor_bti_format ... ok
+test sstable_partitions::tests::test_parse_descriptor_invalid ... ok
+test sstable_partitions::tests::test_parse_descriptor_valid ... ok
+Error: file not found: /nonexistent/path/ks-tbl-big-1-Data.db
+test sstable_repaired_at::tests::test_file_not_found ... ok
+test sstable_repaired_at::tests::test_parse_descriptor_invalid ... ok
+test sstable_repaired_at::tests::test_parse_descriptor_valid ... ok
+test sstable_offline_relevel::tests::test_compute_level_boundary ... ok
+Set repaired-at to 1700000000000 (was 0) for /tmp/.tmpMGOgzP/ks-tbl-big-1-Data.db
+Cleared repaired-at timestamp (was 1700000000000) for /tmp/.tmpMGOgzP/ks-tbl-big-1-Data.db
+Error: file not found: /nonexistent/path/ks-tbl-big-1-Data.db
+test sstable_repaired_at::tests::test_set_repaired_at_with_temp_file ... ok
+test sstable_split::tests::test_file_not_found ... ok
+test sstable_split::tests::test_parse_descriptor_bti_format ... ok
+test sstable_split::tests::test_parse_descriptor_invalid ... ok
+test sstable_verify::tests::verify_statistics_accepts_binary_metadata ... ok
+test sstable_verify::tests::verify_statistics_accepts_legacy_json_metadata ... ok
+Error: file not found: /nonexistent/path/ks-tbl-big-1-Data.db
+test sstable_level_reset::tests::test_file_not_found ... ok
+
+thread 'table_formatter::tests::rejects_wrong_width_rows' (1644882) panicked at crates/cassandra-tools/src/table_formatter.rs:85:9:
+assertion `left == right` failed: row column count must match table columns
+  left: 2
+ right: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test table_formatter::tests::rejects_wrong_width_rows - should panic ... ok
+Error decommissioning: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/decommission
+test table_formatter::tests::renders_left_and_right_aligned_columns ... ok
+test cmd_topology::tests::test_decommission_connection_refused ... ok
+test hash_password::tests::test_different_passwords_produce_different_output ... ok
+Removing node fake-host-id...
+Error removing node: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/removenode
+test table_formatter::tests::grows_columns_to_fit_values ... ok
+test sstable_split::tests::test_parse_descriptor_valid ... ok
+test cmd_topology::tests::test_removenode_connection_refused ... ok
+Stopping Cassandra daemon...
+Warning: drain failed: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/drain
+Proceeding with stop anyway...
+Cassandra daemon stop requested
+Note: the daemon process will terminate; connection may be lost.
+test cmd_topology::tests::test_stop_daemon_connection_refused ... ok
+Rebuilding from all datacenters...
+Error rebuilding: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/rebuild
+test cmd_topology::tests::test_rebuild_without_source_dc_connection_refused ... ok
+test hash_password::tests::test_different_rounds_produce_different_output ... ok
+Rebuilding from datacenter 'dc1'...
+Error rebuilding: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/rebuild
+test cmd_topology::tests::test_rebuild_with_source_dc_connection_refused ... ok
+Refreshing ks.tbl...
+Error refreshing: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/refresh
+test cmd_topology::tests::test_refresh_connection_refused ... ok
+Error getting topology status: Failed to connect to admin API at http://127.0.0.1:1/api/v1/topology/status
+test cmd_topology::tests::test_topology_status_connection_refused ... ok
+
+test result: ok. 120 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running unittests src/fqltool.rs (target/debug/deps/fqltool-db6dc647ce67c959)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli_smoke.rs (target/debug/deps/cli_smoke-328cd9ca07381c84)
+
+running 10 tests
+test help_lists_all_command_groups ... ok
+test help_exits_ok ... ok
+test subcommand_help_works ... ok
+test version_exits_ok ... ok
+test sstable_partitions_missing_file ... ok
+test generate_tokens_zero_nodes_error ... ok
+test sstable_split_missing_file ... ok
+test generate_tokens_produces_output ... ok
+test sstable_verify_missing_file ... ok
+test hash_password_with_arg ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.36s
+
+   Doc-tests cassandra_admin
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

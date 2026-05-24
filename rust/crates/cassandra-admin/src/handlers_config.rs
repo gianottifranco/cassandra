@@ -164,6 +164,7 @@ mod tests {
             repair_coordinator: None,
             storage_engine: None,
             schema_catalog: None,
+            topology_controller: None,
         })
     }
 
@@ -193,6 +194,7 @@ mod tests {
             repair_coordinator: None,
             storage_engine: None,
             schema_catalog: None,
+            topology_controller: None,
         });
         let resp = handle_get_config(&state);
         let body = body_string(resp);

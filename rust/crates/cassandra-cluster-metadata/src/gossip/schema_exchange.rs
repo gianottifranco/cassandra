@@ -56,8 +56,12 @@ pub struct SchemaSnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SchemaPushPayload {
-    Snapshot { snapshot: SchemaSnapshot },
-    Migration { migration: RemoteSchemaMigration },
+    Snapshot {
+        snapshot: SchemaSnapshot,
+    },
+    Migration {
+        migration: Box<RemoteSchemaMigration>,
+    },
 }
 
 /// Trait for providing the local schema snapshot.
@@ -124,7 +128,7 @@ pub fn make_schema_push_handler(applier: Arc<dyn SchemaApplier>) -> MessageHandl
                     base_version = %migration.base_version,
                     "Applying pushed schema migration"
                 );
-                return match applier.apply_migration(migration) {
+                return match applier.apply_migration(*migration) {
                     Ok(()) => Some(Message::response(
                         msg.header.message_id,
                         Verb::SchemaResponse,
@@ -234,7 +238,7 @@ pub async fn push_schema_migration_to(
     messaging: &MessagingService,
 ) -> Result<(), SchemaExchangeError> {
     let payload = serde_json::to_vec(&SchemaPushPayload::Migration {
-        migration: migration.clone(),
+        migration: Box::new(migration.clone()),
     })
     .map_err(|e| SchemaExchangeError::Deserialization(e.to_string()))?;
 
@@ -263,7 +267,7 @@ pub async fn push_schema_migration_to_with_ack(
     timeout: Duration,
 ) -> Result<(), SchemaExchangeError> {
     let payload = serde_json::to_vec(&SchemaPushPayload::Migration {
-        migration: migration.clone(),
+        migration: Box::new(migration.clone()),
     })
     .map_err(|e| SchemaExchangeError::Deserialization(e.to_string()))?;
 
@@ -709,7 +713,7 @@ mod tests {
         );
 
         let payload = serde_json::to_vec(&SchemaPushPayload::Migration {
-            migration: migration.clone(),
+            migration: Box::new(migration.clone()),
         })
         .unwrap();
         let msg = Message::request(Verb::SchemaPush, 1, payload);
@@ -889,7 +893,10 @@ mod tests {
             Uuid::new_v4(),
             SchemaMigration::CreateKeyspace(KeyspaceMetadata::new("ks", KeyspaceParams::default())),
         );
-        let payload = serde_json::to_vec(&SchemaPushPayload::Migration { migration }).unwrap();
+        let payload = serde_json::to_vec(&SchemaPushPayload::Migration {
+            migration: Box::new(migration),
+        })
+        .unwrap();
         let msg = Message::request(Verb::SchemaPush, 1, payload);
 
         let response = handler(msg).unwrap();
@@ -927,14 +934,14 @@ mod tests {
             SchemaMigration::DropKeyspace("ks".to_string()),
         );
         let payload = SchemaPushPayload::Migration {
-            migration: migration.clone(),
+            migration: Box::new(migration.clone()),
         };
         let json = serde_json::to_vec(&payload).unwrap();
         let decoded: SchemaPushPayload = serde_json::from_slice(&json).unwrap();
 
         match decoded {
             SchemaPushPayload::Migration { migration: decoded } => {
-                assert_eq!(decoded, migration);
+                assert_eq!(*decoded, migration);
             }
             SchemaPushPayload::Snapshot { .. } => panic!("expected migration payload"),
         }

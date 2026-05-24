@@ -123,6 +123,11 @@ pub fn command_catalog() -> Vec<NodetoolCommand> {
         ),
         cmd("rebuild", "topology", Some("/api/v1/topology/rebuild")),
         cmd("bootstrap", "topology", Some("/api/v1/topology/bootstrap")),
+        cmd(
+            "stopdaemon",
+            "topology",
+            Some("/api/v1/topology/stopdaemon"),
+        ),
         cmd("snapshot", "snapshots", Some("/api/v1/snapshots/create")),
         cmd("listsnapshots", "snapshots", Some("/api/v1/snapshots")),
         cmd(
@@ -409,6 +414,10 @@ mod tests {
         assert_eq!(
             command_by_name("TABLeSTATS").unwrap().admin_path,
             Some("/api/v1/stats/tables")
+        );
+        assert_eq!(
+            command_by_name("STOPDAEMON").unwrap().admin_path,
+            Some("/api/v1/topology/stopdaemon")
         );
     }
 

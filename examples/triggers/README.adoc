@@ -1,6 +1,10 @@
 Cassandra Trigger Example
 ==========================
 
+NOTE: As of 2026-05-24, this Java example source has been removed from this
+branch as part of the Java→Rust rewrite. Historical Java implementation can be
+retrieved from the Java oracle history/branch.
+
 The `AuditTrigger` class will create a basic audit of
 activity on a table.
 
@@ -60,4 +64,3 @@ cqlsh> SELECT * FROM test.audit ;
  primary_key   | 1
  table_name    | test
 ----
-

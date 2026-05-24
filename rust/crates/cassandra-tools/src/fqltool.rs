@@ -46,9 +46,7 @@ enum Commands {
     },
 }
 
-fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
-
+fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
         Commands::Dump { path, json } => {
             let records = FqlReader::read_all(&path)?;
@@ -107,4 +105,16 @@ fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+pub fn run_with_args(args: &[String]) -> anyhow::Result<()> {
+    let cli =
+        Cli::try_parse_from(std::iter::once("fqltool".to_string()).chain(args.iter().cloned()))?;
+    run(cli)
+}
+
+#[allow(dead_code)]
+fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    run_with_args(&args)
 }

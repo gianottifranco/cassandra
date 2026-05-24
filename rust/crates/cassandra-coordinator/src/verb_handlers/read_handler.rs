@@ -29,6 +29,10 @@ pub struct ReadDataRequest {
     pub table: String,
     /// Serialized partition key.
     pub partition_key: Vec<u8>,
+    /// Continue after this clustering key (exclusive).
+    pub start_after: Option<Vec<u8>>,
+    /// Maximum live rows to return for this request.
+    pub row_limit: Option<usize>,
 }
 
 /// Wire-format partition result for serialization over messaging.
@@ -189,8 +193,12 @@ fn read_data_response(
             }
         };
 
-    let digest = Digest::from_partition(&data).0;
-    let response = DataResponse::from_partition(request.partition_key.clone(), data, now_seconds);
+    let (bounded_data, is_short_read) =
+        apply_bounds_to_partition(data, request.start_after.as_deref(), request.row_limit);
+    let digest = Digest::from_partition(&bounded_data).0;
+    let mut response =
+        DataResponse::from_partition(request.partition_key.clone(), bounded_data, now_seconds);
+    response.is_short_read = is_short_read;
     ReadDataResponsePayload {
         partitions: response
             .partitions
@@ -210,6 +218,39 @@ fn read_data_response(
         tombstones_read: response.tombstones_read,
         is_short_read: response.is_short_read,
     }
+}
+
+fn apply_bounds_to_partition(
+    data: cassandra_storage::memtable::partition::PartitionData,
+    start_after: Option<&[u8]>,
+    row_limit: Option<usize>,
+) -> (cassandra_storage::memtable::partition::PartitionData, bool) {
+    let mut bounded = cassandra_storage::memtable::partition::PartitionData::new();
+    if let (Some(ts), Some(ldt)) = (data.tombstone_timestamp, data.tombstone_local_deletion_time) {
+        bounded.set_tombstone(ts, ldt);
+    }
+
+    let mut rows = data
+        .rows
+        .into_iter()
+        .filter(|(clustering_key, _)| {
+            start_after
+                .map(|start| clustering_key.as_slice() > start)
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    let mut is_short_read = false;
+    if let Some(limit) = row_limit {
+        if rows.len() > limit {
+            rows.truncate(limit);
+            is_short_read = true;
+        }
+    }
+    for (_, row) in rows {
+        bounded.apply_row(row);
+    }
+
+    (bounded, is_short_read)
 }
 
 fn read_digest_response(
@@ -348,6 +389,8 @@ mod tests {
             keyspace: "ks".to_string(),
             table: "tbl".to_string(),
             partition_key: vec![1, 2, 3],
+            start_after: None,
+            row_limit: None,
         };
         let bytes = serde_json::to_vec(&request).unwrap();
         let decoded: ReadDataRequest = serde_json::from_slice(&bytes).unwrap();
@@ -387,6 +430,8 @@ mod tests {
             keyspace: "ks".to_string(),
             table: "tbl".to_string(),
             partition_key: vec![1],
+            start_after: None,
+            row_limit: None,
         };
         let payload = serde_json::to_vec(&request).unwrap();
         let msg = Message::request(Verb::ReadData, 10, payload);
@@ -413,6 +458,8 @@ mod tests {
             keyspace: "ks".to_string(),
             table: "tbl".to_string(),
             partition_key: b"pk1".to_vec(),
+            start_after: None,
+            row_limit: None,
         };
         let payload = serde_json::to_vec(&request).unwrap();
         let msg = Message::request(Verb::ReadData, 10, payload);
@@ -474,5 +521,78 @@ mod tests {
         let response = ReadDigestVerbHandler::handle(msg);
         assert!(response.is_some());
         assert!(response.unwrap().is_failure());
+    }
+
+    #[test]
+    fn handle_read_data_applies_start_after_and_row_limit() {
+        let (storage, _temp) = test_storage();
+        storage
+            .apply_mutation(&Mutation {
+                keyspace: "ks".to_string(),
+                table: "tbl".to_string(),
+                partition_key: b"pk1".to_vec(),
+                rows: vec![
+                    MutationRow {
+                        clustering_key: b"a".to_vec(),
+                        cells: vec![CellMutation {
+                            column: "v".to_string(),
+                            value: Some(b"1".to_vec()),
+                            timestamp: 1_000,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    },
+                    MutationRow {
+                        clustering_key: b"b".to_vec(),
+                        cells: vec![CellMutation {
+                            column: "v".to_string(),
+                            value: Some(b"2".to_vec()),
+                            timestamp: 1_001,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    },
+                    MutationRow {
+                        clustering_key: b"c".to_vec(),
+                        cells: vec![CellMutation {
+                            column: "v".to_string(),
+                            value: Some(b"3".to_vec()),
+                            timestamp: 1_002,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    },
+                ],
+                timestamp: 1_000,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone: None,
+                range_tombstones: Vec::new(),
+            })
+            .unwrap();
+
+        let request = ReadDataRequest {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_key: b"pk1".to_vec(),
+            start_after: Some(b"a".to_vec()),
+            row_limit: Some(1),
+        };
+        let msg = Message::request(Verb::ReadData, 10, serde_json::to_vec(&request).unwrap());
+        let response = ReadDataVerbHandler::handle_with_storage(msg, &storage).unwrap();
+        let body: ReadDataResponsePayload = serde_json::from_slice(&response.payload).unwrap();
+
+        assert_eq!(body.partitions.len(), 1);
+        assert_eq!(body.partitions[0].live_row_count, 1);
+        assert!(body.is_short_read);
     }
 }

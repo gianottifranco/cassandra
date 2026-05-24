@@ -1662,6 +1662,7 @@ impl WriteCoordinator {
     /// This entry point coordinates the base mutation and trigger augmentations,
     /// then schedules generated view mutations on the provided dispatcher for a
     /// later worker/drain pass instead of applying them inline.
+    #[allow(clippy::too_many_arguments)]
     pub fn coordinate_write_with_async_view_hooks(
         &self,
         mutation: &CoordinatedMutation,

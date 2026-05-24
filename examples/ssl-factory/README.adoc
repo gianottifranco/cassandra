@@ -1,6 +1,10 @@
 Cassandra Custom SslContextFactory Example
 ==========================================
 
+NOTE: As of 2026-05-24, this Java example source has been removed from this
+branch as part of the Java→Rust rewrite. Historical Java implementation can be
+retrieved from the Java oracle history/branch.
+
 This example shows custom SslContextFactory implementation based on Kubernetes secrets
 For the documentation please refer to the javadocs for `K8SecretsSslContextFactory.java.`
 

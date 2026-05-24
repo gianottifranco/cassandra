@@ -1,0 +1,42 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/security_audit.rs (target/debug/deps/security_audit-a736751f6b801b77)
+
+running 6 tests
+
+Binary hardening checks:
+  ✅ Symbol stripping enabled: strip = "symbols"
+  ✅ Panic=abort in production: panic = "abort"
+  ✅ Full LTO in production: lto = "fat"
+  ⚠️  Single codegen unit: codegen-units = "1" not found in [profile.production]
+test test_binary_hardening_config ... ok
+⚠️  AllowAllAuthenticator found without clear dev-only markers:
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:210:// ─── AllowAllAuthorizer ────────────────────────────────────────────────────
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:213:pub struct AllowAllAuthorizer;
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:215:impl Authorizer for AllowAllAuthorizer {
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:257:        "AllowAllAuthorizer"
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:526:        let authz = AllowAllAuthorizer;
+test test_auth_bypass_impossible ... ok
+⚠️  No explicit TLS version configuration found — using library defaults.
+    rustls defaults to TLS 1.2+ which is acceptable.
+⚠️  Weak cipher reference found: DES
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:45:            Self::Describe => write!(f, "DESCRIBE"),
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/authz.rs:114:            "DESCRIBE" => Ok(Permission::Describe),
+  /home/ubuntu/cassandra/rust/crates/cassandra-security/src/tde.rs:170:            cipher: "DES/ECB/NoPadding".to_string(),
+✅ No weak cipher suites detected.
+test test_tls_config_defaults ... ok
+⚠️  Found 5 unsafe usage(s) — verifying justification:
+  ❓ /home/ubuntu/cassandra/rust/crates/cassandra-io/src/util/channel_proxy.rs:61:        let file = unsafe { &mut *(file as *const File as *mut File) };
+  ❓ /home/ubuntu/cassandra/rust/crates/cassandra-io/src/util/mmap_rebufferer.rs:60:        let mmap = unsafe { Mmap::map(&file)? };
+  ❓ /home/ubuntu/cassandra/rust/crates/cassandra-io/src/util/rebufferer.rs:175:        let mmap = Arc::new(unsafe { Mmap::map(&file).unwrap() });
+  ❓ /home/ubuntu/cassandra/rust/crates/cassandra-io/src/util/rebufferer.rs:190:        let mmap = Arc::new(unsafe { Mmap::map(&file).unwrap() });
+  ❓ /home/ubuntu/cassandra/rust/crates/cassandra-config/src/properties.rs:1099:            unsafe { std::env::remove_var(name) };
+  → 5 unsafe block(s) may lack SAFETY comment. Review manually.
+test test_unsafe_blocks_justified ... ok
+⚠️  cargo-deny is not installed. Install with: cargo install cargo-deny
+   Skipping dependency audit.
+test test_dependency_audit_clean ... ok
+✅ No secret patterns found in log statements.
+test test_no_secrets_in_logs ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.08s
+

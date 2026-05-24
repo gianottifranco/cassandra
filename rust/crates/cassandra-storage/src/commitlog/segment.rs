@@ -281,12 +281,35 @@ impl Segment {
         self.read_entries_with_codec(policy, &PlainSegmentWriter)
     }
 
+    /// Read entries with corruption handling, stopping before `max_offset`.
+    ///
+    /// This is used by CDC consumers to respect durable offsets tracked in
+    /// `<segment>.log_cdc.idx`.
+    pub fn read_entries_with_policy_up_to(
+        &self,
+        policy: CorruptionPolicy,
+        max_offset: u64,
+    ) -> Vec<Result<Vec<u8>>> {
+        self.read_entries_with_codec_up_to(policy, &PlainSegmentWriter, max_offset)
+    }
+
     /// Read entries using the supplied encryption codec for encrypted entry
     /// payloads.
     pub fn read_entries_with_codec(
         &self,
         policy: CorruptionPolicy,
         codec: &dyn EncryptedSegmentWriter,
+    ) -> Vec<Result<Vec<u8>>> {
+        self.read_entries_with_codec_up_to(policy, codec, self.size)
+    }
+
+    /// Read entries using the supplied encryption codec, stopping before
+    /// `max_offset` from the beginning of the segment file.
+    pub fn read_entries_with_codec_up_to(
+        &self,
+        policy: CorruptionPolicy,
+        codec: &dyn EncryptedSegmentWriter,
+        max_offset: u64,
     ) -> Vec<Result<Vec<u8>>> {
         let mut results = Vec::new();
 
@@ -306,6 +329,13 @@ impl Segment {
         }
 
         loop {
+            let entry_start = match reader.stream_position() {
+                Ok(position) => position,
+                Err(e) => {
+                    results.push(Err(CommitLogError::Io(e)));
+                    break;
+                }
+            };
             // Try to read entry length
             let len = match reader.read_u32::<BigEndian>() {
                 Ok(l) => l,
@@ -315,6 +345,15 @@ impl Segment {
                     break;
                 }
             };
+            let entry_len = len as u64;
+            let entry_record_overhead = if self.version >= VERSION_2 {
+                9u64
+            } else {
+                8u64
+            };
+            if entry_start + entry_record_overhead + entry_len > max_offset {
+                break;
+            }
 
             // Read entry flags (v2) or CRC (v1 compat)
             let (entry_flags, stored_crc) = if self.version >= VERSION_2 {
@@ -594,6 +633,24 @@ mod tests {
         let entries = read_seg.read_entries_with_policy(CorruptionPolicy::SkipAndContinue);
         assert_eq!(entries.len(), 3);
         assert!(entries.iter().all(|e| e.is_ok()));
+    }
+
+    #[test]
+    fn read_entries_with_policy_up_to_respects_offset() {
+        let dir = TempDir::new().unwrap();
+        let mut seg = Segment::create(dir.path(), 21).unwrap();
+        let payload1 = b"entry1";
+        let payload2 = b"entry2";
+        seg.append_entry(payload1).unwrap();
+        let second_offset = seg.append_entry(payload2).unwrap();
+        seg.sync().unwrap();
+
+        let path = dir.path().join(segment_filename(21));
+        let read_seg = Segment::open_for_read(&path).unwrap();
+        let entries =
+            read_seg.read_entries_with_policy_up_to(CorruptionPolicy::StopOnCorrupt, second_offset);
+        let entries: Vec<_> = entries.into_iter().map(|entry| entry.unwrap()).collect();
+        assert_eq!(entries, vec![payload1.to_vec()]);
     }
 
     #[test]

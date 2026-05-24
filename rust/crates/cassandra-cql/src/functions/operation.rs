@@ -811,7 +811,8 @@ fn date_bytes_to_millis(bytes: &[u8]) -> Result<i64, String> {
 
 fn add_months_utc(millis: i64, months: i32) -> Result<i64, String> {
     let date_time = UtcDateTime::from_millis(millis)?;
-    let month_index = (date_time.year as i64)
+    let month_index = date_time
+        .year
         .checked_mul(12)
         .and_then(|value| value.checked_add(date_time.month as i64 - 1))
         .and_then(|value| value.checked_add(months as i64))

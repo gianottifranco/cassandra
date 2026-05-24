@@ -13,6 +13,7 @@ use parking_lot::RwLock;
 use tracing::debug;
 
 use cassandra_common::CassandraError;
+use cassandra_coordinator::ConsistencyLevel;
 use cassandra_cql::ast::{
     AssignmentOp, BindMarker, Literal, Relation, Select, SelectColumns, Selector, Statement, Term,
     Update, UsingClause,
@@ -23,6 +24,7 @@ use cassandra_cql::prepared::PreparedCache;
 use cassandra_native_protocol::message::{
     BatchMessage, ColumnSpec, ColumnType, PreparedResult, QueryParams, RowsMetadata, query_flags,
 };
+use cassandra_native_protocol::types::Consistency as NativeConsistency;
 use cassandra_schema::{SchemaCatalog, SchemaSnapshot};
 use cassandra_types::{CqlType, codec::CqlValue};
 
@@ -83,7 +85,11 @@ impl QueryProcessor {
 
         let result = self
             .executor
-            .execute(&plan, user)
+            .execute_with_consistency(
+                &plan,
+                user,
+                native_to_coordinator_consistency(params.consistency),
+            )
             .map_err(executor_error_to_cassandra)?;
 
         Ok(result)
@@ -206,6 +212,7 @@ impl QueryProcessor {
         for query in &batch.queries {
             if query.is_prepared {
                 let params = QueryParams {
+                    consistency: batch.consistency,
                     values: query.values.clone(),
                     keyspace: batch.keyspace.clone(),
                     ..QueryParams::default()
@@ -223,6 +230,7 @@ impl QueryProcessor {
                     CassandraError::InvalidQuery("Invalid UTF-8 in batch query".into())
                 })?;
                 let params = QueryParams {
+                    consistency: batch.consistency,
                     values: query.values.clone(),
                     keyspace: batch.keyspace.clone(),
                     ..QueryParams::default()
@@ -424,6 +432,22 @@ fn selector_output_name_for_metadata(selector: &Selector) -> String {
             )
         }
         Selector::WritetimeOrTtl(kind, column) => format!("{}({})", kind, column),
+    }
+}
+
+fn native_to_coordinator_consistency(consistency: NativeConsistency) -> ConsistencyLevel {
+    match consistency {
+        NativeConsistency::Any => ConsistencyLevel::Any,
+        NativeConsistency::One => ConsistencyLevel::One,
+        NativeConsistency::Two => ConsistencyLevel::Two,
+        NativeConsistency::Three => ConsistencyLevel::Three,
+        NativeConsistency::Quorum => ConsistencyLevel::Quorum,
+        NativeConsistency::All => ConsistencyLevel::All,
+        NativeConsistency::LocalQuorum => ConsistencyLevel::LocalQuorum,
+        NativeConsistency::EachQuorum => ConsistencyLevel::EachQuorum,
+        NativeConsistency::Serial => ConsistencyLevel::Serial,
+        NativeConsistency::LocalSerial => ConsistencyLevel::LocalSerial,
+        NativeConsistency::LocalOne => ConsistencyLevel::LocalOne,
     }
 }
 

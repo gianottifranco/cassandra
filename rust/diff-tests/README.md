@@ -20,10 +20,36 @@ make golden-test
 # Run full differential test suite (requires Docker)
 make diff-test
 
+# Run Rust-only differential suite (no Java oracle / Docker)
+make diff-test-rust-only
+
 # Or using cargo xtask directly:
 cargo xtask diff-test
+cargo xtask diff-test-rust-only
 cargo xtask golden-test
 cargo xtask generate-golden
+
+# Final validation gates (no Docker required)
+cargo xtask final-validate
+cargo xtask final-validate-strict
+
+# Phase 26 evidence capture
+make capture-evidence
+make capture-evidence-strict
+cargo xtask capture-evidence
+cargo xtask capture-evidence-strict
+
+# Phase 26 full validation
+cargo xtask phase26-validate
+cargo xtask phase26-validate-strict
+
+# Java-free full validation (no Java oracle / Docker)
+cargo xtask phase26-validate-rust-only
+cargo xtask phase26-validate-rust-only-strict
+
+# Java code presence audit
+cargo xtask java-code-audit
+cargo xtask java-code-audit-strict
 ```
 
 ## Architecture
@@ -68,12 +94,93 @@ Compares Rust output against pre-committed JSON/binary fixtures. No Docker.
 make diff-test
 ```
 Starts Java oracle + Rust stub via Docker Compose, runs full test suite.
+If you need to keep existing `diff-test` automation but skip Java/oracle
+dependencies, set `CASSANDRA_NO_JAVA_ORACLE=1`.
+
+### Tier 2B: Rust-Only Differential Tests
+```bash
+make diff-test-rust-only
+# or:
+cargo xtask diff-test-rust-only
+# compatibility path:
+CASSANDRA_NO_JAVA_ORACLE=1 cargo xtask diff-test
+```
+Runs offline differential checks only (golden, fuzz, protocol/error/tombstone).
+No Docker or Java oracle required.
 
 ### Tier 3: Manual / Docker-only
 ```bash
 make docker-up                    # Start services
 make pytest                       # Run pytest separately
 make docker-down                  # Stop services
+```
+
+### Tier 4: Final Validation Gates (No Docker)
+```bash
+# Advisory perf mode (budget overruns warn)
+cargo xtask final-validate
+
+# Strict perf mode (budget overruns fail)
+cargo xtask final-validate-strict
+# equivalent:
+CASSANDRA_STRICT_PERF_BUDGET=1 cargo xtask final-validate
+```
+
+### Tier 5: Phase 26 Evidence Capture
+```bash
+# Capture suite logs + summary JSON
+make capture-evidence
+# or
+cargo xtask capture-evidence
+
+# Capture with strict perf budget enforcement
+make capture-evidence-strict
+# or
+cargo xtask capture-evidence-strict
+# equivalent:
+bash scripts/capture-evidence.sh --strict-perf
+
+# Fast command audit without executing suites
+bash scripts/capture-evidence.sh --strict-perf --dry-run
+```
+
+### Tier 6: Phase 26 Full Validation
+```bash
+# Advisory perf mode
+cargo xtask phase26-validate
+
+# Strict perf mode
+cargo xtask phase26-validate-strict
+# equivalent:
+CASSANDRA_STRICT_PERF_BUDGET=1 cargo xtask phase26-validate
+```
+
+### Tier 7: Java-Free Full Validation
+```bash
+# Advisory perf mode
+cargo xtask phase26-validate-rust-only
+# or
+make phase26-validate-rust-only
+
+# Strict perf mode
+cargo xtask phase26-validate-rust-only-strict
+# or
+make phase26-validate-rust-only-strict
+```
+Runs Phase 26 + Rust-only differential tests + coverage audit without Java
+oracle or Docker dependencies.
+
+### Tier 8: Java Code Removal Audit
+```bash
+# Advisory: show remaining Java file count and path groups
+cargo xtask java-code-audit
+# or
+make java-code-audit
+
+# Strict: fail unless zero Java files remain
+cargo xtask java-code-audit-strict
+# or
+make java-code-audit-strict
 ```
 
 ## Adding New Golden Fixtures
@@ -107,6 +214,8 @@ docker compose --profile golden run --rm golden-gen
 | `CASSANDRA_RUST_PORT` | `29042` | Rust SUT native port |
 | `CASSANDRA_HOST` | `localhost` | Host for golden fixture generation |
 | `CASSANDRA_PORT` | `9042` | Port for golden fixture generation |
+| `CASSANDRA_STRICT_PERF_BUDGET` | `0` | Fail perf budget tests when set to `1`/`true` |
+| `CASSANDRA_NO_JAVA_ORACLE` | `0` | When `1`, `cargo xtask diff-test` runs Rust-only mode |
 
 ## Understanding Test Results
 

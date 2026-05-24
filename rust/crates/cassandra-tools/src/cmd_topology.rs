@@ -41,6 +41,13 @@ fn print_operation_id(resp: &serde_json::Value, label: &str) {
     }
 }
 
+fn operation_type_label(op: &serde_json::Value) -> &str {
+    op.get("type")
+        .and_then(|value| value.as_str())
+        .or_else(|| op.get("operation_type").and_then(|value| value.as_str()))
+        .unwrap_or("-")
+}
+
 /// Decommission this node from the cluster.
 ///
 /// Sends POST /api/v1/topology/decommission (empty body).
@@ -160,14 +167,20 @@ pub fn assassinate(client: &AdminClient, endpoint: &str) {
 pub fn drain(client: &AdminClient) {
     println!("Draining node...");
     match client.post_empty("/api/v1/topology/drain") {
-        Ok(_) => println!("Node drained successfully"),
+        Ok(resp) => {
+            if let Some(executed) = resp.get("flushes_executed") {
+                println!("Node drained successfully (flushes executed: {})", executed);
+            } else {
+                println!("Node drained successfully");
+            }
+        }
         Err(e) => eprintln!("Error draining: {}", e),
     }
 }
 
 /// Stop the Cassandra daemon.
 ///
-/// Drains the node first, then signals the daemon to shut down.
+/// Drains the node first, then requests runtime shutdown through admin API.
 pub fn stop_daemon(client: &AdminClient) {
     println!("Stopping Cassandra daemon...");
 
@@ -180,8 +193,21 @@ pub fn stop_daemon(client: &AdminClient) {
         }
     }
 
-    println!("Cassandra daemon stop requested");
-    println!("Note: the daemon process will terminate; connection may be lost.");
+    match client.post_empty("/api/v1/topology/stopdaemon") {
+        Ok(resp) => {
+            if let Some(signalled) = resp.get("shutdown_signalled").and_then(|v| v.as_bool()) {
+                if signalled {
+                    println!("Shutdown signal delivered");
+                } else {
+                    println!("Shutdown request acknowledged");
+                }
+            } else {
+                println!("Shutdown request acknowledged");
+            }
+            println!("Note: the daemon process will terminate; connection may be lost.");
+        }
+        Err(e) => eprintln!("Error requesting daemon stop: {}", e),
+    }
 }
 
 /// Show network streaming statistics.
@@ -248,7 +274,7 @@ pub fn topology_status(client: &AdminClient) {
             println!("Topology status: {}", status);
 
             if let Some(op) = resp.get("current_operation") {
-                let op_type = op["type"].as_str().unwrap_or("-");
+                let op_type = operation_type_label(op);
                 let op_status = op["status"].as_str().unwrap_or("-");
                 let progress = op["progress"].as_f64().unwrap_or(0.0);
                 println!();
@@ -302,6 +328,18 @@ mod tests {
     fn test_print_operation_id_without_id() {
         let resp = json!({ "status": "ok" });
         print_operation_id(&resp, "Test");
+    }
+
+    #[test]
+    fn test_operation_type_label_supports_legacy_type_key() {
+        let op = json!({"type": "BOOTSTRAP"});
+        assert_eq!(operation_type_label(&op), "BOOTSTRAP");
+    }
+
+    #[test]
+    fn test_operation_type_label_supports_operation_type_key() {
+        let op = json!({"operation_type": "REBUILD"});
+        assert_eq!(operation_type_label(&op), "REBUILD");
     }
 
     #[test]

@@ -20,12 +20,12 @@
 //! (STCS, LCS, TWCS, UCS), CDC, snapshots, and incremental backups.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
 use tracing::{debug, error, info, warn};
@@ -42,7 +42,7 @@ use crate::index::{IndexDefinition, IndexManager, IndexStatus, IndexType, Second
 use crate::materialized_views::{MaterializedViewDefinition, ViewManager};
 use crate::memtable::partition::{Cell, PartitionData, Row};
 use crate::memtable::{MemtableManager, MemtableType};
-use crate::sstable::format::{SSTableDescriptor, SSTableFormat, SSTableId};
+use crate::sstable::format::{Component, SSTableDescriptor, SSTableFormat, SSTableId};
 use crate::sstable::key_cache::{KeyCache, KeyCacheConfig};
 use crate::sstable::{BtiReader, BtiWriter, SSTableReader, SSTableWriter};
 
@@ -151,6 +151,73 @@ pub struct EngineStats {
     pub flushes_completed: u64,
     pub compactions_completed: u64,
     pub memtable_memory_bytes: usize,
+}
+
+/// Aggregated SSTable statistics for a single table.
+#[derive(Debug, Clone, Default)]
+pub struct TableSSTableStats {
+    pub sstable_count: u64,
+    pub total_data_size: u64,
+    pub max_sstable_size: u64,
+    pub total_partition_count: u64,
+    pub total_component_size: u64,
+    pub bloom_filter_size: u64,
+    pub summary_component_size: u64,
+}
+
+/// Runtime statistics tracked per table.
+#[derive(Debug, Clone, Default)]
+pub struct TableRuntimeStats {
+    pub memtable_switch_count: u64,
+    pub bloom_filter_checks: u64,
+    pub bloom_filter_false_positives: u64,
+    pub bloom_filter_false_ratio: f64,
+    pub old_sstable_count: u64,
+}
+
+/// Result of importing SSTables from an external directory.
+#[derive(Debug, Clone, Default)]
+pub struct ImportSSTablesResult {
+    pub imported_sstables: u64,
+    pub copied_files: u64,
+}
+
+/// Per-table import summary for a whole-directory SSTable load.
+#[derive(Debug, Clone, Default)]
+pub struct ImportDirectoryTableResult {
+    pub keyspace: String,
+    pub table: String,
+    pub imported_sstables: u64,
+    pub copied_files: u64,
+}
+
+/// Result of importing all SSTables discovered in a source directory.
+#[derive(Debug, Clone, Default)]
+pub struct ImportSSTableDirectoryResult {
+    pub imported_tables: Vec<ImportDirectoryTableResult>,
+    pub imported_sstables: u64,
+    pub copied_files: u64,
+}
+
+/// Summary of one verification issue found in an SSTable.
+#[derive(Debug, Clone)]
+pub struct VerifySSTableIssue {
+    pub keyspace: String,
+    pub table: String,
+    pub generation: SSTableId,
+    pub severity: String,
+    pub component: String,
+    pub message: String,
+}
+
+/// Aggregate result for SSTable verification.
+#[derive(Debug, Clone, Default)]
+pub struct VerifySSTablesResult {
+    pub scanned_sstables: u64,
+    pub valid_sstables: u64,
+    pub invalid_sstables: u64,
+    pub issue_count: u64,
+    pub issues: Vec<VerifySSTableIssue>,
 }
 
 // ─── SSTable Handle ────────────────────────────────────────────────────────
@@ -285,8 +352,16 @@ pub struct StorageEngine {
     compaction_strategy: Box<dyn CompactionStrategy>,
     /// Flush counter.
     flushes_completed: AtomicU64,
+    /// Per-table memtable switch counters keyed by keyspace.table.
+    memtable_switch_counts: RwLock<HashMap<String, u64>>,
+    /// Per-table bloom-filter check counters keyed by keyspace.table.
+    bloom_filter_checks: RwLock<HashMap<String, u64>>,
+    /// Per-table bloom-filter false-positive counters keyed by keyspace.table.
+    bloom_filter_false_positives: RwLock<HashMap<String, u64>>,
     /// Compaction metrics.
     pub compaction_metrics: CompactionMetrics,
+    /// Runtime toggle for incremental backup linking after flush.
+    incremental_backup_enabled: AtomicBool,
     /// Index managers per column family.
     pub index_managers: RwLock<std::collections::HashMap<String, std::sync::Arc<IndexManager>>>,
     /// Materialized view manager.
@@ -301,6 +376,7 @@ pub struct StorageEngine {
 impl StorageEngine {
     /// Open the storage engine with the given config.
     pub fn open(config: EngineConfig) -> Result<Self, Box<dyn std::error::Error>> {
+        let incremental_backup_enabled = config.incremental_backup.enabled;
         // Ensure data directories exist
         for dir in &config.data_directories {
             fs::create_dir_all(dir)?;
@@ -347,7 +423,11 @@ impl StorageEngine {
             next_generation: AtomicU64::new(max_gen + 1),
             compaction_strategy,
             flushes_completed: AtomicU64::new(0),
+            memtable_switch_counts: RwLock::new(HashMap::new()),
+            bloom_filter_checks: RwLock::new(HashMap::new()),
+            bloom_filter_false_positives: RwLock::new(HashMap::new()),
             compaction_metrics: CompactionMetrics::default(),
+            incremental_backup_enabled: AtomicBool::new(incremental_backup_enabled),
             index_managers: RwLock::new(std::collections::HashMap::new()),
             #[cfg(feature = "materialized-views")]
             view_manager: std::sync::Arc::new(ViewManager::new()),
@@ -571,21 +651,28 @@ impl StorageEngine {
             if !sst.might_contain_key(partition_key) {
                 continue;
             }
-            if let Ok(Some(sst_partition)) = sst.get_partition(partition_key) {
-                match result {
-                    Some(ref mut existing) => {
-                        // Merge SSTable data into existing
-                        for (_ck, row) in sst_partition.rows {
-                            existing.apply_row(row);
-                        }
-                        if let Some(ts) = sst_partition.tombstone_timestamp {
-                            if let Some(ldt) = sst_partition.tombstone_local_deletion_time {
-                                existing.set_tombstone(ts, ldt);
+            match sst.get_partition(partition_key) {
+                Ok(Some(sst_partition)) => {
+                    self.record_bloom_filter_observation(&cf_name, false);
+                    match result {
+                        Some(ref mut existing) => {
+                            // Merge SSTable data into existing
+                            for (_ck, row) in sst_partition.rows {
+                                existing.apply_row(row);
+                            }
+                            if let Some(ts) = sst_partition.tombstone_timestamp {
+                                if let Some(ldt) = sst_partition.tombstone_local_deletion_time {
+                                    existing.set_tombstone(ts, ldt);
+                                }
                             }
                         }
+                        None => result = Some(sst_partition),
                     }
-                    None => result = Some(sst_partition),
                 }
+                Ok(None) => {
+                    self.record_bloom_filter_observation(&cf_name, true);
+                }
+                Err(_) => {}
             }
         }
 
@@ -792,6 +879,11 @@ impl StorageEngine {
             Some(mt) => mt,
             None => return Ok(()),
         };
+        {
+            let mut counters = self.memtable_switch_counts.write();
+            let counter = counters.entry(cf_name.to_string()).or_insert(0);
+            *counter = counter.saturating_add(1);
+        }
 
         let partitions = old_memtable.iter_partitions();
         if partitions.is_empty() {
@@ -881,18 +973,95 @@ impl StorageEngine {
 
     /// Run compaction if needed.
     pub fn maybe_compact(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        let sstables = self.sstables.read();
-        let metadata: Vec<SSTableMetadata> = sstables
-            .iter()
-            .map(|sst| SSTableMetadata {
-                id: sst.generation(),
-                data_size: sst.data_size(),
-                partition_count: sst.partition_count(),
-                min_timestamp: sst.min_timestamp(),
-                max_timestamp: sst.max_timestamp(),
-            })
-            .collect();
-        drop(sstables);
+        let mut by_cf: HashMap<String, Vec<SSTableMetadata>> = HashMap::new();
+        {
+            let sstables = self.sstables.read();
+            for sst in sstables.iter() {
+                by_cf
+                    .entry(sst.cf_name())
+                    .or_default()
+                    .push(SSTableMetadata {
+                        id: sst.generation(),
+                        data_size: sst.data_size(),
+                        partition_count: sst.partition_count(),
+                        min_timestamp: sst.min_timestamp(),
+                        max_timestamp: sst.max_timestamp(),
+                    });
+            }
+        }
+
+        let mut compacted = false;
+        for metadata in by_cf.into_values() {
+            let groups = self.compaction_strategy.pick_compaction(&metadata);
+            if groups.is_empty() {
+                continue;
+            }
+            compacted = true;
+            for group_ids in &groups {
+                self.compact_group(group_ids)?;
+            }
+        }
+
+        Ok(compacted)
+    }
+
+    /// Run compaction for a specific keyspace.
+    pub fn maybe_compact_keyspace(
+        &self,
+        keyspace: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let mut by_cf: HashMap<String, Vec<SSTableMetadata>> = HashMap::new();
+        {
+            let sstables = self.sstables.read();
+            for sst in sstables.iter().filter(|sst| sst.keyspace() == keyspace) {
+                by_cf
+                    .entry(sst.cf_name())
+                    .or_default()
+                    .push(SSTableMetadata {
+                        id: sst.generation(),
+                        data_size: sst.data_size(),
+                        partition_count: sst.partition_count(),
+                        min_timestamp: sst.min_timestamp(),
+                        max_timestamp: sst.max_timestamp(),
+                    });
+            }
+        }
+
+        let mut compacted = false;
+        for metadata in by_cf.into_values() {
+            let groups = self.compaction_strategy.pick_compaction(&metadata);
+            if groups.is_empty() {
+                continue;
+            }
+            compacted = true;
+            for group_ids in &groups {
+                self.compact_group(group_ids)?;
+            }
+        }
+
+        Ok(compacted)
+    }
+
+    /// Run compaction for a specific keyspace/table.
+    pub fn maybe_compact_table(
+        &self,
+        keyspace: &str,
+        table: &str,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let metadata: Vec<SSTableMetadata> = {
+            let sstables = self.sstables.read();
+            sstables
+                .iter()
+                .filter(|sst| sst.belongs_to(keyspace, table))
+                .map(|sst| SSTableMetadata {
+                    id: sst.generation(),
+                    data_size: sst.data_size(),
+                    partition_count: sst.partition_count(),
+                    min_timestamp: sst.min_timestamp(),
+                    max_timestamp: sst.max_timestamp(),
+                })
+                .collect()
+        };
 
         let groups = self.compaction_strategy.pick_compaction(&metadata);
         if groups.is_empty() {
@@ -904,6 +1073,263 @@ impl StorageEngine {
         }
 
         Ok(true)
+    }
+
+    /// Verify SSTable components for all or scoped tables.
+    pub fn verify_sstables(
+        &self,
+        keyspace: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<VerifySSTablesResult, Box<dyn std::error::Error>> {
+        if table.is_some() && keyspace.is_none() {
+            return Err("table requires keyspace".into());
+        }
+
+        let mut result = VerifySSTablesResult::default();
+        let sstables = self.sstables.read();
+
+        for sst in sstables.iter().filter(|sst| match (keyspace, table) {
+            (Some(ks), Some(tbl)) => sst.belongs_to(ks, tbl),
+            (Some(ks), None) => sst.keyspace() == ks,
+            (None, None) => true,
+            (None, Some(_)) => false,
+        }) {
+            result.scanned_sstables = result.scanned_sstables.saturating_add(1);
+
+            let descriptor = sst.descriptor();
+            let verification = crate::sstable::verifier::SSTableVerifier::verify(descriptor);
+            let mut sstable_valid = verification.is_valid();
+
+            for issue in verification.issues {
+                result.issue_count = result.issue_count.saturating_add(1);
+                result.issues.push(VerifySSTableIssue {
+                    keyspace: descriptor.keyspace.clone(),
+                    table: descriptor.table.clone(),
+                    generation: descriptor.generation,
+                    severity: format!("{:?}", issue.severity),
+                    component: format!("{:?}", issue.component),
+                    message: issue.message,
+                });
+            }
+
+            // Report expected-vs-present components and TOC consistency.
+            let expected: HashSet<Component> =
+                descriptor.expected_components().iter().copied().collect();
+            let present: HashSet<Component> = Component::all()
+                .iter()
+                .copied()
+                .filter(|component| descriptor.component_path(*component).exists())
+                .collect();
+
+            let missing_expected: Vec<Component> =
+                expected.difference(&present).copied().collect::<Vec<_>>();
+            if !missing_expected.is_empty() {
+                sstable_valid = false;
+                result.issue_count = result.issue_count.saturating_add(1);
+                result.issues.push(VerifySSTableIssue {
+                    keyspace: descriptor.keyspace.clone(),
+                    table: descriptor.table.clone(),
+                    generation: descriptor.generation,
+                    severity: "Error".to_string(),
+                    component: "Components".to_string(),
+                    message: format!(
+                        "Missing expected components: {}",
+                        missing_expected
+                            .iter()
+                            .map(|c| c.extension())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                });
+            }
+
+            let toc_path = descriptor.component_path(Component::Toc);
+            if toc_path.exists() {
+                match fs::read_to_string(&toc_path) {
+                    Ok(content) => {
+                        let listed: HashSet<Component> = content
+                            .lines()
+                            .map(str::trim)
+                            .filter(|line| !line.is_empty())
+                            .filter_map(|line| {
+                                Component::all()
+                                    .iter()
+                                    .copied()
+                                    .find(|component| line.ends_with(component.extension()))
+                            })
+                            .collect();
+
+                        let missing_from_toc: Vec<Component> =
+                            expected.difference(&listed).copied().collect();
+                        if !missing_from_toc.is_empty() {
+                            result.issue_count = result.issue_count.saturating_add(1);
+                            result.issues.push(VerifySSTableIssue {
+                                keyspace: descriptor.keyspace.clone(),
+                                table: descriptor.table.clone(),
+                                generation: descriptor.generation,
+                                severity: "Warning".to_string(),
+                                component: "TOC.txt".to_string(),
+                                message: format!(
+                                    "TOC missing expected components: {}",
+                                    missing_from_toc
+                                        .iter()
+                                        .map(|c| c.extension())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            });
+                        }
+
+                        let unexpected_in_toc: Vec<Component> =
+                            listed.difference(&expected).copied().collect();
+                        if !unexpected_in_toc.is_empty() {
+                            result.issue_count = result.issue_count.saturating_add(1);
+                            result.issues.push(VerifySSTableIssue {
+                                keyspace: descriptor.keyspace.clone(),
+                                table: descriptor.table.clone(),
+                                generation: descriptor.generation,
+                                severity: "Info".to_string(),
+                                component: "TOC.txt".to_string(),
+                                message: format!(
+                                    "TOC lists non-required components: {}",
+                                    unexpected_in_toc
+                                        .iter()
+                                        .map(|c| c.extension())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            });
+                        }
+                    }
+                    Err(err) => {
+                        result.issue_count = result.issue_count.saturating_add(1);
+                        result.issues.push(VerifySSTableIssue {
+                            keyspace: descriptor.keyspace.clone(),
+                            table: descriptor.table.clone(),
+                            generation: descriptor.generation,
+                            severity: "Warning".to_string(),
+                            component: "TOC.txt".to_string(),
+                            message: format!("TOC unreadable: {err}"),
+                        });
+                    }
+                }
+            }
+
+            // Optional Java-style sidecar checks when Digest.crc32 / CRC.db exist.
+            let data_path = descriptor.component_path(Component::Data);
+            let digest_path = descriptor.component_path(Component::Digest);
+            if digest_path.exists() {
+                match crate::sstable::compat::read_java_big_digest(&digest_path) {
+                    Ok(stored) => match crate::sstable::compat::calculate_crc32(&data_path) {
+                        Ok(calculated) => {
+                            if stored != calculated {
+                                sstable_valid = false;
+                                result.issue_count = result.issue_count.saturating_add(1);
+                                result.issues.push(VerifySSTableIssue {
+                                    keyspace: descriptor.keyspace.clone(),
+                                    table: descriptor.table.clone(),
+                                    generation: descriptor.generation,
+                                    severity: "Error".to_string(),
+                                    component: "Digest.crc32".to_string(),
+                                    message: format!(
+                                        "Digest mismatch: stored={stored}, calculated={calculated}"
+                                    ),
+                                });
+                            }
+                        }
+                        Err(err) => {
+                            sstable_valid = false;
+                            result.issue_count = result.issue_count.saturating_add(1);
+                            result.issues.push(VerifySSTableIssue {
+                                keyspace: descriptor.keyspace.clone(),
+                                table: descriptor.table.clone(),
+                                generation: descriptor.generation,
+                                severity: "Error".to_string(),
+                                component: "Digest.crc32".to_string(),
+                                message: format!("Digest check failed: {err}"),
+                            });
+                        }
+                    },
+                    Err(err) => {
+                        sstable_valid = false;
+                        result.issue_count = result.issue_count.saturating_add(1);
+                        result.issues.push(VerifySSTableIssue {
+                            keyspace: descriptor.keyspace.clone(),
+                            table: descriptor.table.clone(),
+                            generation: descriptor.generation,
+                            severity: "Error".to_string(),
+                            component: "Digest.crc32".to_string(),
+                            message: format!("Digest file unreadable: {err}"),
+                        });
+                    }
+                }
+            }
+
+            let crc_path = descriptor
+                .directory
+                .join(format!("{}-CRC.db", descriptor.file_prefix()));
+            if crc_path.exists() {
+                match crate::sstable::compat::read_java_big_crc(&crc_path) {
+                    Ok(metadata) => {
+                        match crate::sstable::compat::calculate_crc32_chunks(
+                            &data_path,
+                            metadata.chunk_size,
+                        ) {
+                            Ok(calculated) => {
+                                if calculated != metadata.checksums {
+                                    sstable_valid = false;
+                                    result.issue_count = result.issue_count.saturating_add(1);
+                                    result.issues.push(VerifySSTableIssue {
+                                        keyspace: descriptor.keyspace.clone(),
+                                        table: descriptor.table.clone(),
+                                        generation: descriptor.generation,
+                                        severity: "Error".to_string(),
+                                        component: "CRC.db".to_string(),
+                                        message: format!(
+                                            "CRC chunk mismatch: stored_chunks={}, calculated_chunks={}",
+                                            metadata.checksums.len(),
+                                            calculated.len()
+                                        ),
+                                    });
+                                }
+                            }
+                            Err(err) => {
+                                sstable_valid = false;
+                                result.issue_count = result.issue_count.saturating_add(1);
+                                result.issues.push(VerifySSTableIssue {
+                                    keyspace: descriptor.keyspace.clone(),
+                                    table: descriptor.table.clone(),
+                                    generation: descriptor.generation,
+                                    severity: "Error".to_string(),
+                                    component: "CRC.db".to_string(),
+                                    message: format!("CRC validation failed: {err}"),
+                                });
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        sstable_valid = false;
+                        result.issue_count = result.issue_count.saturating_add(1);
+                        result.issues.push(VerifySSTableIssue {
+                            keyspace: descriptor.keyspace.clone(),
+                            table: descriptor.table.clone(),
+                            generation: descriptor.generation,
+                            severity: "Error".to_string(),
+                            component: "CRC.db".to_string(),
+                            message: format!("CRC.db unreadable: {err}"),
+                        });
+                    }
+                }
+            }
+
+            if sstable_valid {
+                result.valid_sstables = result.valid_sstables.saturating_add(1);
+            } else {
+                result.invalid_sstables = result.invalid_sstables.saturating_add(1);
+            }
+        }
+
+        Ok(result)
     }
 
     /// Create a named snapshot.
@@ -919,6 +1345,7 @@ impl StorageEngine {
 
         let all_files: Vec<PathBuf> = sstables
             .iter()
+            .filter(|sst| sst.belongs_to(keyspace, table))
             .flat_map(|sst| sst.descriptor_component_files())
             .collect();
 
@@ -926,6 +1353,22 @@ impl StorageEngine {
             backup::create_snapshot(name, data_dir, keyspace, table, &all_files, schema_cql)?;
 
         Ok(manifest)
+    }
+
+    /// Whether incremental backup linking is enabled for future flushes.
+    pub fn is_incremental_backup_enabled(&self) -> bool {
+        self.incremental_backup_enabled.load(Ordering::Relaxed)
+    }
+
+    /// Enable or disable incremental backup linking at runtime.
+    pub fn set_incremental_backup_enabled(&self, enabled: bool) {
+        self.incremental_backup_enabled
+            .store(enabled, Ordering::Relaxed);
+    }
+
+    /// Directory where incremental backup hard-links are stored.
+    pub fn incremental_backup_directory(&self) -> &Path {
+        &self.config.incremental_backup.directory
     }
 
     /// List snapshots.
@@ -940,6 +1383,233 @@ impl StorageEngine {
     pub fn delete_snapshot(&self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
         let data_dir = &self.config.data_directories[0];
         Ok(backup::delete_snapshot(data_dir, name)?)
+    }
+
+    /// Restore a named snapshot and refresh the loaded SSTable set from disk.
+    pub fn restore_snapshot(
+        &self,
+        name: &str,
+    ) -> Result<backup::SnapshotManifest, Box<dyn std::error::Error>> {
+        let data_dir = &self.config.data_directories[0];
+        let manifest = backup::restore_snapshot(data_dir, name)?;
+        self.reload_sstables_from_disk()?;
+        Ok(manifest)
+    }
+
+    /// Reload SSTable handles from disk (used by nodetool refresh-style paths).
+    pub fn refresh_sstables_from_disk(&self) -> Result<(), Box<dyn std::error::Error>> {
+        self.reload_sstables_from_disk()
+    }
+
+    /// Import SSTables for a table from an external directory and reload handles.
+    pub fn import_sstables(
+        &self,
+        keyspace: &str,
+        table: &str,
+        source_directory: &Path,
+    ) -> Result<ImportSSTablesResult, Box<dyn std::error::Error>> {
+        if !source_directory.exists() {
+            return Err(format!(
+                "import directory '{}' does not exist",
+                source_directory.display()
+            )
+            .into());
+        }
+        if !source_directory.is_dir() {
+            return Err(format!(
+                "import path '{}' is not a directory",
+                source_directory.display()
+            )
+            .into());
+        }
+
+        let mut toc_files = Vec::new();
+        collect_toc_files(source_directory, &mut toc_files)?;
+        toc_files.sort();
+
+        let data_dir = &self.config.data_directories[0];
+        let mut result = ImportSSTablesResult::default();
+
+        for toc_path in toc_files {
+            let Some(file_name) = toc_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(component_dir) = toc_path.parent() else {
+                continue;
+            };
+            let Some((source_desc, _)) = parse_toc_filename(file_name, component_dir) else {
+                continue;
+            };
+            if source_desc.keyspace != keyspace || source_desc.table != table {
+                continue;
+            }
+
+            let generation = self.next_generation.fetch_add(1, Ordering::SeqCst);
+            let mut target_desc = SSTableDescriptor::new(data_dir, keyspace, table, generation);
+            target_desc.format = source_desc.format;
+
+            let toc_entries = parse_import_toc_entries(&toc_path)?;
+            if toc_entries.is_empty() {
+                continue;
+            }
+
+            let source_prefix = source_desc.file_prefix();
+            let target_prefix = target_desc.file_prefix();
+            let mut rewritten_toc = Vec::new();
+
+            for entry in toc_entries {
+                let Some((source_component_name, target_component_name)) =
+                    remap_import_component_name(&entry, &source_prefix, &target_prefix)
+                else {
+                    continue;
+                };
+
+                rewritten_toc.push(target_component_name.clone());
+
+                let source_path = component_dir.join(&source_component_name);
+                if !source_path.exists() {
+                    continue;
+                }
+
+                let target_path = data_dir.join(&target_component_name);
+                if !target_path.exists() {
+                    if fs::hard_link(&source_path, &target_path).is_err() {
+                        fs::copy(&source_path, &target_path)?;
+                    }
+                    result.copied_files = result.copied_files.saturating_add(1);
+                }
+            }
+
+            let target_toc_path = target_desc.component_path(Component::Toc);
+            fs::write(target_toc_path, rewritten_toc.join("\n"))?;
+
+            if !target_desc.is_complete() {
+                return Err(format!(
+                    "imported SSTable '{}' is missing required components",
+                    target_desc.file_prefix()
+                )
+                .into());
+            }
+
+            result.imported_sstables = result.imported_sstables.saturating_add(1);
+        }
+
+        if result.imported_sstables == 0 {
+            return Err(format!(
+                "no SSTables found for {}.{} in '{}'",
+                keyspace,
+                table,
+                source_directory.display()
+            )
+            .into());
+        }
+
+        self.reload_sstables_from_disk()?;
+        Ok(result)
+    }
+
+    /// Import all keyspace.table SSTables discovered in an external directory.
+    pub fn import_sstable_directory(
+        &self,
+        source_directory: &Path,
+    ) -> Result<ImportSSTableDirectoryResult, Box<dyn std::error::Error>> {
+        if !source_directory.exists() {
+            return Err(format!(
+                "import directory '{}' does not exist",
+                source_directory.display()
+            )
+            .into());
+        }
+        if !source_directory.is_dir() {
+            return Err(format!(
+                "import path '{}' is not a directory",
+                source_directory.display()
+            )
+            .into());
+        }
+
+        let mut toc_files = Vec::new();
+        collect_toc_files(source_directory, &mut toc_files)?;
+        toc_files.sort();
+
+        let mut table_targets = BTreeSet::<(String, String)>::new();
+        for toc_path in toc_files {
+            let Some(file_name) = toc_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(component_dir) = toc_path.parent() else {
+                continue;
+            };
+            let Some((source_desc, _)) = parse_toc_filename(file_name, component_dir) else {
+                continue;
+            };
+            table_targets.insert((source_desc.keyspace, source_desc.table));
+        }
+
+        if table_targets.is_empty() {
+            return Err(format!("no SSTables found in '{}'", source_directory.display()).into());
+        }
+
+        let mut result = ImportSSTableDirectoryResult::default();
+        for (keyspace, table) in table_targets {
+            let imported = self.import_sstables(&keyspace, &table, source_directory)?;
+            result.imported_sstables = result
+                .imported_sstables
+                .saturating_add(imported.imported_sstables);
+            result.copied_files = result.copied_files.saturating_add(imported.copied_files);
+            result.imported_tables.push(ImportDirectoryTableResult {
+                keyspace,
+                table,
+                imported_sstables: imported.imported_sstables,
+                copied_files: imported.copied_files,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Delete all snapshots and return how many were removed.
+    pub fn clear_snapshots(&self) -> Result<usize, Box<dyn std::error::Error>> {
+        let manifests = self.list_snapshots()?;
+        for manifest in &manifests {
+            self.delete_snapshot(&manifest.name)?;
+        }
+        Ok(manifests.len())
+    }
+
+    /// Return the cumulative on-disk byte size for a named snapshot.
+    pub fn snapshot_size_bytes(&self, name: &str) -> u64 {
+        let data_dir = &self.config.data_directories[0];
+        let snapshot_dir = data_dir.join("snapshots").join(name);
+        if !snapshot_dir.exists() {
+            return 0;
+        }
+        let manifest_path = snapshot_dir.join("manifest.json");
+        let Ok(data) = fs::read_to_string(manifest_path) else {
+            return 0;
+        };
+        let Ok(manifest) = serde_json::from_str::<backup::SnapshotManifest>(&data) else {
+            return 0;
+        };
+        manifest
+            .files
+            .into_iter()
+            .filter(|file_name| file_name != "manifest.json" && file_name != "schema.cql")
+            .filter_map(|file_name| fs::metadata(snapshot_dir.join(file_name)).ok())
+            .map(|metadata| metadata.len())
+            .fold(0_u64, |acc, size| acc.saturating_add(size))
+    }
+
+    /// Reload live SSTable handles from the configured data directories.
+    fn reload_sstables_from_disk(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let (sstables, max_gen) =
+            Self::load_existing_sstables(&self.config.data_directories, self.key_cache.as_ref())?;
+        {
+            let mut current = self.sstables.write();
+            *current = sstables;
+        }
+        self.next_generation.store(max_gen + 1, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Replay commitlog for recovery.
@@ -997,6 +1667,159 @@ impl StorageEngine {
                 .compactions_completed
                 .load(Ordering::Relaxed),
             memtable_memory_bytes: self.memtable_manager.total_memory_usage(),
+        }
+    }
+
+    /// Aggregate SSTable-level statistics for a specific keyspace/table.
+    pub fn table_sstable_stats(&self, keyspace: &str, table: &str) -> TableSSTableStats {
+        let sstables = self.sstables.read();
+        let mut out = TableSSTableStats::default();
+
+        for sstable in sstables
+            .iter()
+            .filter(|sst| sst.belongs_to(keyspace, table))
+        {
+            out.sstable_count = out.sstable_count.saturating_add(1);
+
+            let data_size = sstable.data_size();
+            out.total_data_size = out.total_data_size.saturating_add(data_size);
+            out.max_sstable_size = out.max_sstable_size.max(data_size);
+            out.total_partition_count = out
+                .total_partition_count
+                .saturating_add(sstable.partition_count());
+
+            for path in sstable.descriptor_component_files() {
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+                    continue;
+                };
+                let Ok(metadata) = fs::metadata(&path) else {
+                    continue;
+                };
+                let file_size = metadata.len();
+                out.total_component_size = out.total_component_size.saturating_add(file_size);
+                if file_name.ends_with(Component::Filter.extension()) {
+                    out.bloom_filter_size = out.bloom_filter_size.saturating_add(file_size);
+                }
+                if file_name.ends_with(Component::Summary.extension()) {
+                    out.summary_component_size =
+                        out.summary_component_size.saturating_add(file_size);
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Return the total byte size used by snapshot files for a table.
+    pub fn table_snapshot_size_bytes(&self, keyspace: &str, table: &str) -> u64 {
+        let data_dir = &self.config.data_directories[0];
+        let Ok(manifests) = backup::list_snapshots(data_dir) else {
+            return 0;
+        };
+
+        let mut total = 0_u64;
+        for manifest in manifests {
+            if manifest.keyspace != keyspace || manifest.table != table {
+                continue;
+            }
+            let snapshot_dir = data_dir.join("snapshots").join(manifest.name);
+            for file_name in manifest.files {
+                if file_name == "schema.cql" || file_name == "manifest.json" {
+                    continue;
+                }
+                let file_path = snapshot_dir.join(file_name);
+                if let Ok(metadata) = fs::metadata(file_path) {
+                    total = total.saturating_add(metadata.len());
+                }
+            }
+        }
+
+        total
+    }
+
+    /// Return runtime table statistics such as memtable switch counters.
+    pub fn table_runtime_stats(&self, keyspace: &str, table: &str) -> TableRuntimeStats {
+        let key = format!("{keyspace}.{table}");
+        let counters = self.memtable_switch_counts.read();
+        let checks = self.bloom_filter_checks.read();
+        let false_positives = self.bloom_filter_false_positives.read();
+        let bloom_filter_checks = checks.get(&key).copied().unwrap_or(0);
+        let bloom_filter_false_positives = false_positives.get(&key).copied().unwrap_or(0);
+        let bloom_filter_false_ratio = if bloom_filter_checks > 0 {
+            bloom_filter_false_positives as f64 / bloom_filter_checks as f64
+        } else {
+            0.0
+        };
+        let old_sstable_count = self.table_old_sstable_count(keyspace, table);
+        TableRuntimeStats {
+            memtable_switch_count: counters.get(&key).copied().unwrap_or(0),
+            bloom_filter_checks,
+            bloom_filter_false_positives,
+            bloom_filter_false_ratio,
+            old_sstable_count,
+        }
+    }
+
+    /// Return count of table TOC entries found on disk that are not currently
+    /// in the live SSTable set tracked by this engine.
+    pub fn table_old_sstable_count(&self, keyspace: &str, table: &str) -> u64 {
+        let live_generations: BTreeSet<SSTableId> = self
+            .sstables
+            .read()
+            .iter()
+            .filter(|sst| sst.belongs_to(keyspace, table))
+            .map(|sst| sst.generation())
+            .collect();
+
+        let mut toc_files = Vec::new();
+        for data_dir in &self.config.data_directories {
+            if collect_toc_files(data_dir, &mut toc_files).is_err() {
+                continue;
+            }
+        }
+
+        let mut old = 0_u64;
+        for toc_path in toc_files {
+            let Some(fname) = toc_path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(component_dir) = toc_path.parent() else {
+                continue;
+            };
+            let Some((desc, generation)) = parse_toc_filename(fname, component_dir) else {
+                continue;
+            };
+            if desc.keyspace == keyspace
+                && desc.table == table
+                && !live_generations.contains(&generation)
+            {
+                old = old.saturating_add(1);
+            }
+        }
+
+        old
+    }
+
+    /// Return the number of memtables currently flushing for a table.
+    pub fn table_pending_flushes(&self, keyspace: &str, table: &str) -> u64 {
+        let cf_name = format!("{keyspace}.{table}");
+        self.memtable_manager
+            .flushing_count_by_cf()
+            .get(&cf_name)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn record_bloom_filter_observation(&self, cf_name: &str, false_positive: bool) {
+        {
+            let mut checks = self.bloom_filter_checks.write();
+            let check_counter = checks.entry(cf_name.to_string()).or_insert(0);
+            *check_counter = check_counter.saturating_add(1);
+        }
+        if false_positive {
+            let mut false_positives = self.bloom_filter_false_positives.write();
+            let fp_counter = false_positives.entry(cf_name.to_string()).or_insert(0);
+            *fp_counter = fp_counter.saturating_add(1);
         }
     }
 
@@ -1272,7 +2095,7 @@ impl StorageEngine {
     }
 
     fn maybe_backup(&self, files: &[PathBuf]) {
-        if self.config.incremental_backup.enabled {
+        if self.incremental_backup_enabled.load(Ordering::Relaxed) {
             if let Err(e) = backup::backup_sstable(&self.config.incremental_backup.directory, files)
             {
                 warn!(error = %e, "Incremental backup failed");
@@ -1356,6 +2179,44 @@ fn collect_toc_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> 
         }
     }
     Ok(())
+}
+
+fn parse_import_toc_entries(path: &Path) -> std::io::Result<Vec<String>> {
+    let data = fs::read_to_string(path)?;
+    Ok(data
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect())
+}
+
+fn remap_import_component_name(
+    entry: &str,
+    source_prefix: &str,
+    target_prefix: &str,
+) -> Option<(String, String)> {
+    let normalized = entry.rsplit('/').next()?.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if let Some(suffix) = normalized.strip_prefix(&format!("{source_prefix}-")) {
+        let source_name = normalized.to_string();
+        let target_name = format!("{target_prefix}-{suffix}");
+        return Some((source_name, target_name));
+    }
+
+    if Component::all()
+        .iter()
+        .any(|component| normalized == component.extension())
+    {
+        let source_name = format!("{source_prefix}-{normalized}");
+        let target_name = format!("{target_prefix}-{normalized}");
+        return Some((source_name, target_name));
+    }
+
+    None
 }
 
 /// Parse a TOC filename to extract SSTable descriptor.
@@ -1527,6 +2388,172 @@ mod tests {
         );
         assert!(engine.read_partition("ks", "t1", b"pk1").is_some());
         assert!(engine.read_partition("ks", "t1", b"pk2").is_some());
+    }
+
+    #[test]
+    fn compaction_keeps_table_boundaries() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.compaction_options = HashMap::from([
+            ("min_threshold".to_string(), "2".to_string()),
+            ("max_threshold".to_string(), "4".to_string()),
+        ]);
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"t1pk1", "name", b"a"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t2", b"t2pk1", "name", b"b"))
+            .unwrap();
+        engine.flush_cf("ks.t2").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"t1pk2", "name", b"c"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t2", b"t2pk2", "name", b"d"))
+            .unwrap();
+        engine.flush_cf("ks.t2").unwrap();
+
+        assert_eq!(engine.table_sstable_stats("ks", "t1").sstable_count, 2);
+        assert_eq!(engine.table_sstable_stats("ks", "t2").sstable_count, 2);
+
+        assert!(engine.maybe_compact().unwrap());
+
+        // Each table should compact independently to one SSTable.
+        assert_eq!(engine.table_sstable_stats("ks", "t1").sstable_count, 1);
+        assert_eq!(engine.table_sstable_stats("ks", "t2").sstable_count, 1);
+
+        // Data must remain in its original table.
+        assert!(engine.read_partition("ks", "t1", b"t1pk1").is_some());
+        assert!(engine.read_partition("ks", "t1", b"t1pk2").is_some());
+        assert!(engine.read_partition("ks", "t2", b"t2pk1").is_some());
+        assert!(engine.read_partition("ks", "t2", b"t2pk2").is_some());
+        assert!(engine.read_partition("ks", "t1", b"t2pk1").is_none());
+        assert!(engine.read_partition("ks", "t2", b"t1pk1").is_none());
+    }
+
+    #[test]
+    fn verify_sstables_scoped_to_table() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"alice"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t2", b"pk2", "name", b"bob"))
+            .unwrap();
+        engine.flush_cf("ks.t2").unwrap();
+
+        let t1 = engine.verify_sstables(Some("ks"), Some("t1")).unwrap();
+        assert_eq!(t1.scanned_sstables, 1);
+        assert_eq!(t1.invalid_sstables, 0);
+
+        let ks = engine.verify_sstables(Some("ks"), None).unwrap();
+        assert_eq!(ks.scanned_sstables, 2);
+        assert_eq!(ks.invalid_sstables, 0);
+    }
+
+    #[test]
+    fn verify_sstables_rejects_table_without_keyspace() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        let err = engine.verify_sstables(None, Some("t1")).unwrap_err();
+        assert!(err.to_string().contains("table requires keyspace"));
+    }
+
+    #[test]
+    fn verify_sstables_detects_digest_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"alice"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        let data_file = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with("-Data.db"))
+                    .unwrap_or(false)
+            })
+            .expect("expected data file after flush");
+        let prefix = data_file
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap()
+            .trim_end_matches("-Data.db")
+            .to_string();
+        let digest_path = dir.path().join(format!("{prefix}-Digest.crc32"));
+
+        // Intentionally wrong digest to trigger mismatch.
+        fs::write(&digest_path, "1\n").unwrap();
+
+        let report = engine.verify_sstables(Some("ks"), Some("t1")).unwrap();
+        assert_eq!(report.scanned_sstables, 1);
+        assert_eq!(report.invalid_sstables, 1);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.component == "Digest.crc32" && i.message.contains("Digest mismatch"))
+        );
+    }
+
+    #[test]
+    fn verify_sstables_reports_toc_component_mismatch() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"alice"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        let toc_path = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with("-TOC.txt"))
+                    .unwrap_or(false)
+            })
+            .expect("expected toc file after flush");
+
+        // Keep only Data.db in TOC to force missing expected components.
+        let data_name = fs::read_to_string(&toc_path)
+            .unwrap()
+            .lines()
+            .map(str::trim)
+            .find(|line| line.ends_with("Data.db"))
+            .unwrap()
+            .to_string();
+        fs::write(&toc_path, format!("{data_name}\n")).unwrap();
+
+        let report = engine.verify_sstables(Some("ks"), Some("t1")).unwrap();
+        assert_eq!(report.scanned_sstables, 1);
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|i| i.component == "TOC.txt" && i.message.contains("missing expected"))
+        );
     }
 
     #[test]
@@ -1763,9 +2790,130 @@ mod tests {
 
         let snaps = engine.list_snapshots().unwrap();
         assert_eq!(snaps.len(), 1);
+        assert!(engine.snapshot_size_bytes("test_snap") > 0);
 
         engine.delete_snapshot("test_snap").unwrap();
         assert!(engine.list_snapshots().unwrap().is_empty());
+        assert_eq!(engine.snapshot_size_bytes("test_snap"), 0);
+    }
+
+    #[test]
+    fn clear_snapshots_removes_all_named_snapshots() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"v1"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        engine.snapshot("snap_a", "ks", "t1", None).unwrap();
+        engine.snapshot("snap_b", "ks", "t1", None).unwrap();
+        assert_eq!(engine.list_snapshots().unwrap().len(), 2);
+
+        let removed = engine.clear_snapshots().unwrap();
+        assert_eq!(removed, 2);
+        assert!(engine.list_snapshots().unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_snapshot_recovers_truncated_table_data() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "n", b"before"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine.snapshot("restore_point", "ks", "t1", None).unwrap();
+        assert!(engine.read_partition("ks", "t1", b"pk1").is_some());
+
+        engine.truncate_table("ks", "t1").unwrap();
+        assert!(engine.read_partition("ks", "t1", b"pk1").is_none());
+
+        let manifest = engine.restore_snapshot("restore_point").unwrap();
+        assert_eq!(manifest.name, "restore_point");
+        let restored = engine
+            .read_partition("ks", "t1", b"pk1")
+            .expect("restored partition should be available");
+        let row = restored.rows.values().next().expect("restored row");
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"before".as_slice()));
+    }
+
+    #[test]
+    fn import_sstables_loads_data_from_external_directory() {
+        let source_dir = TempDir::new().unwrap();
+        let source = StorageEngine::open(test_engine_config(source_dir.path())).unwrap();
+        source
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"imported"))
+            .unwrap();
+        source.flush_cf("ks.t1").unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        let target = StorageEngine::open(test_engine_config(target_dir.path())).unwrap();
+        assert!(target.read_partition("ks", "t1", b"pk1").is_none());
+
+        let imported = target
+            .import_sstables("ks", "t1", source_dir.path())
+            .expect("import should succeed");
+        assert_eq!(imported.imported_sstables, 1);
+        assert!(imported.copied_files > 0);
+
+        let restored = target
+            .read_partition("ks", "t1", b"pk1")
+            .expect("partition should be loaded from imported SSTable");
+        let row = restored.rows.values().next().expect("imported row");
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"imported".as_slice()));
+    }
+
+    #[test]
+    fn import_sstables_filters_other_tables() {
+        let source_dir = TempDir::new().unwrap();
+        let source = StorageEngine::open(test_engine_config(source_dir.path())).unwrap();
+        source
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"table1"))
+            .unwrap();
+        source
+            .apply_mutation(&test_mutation("ks", "t2", b"pk2", "name", b"table2"))
+            .unwrap();
+        source.flush_cf("ks.t1").unwrap();
+        source.flush_cf("ks.t2").unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        let target = StorageEngine::open(test_engine_config(target_dir.path())).unwrap();
+        let imported = target
+            .import_sstables("ks", "t1", source_dir.path())
+            .unwrap();
+        assert_eq!(imported.imported_sstables, 1);
+
+        assert!(target.read_partition("ks", "t1", b"pk1").is_some());
+        assert!(target.read_partition("ks", "t2", b"pk2").is_none());
+    }
+
+    #[test]
+    fn import_sstable_directory_loads_multiple_tables() {
+        let source_dir = TempDir::new().unwrap();
+        let source = StorageEngine::open(test_engine_config(source_dir.path())).unwrap();
+        source
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"table1"))
+            .unwrap();
+        source
+            .apply_mutation(&test_mutation("ks", "t2", b"pk2", "name", b"table2"))
+            .unwrap();
+        source.flush_cf("ks.t1").unwrap();
+        source.flush_cf("ks.t2").unwrap();
+
+        let target_dir = TempDir::new().unwrap();
+        let target = StorageEngine::open(test_engine_config(target_dir.path())).unwrap();
+
+        let imported = target.import_sstable_directory(source_dir.path()).unwrap();
+        assert_eq!(imported.imported_tables.len(), 2);
+        assert_eq!(imported.imported_sstables, 2);
+        assert!(imported.copied_files > 0);
+        assert!(target.read_partition("ks", "t1", b"pk1").is_some());
+        assert!(target.read_partition("ks", "t2", b"pk2").is_some());
     }
 
     #[test]
@@ -1834,6 +2982,177 @@ mod tests {
         let stats = engine.stats();
         assert_eq!(stats.sstable_count, 0);
         assert_eq!(stats.flushes_completed, 0);
+    }
+
+    #[test]
+    fn table_runtime_stats_tracks_memtable_switches() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        assert_eq!(
+            engine.table_runtime_stats("ks", "t1").memtable_switch_count,
+            0
+        );
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"v1"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        assert_eq!(
+            engine.table_runtime_stats("ks", "t1").memtable_switch_count,
+            1
+        );
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk2", "name", b"v2"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        assert_eq!(
+            engine.table_runtime_stats("ks", "t1").memtable_switch_count,
+            2
+        );
+
+        assert_eq!(
+            engine.table_runtime_stats("ks", "t2").memtable_switch_count,
+            0
+        );
+    }
+
+    #[test]
+    fn table_runtime_stats_tracks_bloom_checks() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"v1"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        assert!(engine.read_partition("ks", "t1", b"pk1").is_some());
+
+        let stats = engine.table_runtime_stats("ks", "t1");
+        assert!(stats.bloom_filter_checks >= 1);
+        assert!(
+            (stats.bloom_filter_false_ratio
+                - (stats.bloom_filter_false_positives as f64 / stats.bloom_filter_checks as f64))
+                .abs()
+                < f64::EPSILON
+        );
+    }
+
+    #[test]
+    fn table_stats_include_bloom_and_snapshot_bytes() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"v1"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+
+        let sstable_stats = engine.table_sstable_stats("ks", "t1");
+        assert_eq!(sstable_stats.sstable_count, 1);
+        assert!(
+            sstable_stats.bloom_filter_size > 0,
+            "Filter.db bytes should contribute to bloom filter space"
+        );
+        assert!(
+            sstable_stats.summary_component_size > 0,
+            "Summary.db bytes should contribute to off-heap proxy space"
+        );
+
+        assert_eq!(engine.table_snapshot_size_bytes("ks", "t1"), 0);
+        engine.snapshot("snap_stats", "ks", "t1", None).unwrap();
+        assert!(
+            engine.table_snapshot_size_bytes("ks", "t1") > 0,
+            "snapshot bytes should be discoverable per table"
+        );
+        assert_eq!(engine.table_snapshot_size_bytes("ks", "t2"), 0);
+    }
+
+    #[test]
+    fn snapshot_filters_to_target_table_files() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"v1"))
+            .unwrap();
+        engine
+            .apply_mutation(&test_mutation("ks", "t2", b"pk1", "name", b"v2"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        engine.flush_cf("ks.t2").unwrap();
+
+        engine.snapshot("snap_t1_only", "ks", "t1", None).unwrap();
+
+        let data_dir = dir.path();
+        let manifest_path = data_dir
+            .join("snapshots")
+            .join("snap_t1_only")
+            .join("manifest.json");
+        let manifest_json = std::fs::read_to_string(manifest_path).unwrap();
+        let manifest: backup::SnapshotManifest = serde_json::from_str(&manifest_json).unwrap();
+
+        assert!(manifest.files.iter().all(|name| name.contains("ks-t1-")));
+        assert!(!manifest.files.iter().any(|name| name.contains("ks-t2-")));
+    }
+
+    #[test]
+    fn incremental_backup_runtime_toggle_controls_linking() {
+        let dir = TempDir::new().unwrap();
+        let mut config = test_engine_config(dir.path());
+        config.incremental_backup.enabled = false;
+        config.incremental_backup.directory = dir.path().join("backups");
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"disabled"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        let before = backup::list_backup_files(&dir.path().join("backups")).unwrap();
+        assert!(before.is_empty());
+
+        engine.set_incremental_backup_enabled(true);
+        assert!(engine.is_incremental_backup_enabled());
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk2", "name", b"enabled"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        let after_enable = backup::list_backup_files(&dir.path().join("backups")).unwrap();
+        assert!(!after_enable.is_empty());
+
+        engine.set_incremental_backup_enabled(false);
+        assert!(!engine.is_incremental_backup_enabled());
+        let before_disable_count = after_enable.len();
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk3", "name", b"disabled2"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        let after_disable = backup::list_backup_files(&dir.path().join("backups")).unwrap();
+        assert_eq!(after_disable.len(), before_disable_count);
+    }
+
+    #[test]
+    fn table_old_sstable_count_detects_orphan_toc() {
+        let dir = TempDir::new().unwrap();
+        let config = test_engine_config(dir.path());
+        let engine = StorageEngine::open(config).unwrap();
+
+        engine
+            .apply_mutation(&test_mutation("ks", "t1", b"pk1", "name", b"v1"))
+            .unwrap();
+        engine.flush_cf("ks.t1").unwrap();
+        assert_eq!(engine.table_old_sstable_count("ks", "t1"), 0);
+
+        let orphan_toc = dir.path().join("ks-t1-big-999-TOC.txt");
+        std::fs::write(orphan_toc, b"").unwrap();
+        assert_eq!(engine.table_old_sstable_count("ks", "t1"), 1);
+        assert_eq!(engine.table_old_sstable_count("ks", "t2"), 0);
     }
 
     #[test]

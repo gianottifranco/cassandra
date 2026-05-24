@@ -20,6 +20,7 @@
 //! - `org.apache.cassandra.tools.NodeTool.Snapshot`
 //! - `org.apache.cassandra.tools.NodeTool.ListSnapshots`
 //! - `org.apache.cassandra.tools.NodeTool.ClearSnapshot`
+//! - `org.apache.cassandra.tools.NodeTool.RestoreSnapshot`
 //! - `org.apache.cassandra.tools.NodeTool.Import`
 //! - `org.apache.cassandra.tools.NodeTool.EnableBackup`
 //! - `org.apache.cassandra.tools.NodeTool.DisableBackup`
@@ -116,6 +117,25 @@ pub fn clear_snapshot(client: &AdminClient, name: Option<String>) {
     }
 }
 
+/// Restore a named snapshot into active SSTables.
+///
+/// Sends POST /api/v1/snapshots/restore with `{name}`.
+pub fn restore_snapshot(client: &AdminClient, name: &str) {
+    println!("Restoring snapshot '{}'...", name);
+
+    let body = json!({
+        "name": name,
+    });
+
+    match client.post_json("/api/v1/snapshots/restore", &body) {
+        Ok(resp) => {
+            let status = resp["status"].as_str().unwrap_or("restored");
+            println!("Snapshot '{}' {}", name, status);
+        }
+        Err(e) => eprintln!("Error restoring snapshot '{}': {}", name, e),
+    }
+}
+
 /// Import SSTables from a directory into a keyspace/table.
 ///
 /// Sends POST /api/v1/operations/import with `{keyspace, table, directory}`.
@@ -134,7 +154,15 @@ pub fn import(client: &AdminClient, keyspace: &str, table: &str, directory: &str
     match client.post_json("/api/v1/operations/import", &body) {
         Ok(resp) => {
             if let Some(id) = resp.get("operation_id") {
-                println!("Import started (operation {})", id);
+                if let Some(imported) = resp.get("imported_sstables") {
+                    let copied = resp.get("copied_files").cloned().unwrap_or(json!(0));
+                    println!(
+                        "Import completed (operation {}) - imported_sstables: {}, copied_files: {}",
+                        id, imported, copied
+                    );
+                } else {
+                    println!("Import started (operation {})", id);
+                }
             } else {
                 println!("Import completed successfully");
             }
@@ -237,6 +265,12 @@ mod tests {
     fn test_clear_snapshot_all_connection_refused() {
         let client = AdminClient::new("127.0.0.1", 1);
         clear_snapshot(&client, None);
+    }
+
+    #[test]
+    fn test_restore_snapshot_connection_refused() {
+        let client = AdminClient::new("127.0.0.1", 1);
+        restore_snapshot(&client, "test-snap");
     }
 
     #[test]

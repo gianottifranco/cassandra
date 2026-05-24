@@ -1,0 +1,14 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/backup_restore_tests.rs (target/debug/deps/backup_restore_tests-349b8e5cd6267975)
+
+running 4 tests
+test multiple_snapshots_coexist ... ok
+Recovery: replayed 12 mutations from commit log
+Snapshot contains 6 files
+test snapshot_plus_replay_full_recovery ... ok
+test snapshot_creates_consistent_backup ... ok
+Rollback point contains: ["ks-rollback_test-big-1-Statistics.db", "ks-rollback_test-big-1-Data.db", "ks-rollback_test-big-1-Summary.db", "manifest.json", "ks-rollback_test-big-1-TOC.txt", "ks-rollback_test-big-1-Filter.db", "ks-rollback_test-big-1-Index.db"]
+test rollback_drill_validates_data_integrity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+

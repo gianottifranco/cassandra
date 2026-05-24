@@ -576,14 +576,31 @@ The definition of the `UDFContext` interface can be found in the Apache Cassandr
 
 [source,java]
 ----
-include::cassandra:example$JAVA/udfcontext.java[]
+public interface UDFContext
+{
+    UDTValue newArgUDTValue(String argName);
+    UDTValue newArgUDTValue(int argNum);
+    UDTValue newReturnUDTValue();
+    UDTValue newUDTValue(String udtName);
+    TupleValue newArgTupleValue(String argName);
+    TupleValue newArgTupleValue(int argNum);
+    TupleValue newReturnTupleValue();
+    TupleValue newTupleValue(String cqlDefinition);
+}
 ----
 
 Java UDFs already have some imports for common interfaces and classes defined. These imports are:
 
 [source,java]
 ----
-include::cassandra:example$JAVA/udf_imports.java[]
+import java.nio.ByteBuffer;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import org.apache.cassandra.cql3.functions.UDFContext;
+import com.datastax.driver.core.TypeCodec;
+import com.datastax.driver.core.TupleValue;
+import com.datastax.driver.core.UDTValue;
 ----
 
 Please note, that these convenience imports are not available for script UDFs.

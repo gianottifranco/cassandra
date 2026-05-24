@@ -1,0 +1,22 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.16s
+     Running tests/soak_tests.rs (target/debug/deps/soak_tests-89c8aefd139f02b6)
+
+running 6 tests
+soak_write_read_flush_compact: duration=1s
+Snapshot created: 6 files
+test soak_snapshot_under_load ... ok
+soak_clock_skew_tolerance: 8803 rounds
+test soak_clock_skew_tolerance ... ok
+Soak complete: writes=14400, reads=360, flushes=7, sstables=3
+soak_repair_under_load: writes=13900
+soak_topology_churn: 1701 rounds across 4 ks × 3 tables
+Mixed workload: writes=12000, reads=4800, deletes=1180
+  Write p50: 23μs, p99: 62μs
+  Read  p50: 2μs, p99: 16μs
+test soak_write_read_flush_compact ... ok
+test soak_mixed_workload_with_compaction ... ok
+test soak_repair_under_load ... ok
+test soak_topology_churn ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.06s
+

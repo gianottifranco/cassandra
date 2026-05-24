@@ -17,10 +17,10 @@
 //! # Gap Guard Tests
 //!
 //! Each test below documents a known gap between the Java baseline and the
-//! Rust implementation. Tests are `#[ignore]`d and will show up in
-//! `cargo test -- --ignored` output, serving as living documentation.
+//! Rust implementation. These tests serve as living documentation
+//! for previously identified compatibility gaps.
 //!
-//! When a gap is closed, remove `#[ignore]` and implement the actual
+//! When a gap is closed, replace the guard with the concrete
 //! verification. Run `cargo test -p cassandra-diff-tests -- --list 2>&1 | grep gap_guard`
 //! to see all documented gaps.
 
@@ -6500,13 +6500,17 @@ fn gap_guard_cdc() {
     // PARTIALLY CLOSED by prompt-14 continuation: CDC raw segment listing, status,
     // space accounting, Java-style _cdc.idx sidecars, and completed segment replay.
     use std::fs;
+    use std::sync::Arc;
 
     use cassandra_storage::cdc::{
         CdcStatus, cdc_status, discard_consumed_segments, list_cdc_segment_infos,
-        list_cdc_segments, read_completed_cdc_mutations, write_cdc_index,
+        list_cdc_segments, read_completed_cdc_mutations, read_completed_cdc_mutations_with_codec,
+        write_cdc_index,
     };
     use cassandra_storage::commitlog::{
         CellMutation, Mutation, MutationRow,
+        encrypted::{CommitLogEncryptor, EncryptingSegmentWriter},
+        segment::SegmentFlags,
         segment::{CorruptionPolicy, Segment},
     };
 
@@ -6587,6 +6591,52 @@ fn gap_guard_cdc() {
     assert_eq!(mutations.len(), 1);
     assert_eq!(mutations[0].table, "cdc_enabled_table");
     assert!(mutations[0].cdc_enabled);
+
+    #[derive(Debug)]
+    struct XorEncryptor(u8);
+
+    impl CommitLogEncryptor for XorEncryptor {
+        fn encrypt_segment(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+            Ok(data.iter().map(|byte| byte ^ self.0).collect())
+        }
+
+        fn decrypt_segment(&self, data: &[u8]) -> Result<Vec<u8>, String> {
+            self.encrypt_segment(data)
+        }
+
+        fn is_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    let encrypted_replay_dir = tempfile::tempdir().unwrap();
+    let flags = SegmentFlags {
+        compression_enabled: true,
+        encryption_enabled: true,
+    };
+    let codec = EncryptingSegmentWriter::new(Arc::new(XorEncryptor(0x51)));
+    let mut encrypted_segment =
+        Segment::create_with_flags(encrypted_replay_dir.path(), 21, flags).unwrap();
+    encrypted_segment
+        .append_entry_with_codec(&serde_json::to_vec(&mutation).unwrap(), &codec)
+        .unwrap();
+    encrypted_segment.sync().unwrap();
+    write_cdc_index(encrypted_segment.path(), encrypted_segment.size(), true).unwrap();
+
+    // Plaintext CDC decoder should fail on encrypted segment payloads.
+    assert!(
+        read_completed_cdc_mutations(encrypted_replay_dir.path(), CorruptionPolicy::StopOnCorrupt)
+            .is_err()
+    );
+    let encrypted_mutations = read_completed_cdc_mutations_with_codec(
+        encrypted_replay_dir.path(),
+        CorruptionPolicy::StopOnCorrupt,
+        &codec,
+    )
+    .unwrap();
+    assert_eq!(encrypted_mutations.len(), 1);
+    assert_eq!(encrypted_mutations[0].table, "cdc_enabled_table");
+    assert!(encrypted_mutations[0].cdc_enabled);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -6973,6 +7023,8 @@ fn gap_guard_dc_aware_read_executor() {
         keyspace: "ks".to_string(),
         table: "users".to_string(),
         partition_key: b"user1".to_vec(),
+        start_after: None,
+        row_limit: None,
     };
 
     let local_quorum = coordinator

@@ -57,11 +57,23 @@ pub struct StreamRequest {
 /// A stream plan: builder for constructing multi-session streaming operations.
 ///
 /// Usage:
-/// ```ignore
-/// let plan = StreamPlan::new(StreamOperation::Bootstrap)
-///     .request_ranges(source, "ks", vec!["t1"], ranges)
-///     .transfer_ranges(target, "ks", vec!["t1"], ranges)
+/// ```
+/// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+///
+/// use cassandra_cluster_metadata::Endpoint;
+/// use cassandra_common::Token;
+/// use cassandra_streaming::{StreamOperation, StreamPlan};
+///
+/// let source = Endpoint::new(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7000));
+/// let target = Endpoint::new(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 7001));
+/// let ranges = vec![(Token::from_raw(-100), Token::from_raw(100))];
+///
+/// let sessions = StreamPlan::new(StreamOperation::Bootstrap)
+///     .request_ranges(source, "ks", vec!["t1".to_string()], ranges.clone())
+///     .transfer_ranges(target, "ks", vec!["t1".to_string()], ranges)
 ///     .build();
+///
+/// assert_eq!(sessions.len(), 2);
 /// ```
 #[derive(Debug, Clone)]
 pub struct StreamPlan {

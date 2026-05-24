@@ -1,5 +1,9 @@
 == Cassandra Startup Check Example
 
+NOTE: As of 2026-05-24, this Java example source has been removed from this
+branch as part of the Java→Rust rewrite. Historical Java implementation can be
+retrieved from the Java oracle history/branch.
+
 An implementation of `StartupCheck` interface will create custom startup check. For the purposes of this example,
 there will be one startup check with the name `my_check`.
 

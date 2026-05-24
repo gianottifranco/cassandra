@@ -199,7 +199,9 @@ impl SSTableWriter {
 
         // ── Write TOC.txt ─────────────────────────────────────────
         let toc_path = self.descriptor.component_path(Component::Toc);
-        let toc_content: String = Component::all()
+        let toc_content: String = self
+            .descriptor
+            .expected_components()
             .iter()
             .map(|c| format!("{}-{}", self.descriptor.file_prefix(), c.extension()))
             .collect::<Vec<_>>()
@@ -351,7 +353,9 @@ impl SSTableWriter {
         fs::write(&stats_path, MetadataSerializer::serialize(&metadata))?;
 
         let toc_path = self.descriptor.component_path(Component::Toc);
-        let toc_content: String = Component::all()
+        let toc_content: String = self
+            .descriptor
+            .expected_components()
             .iter()
             .map(|c| format!("{}-{}", self.descriptor.file_prefix(), c.extension()))
             .collect::<Vec<_>>()
@@ -601,6 +605,35 @@ mod tests {
     }
 
     #[test]
+    fn write_toc_lists_expected_components_only() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
+        let writer = SSTableWriter::new(desc.clone());
+
+        writer.write(&sample_partitions()).unwrap();
+
+        let toc = fs::read_to_string(desc.component_path(Component::Toc)).unwrap();
+        let listed: Vec<&str> = toc.lines().collect();
+        let expected: Vec<String> = desc
+            .expected_components()
+            .iter()
+            .map(|c| format!("{}-{}", desc.file_prefix(), c.extension()))
+            .collect();
+
+        assert_eq!(listed.len(), expected.len());
+        for entry in expected {
+            assert!(
+                listed.contains(&entry.as_str()),
+                "missing TOC entry: {entry}"
+            );
+        }
+        assert!(
+            !listed.iter().any(|line| line.ends_with("Digest.crc32")),
+            "TOC should not list optional Digest.crc32 by default"
+        );
+    }
+
+    #[test]
     fn write_filtered_partitions_preserves_range_tombstone_markers() {
         let dir = TempDir::new().unwrap();
         let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 1);
@@ -648,5 +681,47 @@ mod tests {
         let simplified = reader.get_partition(b"pk").unwrap().unwrap();
         assert_eq!(simplified.tombstone_timestamp, Some(50));
         assert_eq!(simplified.rows.len(), 1);
+    }
+
+    #[test]
+    fn write_filtered_toc_lists_expected_components_only() {
+        let dir = TempDir::new().unwrap();
+        let desc = SSTableDescriptor::new(dir.path(), "ks", "t1", 2);
+        let writer = SSTableWriter::new(desc.clone());
+
+        let mut row = RowData::new(b"ck".to_vec());
+        row.add_cell(CellData {
+            column: "c".to_string(),
+            value: Some(vec![1]),
+            timestamp: 1000,
+            ttl: 0,
+            local_deletion_time: i32::MAX,
+            path: None,
+        });
+        let filtered = FilteredPartition {
+            partition_key: b"pk".to_vec(),
+            partition_deletion: DeletionTime::LIVE,
+            static_row: None,
+            items: vec![Unfiltered::Row(row)],
+        };
+        writer
+            .write_filtered_partitions(&[(b"pk".to_vec(), filtered)])
+            .unwrap();
+
+        let toc = fs::read_to_string(desc.component_path(Component::Toc)).unwrap();
+        let listed: Vec<&str> = toc.lines().collect();
+        let expected: Vec<String> = desc
+            .expected_components()
+            .iter()
+            .map(|c| format!("{}-{}", desc.file_prefix(), c.extension()))
+            .collect();
+
+        assert_eq!(listed.len(), expected.len());
+        for entry in expected {
+            assert!(
+                listed.contains(&entry.as_str()),
+                "missing TOC entry: {entry}"
+            );
+        }
     }
 }

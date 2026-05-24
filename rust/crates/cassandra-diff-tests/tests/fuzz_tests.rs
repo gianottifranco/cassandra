@@ -8,6 +8,11 @@ use cassandra_diff_tests::comparators::protocol;
 use cassandra_diff_tests::fuzz;
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        .. ProptestConfig::default()
+    })]
+
     #[test]
     fn prop_frame_header_roundtrip(header in fuzz::arb_frame_header()) {
         let encoded = fuzz::encode_header(&header);
@@ -102,6 +107,11 @@ use cassandra_storage::commitlog::{CellMutation, CommitLogConfig, Mutation, Muta
 use cassandra_storage::engine::{EngineConfig, StorageEngine};
 
 proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        .. ProptestConfig::default()
+    })]
+
     /// Write → read roundtrip with random mutations.
     #[test]
     fn prop_mutation_write_read(

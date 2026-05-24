@@ -1,0 +1,13 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/cassandra_diff_tests-dc9a8f77995a1772)
+
+running 6 tests
+test rollback_tests::tests::data_content_integrity_after_rollback ... ok
+test rollback_tests::tests::incremental_backup_survives_rollback ... ok
+test rollback_tests::tests::rollback_pre_cutover ... ok
+test rollback_tests::tests::rollback_post_cutover ... ok
+test rollback_tests::tests::multiple_rollback_points ... ok
+test rollback_tests::tests::rollback_mid_cutover ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 185 filtered out; finished in 0.01s
+

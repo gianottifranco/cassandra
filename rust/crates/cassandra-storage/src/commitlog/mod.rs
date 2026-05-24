@@ -32,12 +32,14 @@ pub mod segment;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use encrypted::{CommitLogEncryptor, EncryptedSegmentWriter, EncryptingSegmentWriter};
 use segment::{CorruptionPolicy, Segment, SegmentFlags};
 
 // ─── Errors ────────────────────────────────────────────────────────────────
@@ -147,6 +149,11 @@ pub struct CommitLogConfig {
     pub cdc: CdcConfig,
     /// Number of segment files to keep in the recycling pool.
     pub recycle_pool_size: usize,
+    /// Optional commitlog entry encryptor.
+    ///
+    /// When set and enabled, segment entries are encrypted on write and
+    /// transparently decrypted during replay.
+    pub encryptor: Option<Arc<dyn CommitLogEncryptor>>,
 }
 
 impl Default for CommitLogConfig {
@@ -160,6 +167,7 @@ impl Default for CommitLogConfig {
             archiving: ArchivingConfig::default(),
             cdc: CdcConfig::default(),
             recycle_pool_size: 0,
+            encryptor: None,
         }
     }
 }
@@ -320,13 +328,71 @@ pub struct CommitLog {
     truncation_points: Mutex<TruncationPoints>,
     /// Pool of recycled segment file paths.
     recycle_pool: Mutex<Vec<PathBuf>>,
-    /// CDC segment writer (if CDC enabled).
-    cdc_segment: Mutex<Option<Segment>>,
+    /// Whether the current segment has been mirrored into `cdc_raw`.
+    cdc_current_segment_mirrored: Mutex<bool>,
     /// Metrics.
     pub metrics: CommitLogMetrics,
 }
 
 impl CommitLog {
+    fn encryption_enabled(config: &CommitLogConfig) -> bool {
+        config
+            .encryptor
+            .as_ref()
+            .is_some_and(|encryptor| encryptor.is_enabled())
+    }
+
+    fn append_payload(seg: &mut Segment, payload: &[u8], config: &CommitLogConfig) -> Result<u64> {
+        match config.encryptor.as_ref() {
+            Some(encryptor) if encryptor.is_enabled() => {
+                let codec = EncryptingSegmentWriter::new(encryptor.clone());
+                seg.append_entry_with_codec(payload, &codec)
+            }
+            _ => seg.append_entry(payload),
+        }
+    }
+
+    /// Compute the exact encoded entry size as it will be written into the
+    /// commitlog entry stream: `[len][flags][crc][payload]`.
+    ///
+    /// This mirrors `Segment::append_entry_with_codec` transformations so CDC
+    /// budget checks can happen before the append is persisted.
+    fn projected_entry_size(&self, payload: &[u8], segment_flags: SegmentFlags) -> Result<u64> {
+        let (mut actual_payload, _) = if segment_flags.compression_enabled && payload.len() > 64 {
+            let compressed = lz4_flex::compress_prepend_size(payload);
+            if compressed.len() < payload.len() {
+                (compressed, 1u8)
+            } else {
+                (payload.to_vec(), 0u8)
+            }
+        } else {
+            (payload.to_vec(), 0u8)
+        };
+
+        if let Some(encryptor) = self.config.encryptor.as_ref().filter(|e| e.is_enabled()) {
+            let codec = EncryptingSegmentWriter::new(encryptor.clone());
+            actual_payload = codec
+                .encode_block(&actual_payload)
+                .map_err(CommitLogError::Serialization)?;
+        }
+
+        Ok(4 + 1 + 4 + actual_payload.len() as u64)
+    }
+
+    fn read_segment_payloads(
+        seg: &Segment,
+        policy: CorruptionPolicy,
+        config: &CommitLogConfig,
+    ) -> Vec<Result<Vec<u8>>> {
+        match config.encryptor.as_ref() {
+            Some(encryptor) if encryptor.is_enabled() => {
+                let codec = EncryptingSegmentWriter::new(encryptor.clone());
+                seg.read_entries_with_codec(policy, &codec)
+            }
+            _ => seg.read_entries_with_policy(policy),
+        }
+    }
+
     /// Open or create a commit log in the configured directory.
     pub fn open(config: CommitLogConfig) -> Result<Self> {
         fs::create_dir_all(&config.directory)?;
@@ -346,23 +412,21 @@ impl CommitLog {
         let next_id = max_id + 1;
         let seg_flags = SegmentFlags {
             compression_enabled: config.compression_enabled,
+            encryption_enabled: Self::encryption_enabled(&config),
             ..SegmentFlags::default()
         };
         let segment = Segment::create_with_flags(&config.directory, next_id, seg_flags)?;
 
-        // Initialize CDC if enabled
-        let cdc_segment = if config.cdc.enabled {
+        // Initialize CDC raw directory if enabled.
+        if config.cdc.enabled {
             fs::create_dir_all(&config.cdc.raw_directory)?;
-            let cdc_seg = Segment::create(&config.cdc.raw_directory, next_id)?;
-            Some(cdc_seg)
-        } else {
-            None
-        };
+        }
 
         info!(
             directory = %config.directory.display(),
             segment_id = next_id,
             compression = config.compression_enabled,
+            encryption = Self::encryption_enabled(&config),
             cdc = config.cdc.enabled,
             "Commit log opened"
         );
@@ -373,7 +437,7 @@ impl CommitLog {
             next_segment_id: AtomicU64::new(next_id + 1),
             truncation_points: Mutex::new(TruncationPoints::new()),
             recycle_pool: Mutex::new(Vec::new()),
-            cdc_segment: Mutex::new(cdc_segment),
+            cdc_current_segment_mirrored: Mutex::new(false),
             metrics: CommitLogMetrics::default(),
         })
     }
@@ -383,13 +447,19 @@ impl CommitLog {
         let payload = serde_json::to_vec(mutation)
             .map_err(|e| CommitLogError::Serialization(e.to_string()))?;
 
+        let should_track_cdc = mutation.cdc_enabled && self.config.cdc.enabled;
         let (seg_id, offset) = {
             let mut seg = self.current_segment.lock();
+            let mut cdc_mirrored = self.cdc_current_segment_mirrored.lock();
 
             // Rotate if this write would exceed the max segment size.
             if seg.size() + payload.len() as u64 + 12 > self.config.max_segment_size {
                 let old_id = seg.id();
                 seg.sync()?;
+
+                if *cdc_mirrored {
+                    self.update_cdc_sidecar(&seg, true)?;
+                }
 
                 // Archive hook
                 self.archive_segment(&seg);
@@ -397,6 +467,7 @@ impl CommitLog {
                 let new_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
                 let new_seg = self.create_or_recycle_segment(new_id)?;
                 *seg = new_seg;
+                *cdc_mirrored = false;
 
                 self.metrics
                     .segments_rotated
@@ -404,11 +475,21 @@ impl CommitLog {
                 debug!(old_id, new_id, "Segment rotated");
             }
 
-            let offset = seg.append_entry(&payload)?;
+            if should_track_cdc {
+                let projected_entry_size = self.projected_entry_size(&payload, seg.flags())?;
+                self.ensure_cdc_space_budget(&seg, projected_entry_size, *cdc_mirrored)?;
+            }
+
+            let offset = Self::append_payload(&mut seg, &payload, &self.config)?;
             let seg_id = seg.id();
 
             if self.config.sync_policy == SyncPolicy::Batch {
                 seg.sync()?;
+            }
+
+            if should_track_cdc {
+                self.update_cdc_sidecar(&seg, false)?;
+                *cdc_mirrored = true;
             }
 
             (seg_id, offset)
@@ -419,9 +500,10 @@ impl CommitLog {
             .fetch_add(payload.len() as u64, Ordering::Relaxed);
         self.metrics.entries_written.fetch_add(1, Ordering::Relaxed);
 
-        // CDC hook: if mutation is CDC-enabled, also write to CDC directory
-        if mutation.cdc_enabled && self.config.cdc.enabled {
-            self.write_cdc_entry(&payload)?;
+        if should_track_cdc {
+            self.metrics
+                .cdc_entries_written
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         Ok((seg_id, offset))
@@ -429,7 +511,13 @@ impl CommitLog {
 
     /// Force sync the current segment.
     pub fn sync(&self) -> Result<()> {
-        self.current_segment.lock().sync()
+        let mut seg = self.current_segment.lock();
+        seg.sync()?;
+
+        if self.config.cdc.enabled && *self.cdc_current_segment_mirrored.lock() {
+            self.update_cdc_sidecar(&seg, false)?;
+        }
+        Ok(())
     }
 
     /// Record a truncation point for a column family.
@@ -471,7 +559,7 @@ impl CommitLog {
 
             match Segment::open_for_read(path) {
                 Ok(seg) => {
-                    let entries = seg.read_entries_with_policy(policy);
+                    let entries = Self::read_segment_payloads(&seg, policy, &self.config);
                     for entry_result in entries {
                         match entry_result {
                             Ok(payload) => match serde_json::from_slice::<Mutation>(&payload) {
@@ -565,6 +653,7 @@ impl CommitLog {
     fn create_or_recycle_segment(&self, new_id: u64) -> Result<Segment> {
         let seg_flags = SegmentFlags {
             compression_enabled: self.config.compression_enabled,
+            encryption_enabled: Self::encryption_enabled(&self.config),
             ..SegmentFlags::default()
         };
 
@@ -630,32 +719,47 @@ impl CommitLog {
         }
     }
 
-    fn write_cdc_entry(&self, payload: &[u8]) -> Result<()> {
-        // Check space limit
+    fn ensure_cdc_space_budget(
+        &self,
+        current_segment: &Segment,
+        projected_entry_size: u64,
+        already_mirrored: bool,
+    ) -> Result<()> {
         let used = dir_size(&self.config.cdc.raw_directory).unwrap_or(0);
-        if used + payload.len() as u64 > self.config.cdc.size_limit {
+        let projected = if already_mirrored {
+            used + projected_entry_size
+        } else {
+            used + current_segment.size() + projected_entry_size
+        };
+
+        if projected > self.config.cdc.size_limit {
             return Err(CommitLogError::CdcSpaceLimitExceeded {
                 used,
                 limit: self.config.cdc.size_limit,
             });
         }
+        Ok(())
+    }
 
-        let mut cdc_seg = self.cdc_segment.lock();
-        if let Some(ref mut seg) = *cdc_seg {
-            // Rotate CDC segment if needed
-            if seg.size() + payload.len() as u64 + 12 > self.config.max_segment_size {
-                seg.sync()?;
-                crate::cdc::write_cdc_index(seg.path(), seg.size(), true)?;
-                let new_id = self.next_segment_id.fetch_add(1, Ordering::SeqCst);
-                *seg = Segment::create(&self.config.cdc.raw_directory, new_id)?;
-            }
-            seg.append_entry(payload)?;
-            seg.sync()?;
-            crate::cdc::write_cdc_index(seg.path(), seg.size(), false)?;
-            self.metrics
-                .cdc_entries_written
-                .fetch_add(1, Ordering::Relaxed);
+    fn update_cdc_sidecar(&self, segment: &Segment, completed: bool) -> Result<()> {
+        fs::create_dir_all(&self.config.cdc.raw_directory)?;
+        let source = segment.path();
+        let destination = self
+            .config
+            .cdc
+            .raw_directory
+            .join(source.file_name().unwrap_or_default());
+
+        if !destination.exists() {
+            fs::hard_link(source, &destination)?;
+            debug!(
+                source = %source.display(),
+                destination = %destination.display(),
+                "Mirrored commitlog segment into cdc_raw via hard-link"
+            );
         }
+
+        crate::cdc::write_cdc_index(&destination, segment.size(), completed)?;
         Ok(())
     }
 }
@@ -766,7 +870,9 @@ fn restore_archived_segments(config: &CommitLogConfig) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::encrypted::CommitLogEncryptor;
     use super::*;
+    use std::sync::Arc;
     use tempfile::TempDir;
 
     fn test_config(dir: &Path) -> CommitLogConfig {
@@ -952,6 +1058,69 @@ mod tests {
         assert_eq!(result.mutations[0].table, "t1");
     }
 
+    #[derive(Debug)]
+    struct XorEncryptor(u8);
+
+    impl CommitLogEncryptor for XorEncryptor {
+        fn encrypt_segment(&self, data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            Ok(data.iter().map(|byte| byte ^ self.0).collect())
+        }
+
+        fn decrypt_segment(&self, data: &[u8]) -> std::result::Result<Vec<u8>, String> {
+            self.encrypt_segment(data)
+        }
+
+        fn is_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn encrypted_commitlog_round_trips_with_matching_encryptor() {
+        let dir = TempDir::new().unwrap();
+        let config = CommitLogConfig {
+            encryptor: Some(Arc::new(XorEncryptor(0x5a))),
+            ..test_config(dir.path())
+        };
+        let cl = CommitLog::open(config.clone()).unwrap();
+
+        let mutation = test_mutation("ks", "secure_tbl", b"secure_pk");
+        cl.append(&mutation).unwrap();
+        cl.sync().unwrap();
+
+        // Ciphertext should not deserialize as JSON if replay is attempted
+        // without the configured decryptor.
+        let mut plain_config = config.clone();
+        plain_config.encryptor = None;
+        let plain_replay = CommitLog::open(plain_config).unwrap().replay().unwrap();
+        assert_eq!(plain_replay.mutations.len(), 0);
+        assert!(plain_replay.corrupt_entries > 0);
+
+        // Replay with the same encryptor must recover the mutation.
+        let replay = cl.replay().unwrap();
+        assert_eq!(replay.mutations.len(), 1);
+        assert_eq!(replay.mutations[0].table, "secure_tbl");
+        assert_eq!(replay.mutations[0].partition_key, b"secure_pk");
+    }
+
+    #[test]
+    fn encrypted_commitlog_sets_segment_header_flag() {
+        let dir = TempDir::new().unwrap();
+        let config = CommitLogConfig {
+            encryptor: Some(Arc::new(XorEncryptor(0x33))),
+            ..test_config(dir.path())
+        };
+        let cl = CommitLog::open(config.clone()).unwrap();
+
+        cl.append(&test_mutation("ks", "t1", b"pk1")).unwrap();
+        cl.sync().unwrap();
+
+        let segments = list_segment_files(&config.directory).unwrap();
+        assert!(!segments.is_empty());
+        let read_segment = Segment::open_for_read(&segments[0]).unwrap();
+        assert!(read_segment.flags().encryption_enabled);
+    }
+
     #[test]
     fn archiving_to_directory() {
         let dir = TempDir::new().unwrap();
@@ -1028,6 +1197,7 @@ mod tests {
             },
             ..test_config(dir.path())
         };
+        let commitlog_dir = config.directory.clone();
         let cl = CommitLog::open(config).unwrap();
 
         // Non-CDC mutation: no CDC write
@@ -1047,6 +1217,90 @@ mod tests {
         assert_eq!(infos.len(), 1);
         assert_eq!(infos[0].durable_offset, Some(infos[0].size_bytes));
         assert!(!infos[0].completed);
+        let segment_name = infos[0].path.file_name().unwrap();
+        assert!(commitlog_dir.join(segment_name).exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let nlink = fs::metadata(&infos[0].path).unwrap().nlink();
+            assert!(
+                nlink >= 2,
+                "CDC segment should be mirrored via hard-link (nlink={nlink})"
+            );
+        }
+
+        let mutations = crate::cdc::read_cdc_segment_mutations(
+            &infos[0].path,
+            segment::CorruptionPolicy::StopOnCorrupt,
+        )
+        .unwrap();
+        // CDC now mirrors commitlog segments, so non-CDC mutations that share the
+        // segment can appear alongside CDC-enabled ones.
+        assert!(mutations.iter().any(|mutation| mutation.table == "t2"));
+        assert!(mutations.iter().any(|mutation| mutation.cdc_enabled));
+    }
+
+    #[test]
+    fn cdc_space_limit_rejects_before_commit() {
+        let dir = TempDir::new().unwrap();
+        let cdc_dir = dir.path().join("cdc_raw");
+        let config = CommitLogConfig {
+            cdc: CdcConfig {
+                enabled: true,
+                raw_directory: cdc_dir.clone(),
+                size_limit: 1,
+            },
+            ..test_config(dir.path())
+        };
+        let cl = CommitLog::open(config).unwrap();
+
+        let mut mutation = test_mutation("ks", "too_big_for_cdc", b"pk");
+        mutation.cdc_enabled = true;
+
+        let err = cl.append(&mutation).unwrap_err();
+        assert!(matches!(err, CommitLogError::CdcSpaceLimitExceeded { .. }));
+
+        let snap = cl.metrics_snapshot();
+        assert_eq!(snap.entries_written, 0);
+        assert_eq!(snap.cdc_entries_written, 0);
+
+        cl.sync().unwrap();
+        let replay = cl.replay().unwrap();
+        assert!(
+            replay.mutations.is_empty(),
+            "CDC budget failure must not persist the rejected mutation"
+        );
+
+        let infos = crate::cdc::list_cdc_segment_infos(&cdc_dir).unwrap();
+        assert!(infos.is_empty());
+    }
+
+    #[test]
+    fn cdc_writes_with_compression_round_trip() {
+        let dir = TempDir::new().unwrap();
+        let cdc_dir = dir.path().join("cdc_raw");
+        let config = CommitLogConfig {
+            compression_enabled: true,
+            cdc: CdcConfig {
+                enabled: true,
+                raw_directory: cdc_dir.clone(),
+                size_limit: 1024 * 1024,
+            },
+            ..test_config(dir.path())
+        };
+        let cl = CommitLog::open(config).unwrap();
+
+        let mut mutation = test_mutation("ks", "t_comp", b"pk_comp");
+        mutation.cdc_enabled = true;
+        cl.append(&mutation).unwrap();
+
+        let infos = crate::cdc::list_cdc_segment_infos(&cdc_dir).unwrap();
+        assert_eq!(infos.len(), 1);
+
+        let read_segment = Segment::open_for_read(&infos[0].path).unwrap();
+        assert!(read_segment.flags().compression_enabled);
+        assert!(!read_segment.flags().encryption_enabled);
 
         let mutations = crate::cdc::read_cdc_segment_mutations(
             &infos[0].path,
@@ -1054,7 +1308,63 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mutations.len(), 1);
-        assert_eq!(mutations[0].table, "t2");
-        assert!(mutations[0].cdc_enabled);
+        assert_eq!(mutations[0].table, "t_comp");
+    }
+
+    #[test]
+    fn cdc_segment_inherits_encryption_and_compression_flags() {
+        let dir = TempDir::new().unwrap();
+        let cdc_dir = dir.path().join("cdc_raw");
+        let config = CommitLogConfig {
+            compression_enabled: true,
+            encryptor: Some(Arc::new(XorEncryptor(0x11))),
+            cdc: CdcConfig {
+                enabled: true,
+                raw_directory: cdc_dir.clone(),
+                size_limit: 1024 * 1024,
+            },
+            ..test_config(dir.path())
+        };
+        let cl = CommitLog::open(config).unwrap();
+
+        let mut mutation = test_mutation("ks", "t_enc", b"pk_enc");
+        mutation.cdc_enabled = true;
+        cl.append(&mutation).unwrap();
+
+        let infos = crate::cdc::list_cdc_segment_infos(&cdc_dir).unwrap();
+        assert_eq!(infos.len(), 1);
+
+        let read_segment = Segment::open_for_read(&infos[0].path).unwrap();
+        assert!(read_segment.flags().compression_enabled);
+        assert!(read_segment.flags().encryption_enabled);
+    }
+
+    #[test]
+    fn cdc_marks_rotated_segments_completed() {
+        let dir = TempDir::new().unwrap();
+        let cdc_dir = dir.path().join("cdc_raw");
+        let config = CommitLogConfig {
+            max_segment_size: 256,
+            cdc: CdcConfig {
+                enabled: true,
+                raw_directory: cdc_dir.clone(),
+                size_limit: 8 * 1024 * 1024,
+            },
+            ..test_config(dir.path())
+        };
+        let cl = CommitLog::open(config).unwrap();
+
+        for i in 0..20 {
+            let mut mutation = test_mutation("ks", &format!("tbl_{i}"), &[i as u8]);
+            mutation.cdc_enabled = true;
+            cl.append(&mutation).unwrap();
+        }
+
+        let infos = crate::cdc::list_cdc_segment_infos(&cdc_dir).unwrap();
+        assert!(!infos.is_empty());
+        assert!(
+            infos.iter().any(|info| info.completed),
+            "Expected at least one completed CDC segment after rotation"
+        );
     }
 }

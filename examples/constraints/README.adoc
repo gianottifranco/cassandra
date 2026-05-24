@@ -1,5 +1,9 @@
 == Cassandra Constraint Example
 
+NOTE: As of 2026-05-24, this Java example source has been removed from this
+branch as part of the Java→Rust rewrite. Historical Java implementation can be
+retrieved from the Java oracle history/branch.
+
 
 The `CustomConstraintsProvider` class will create custom constraints. For the purposes of this example,
 there will be two constraints: `MY_CUSTOM_CONSTRAINT` and `MY_CUSTOM_UNARY_CONSTRAINT`.

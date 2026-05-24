@@ -14,6 +14,12 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$SCRIPT_DIR"
 
+# Ensure rustup toolchain shims are on PATH when available.
+if [[ -f "$HOME/.cargo/env" ]]; then
+    # shellcheck disable=SC1090
+    source "$HOME/.cargo/env"
+fi
+
 SINGLE_NODE_ONLY=false
 if [[ "${1:-}" == "--single-node-only" ]]; then
     SINGLE_NODE_ONLY=true
@@ -22,6 +28,21 @@ fi
 PASS=0
 FAIL=0
 SKIP=0
+
+wait_for_port() {
+    local host="$1"
+    local port="$2"
+    local timeout_secs="$3"
+    local elapsed=0
+    while [[ $elapsed -lt $timeout_secs ]]; do
+        if nc -z "$host" "$port" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
 
 check() {
     local name="$1"
@@ -63,23 +84,32 @@ echo "── Tier 1: Single-Node Smoke ──"
 
 SERVER_BIN="target/debug/cassandra-server"
 if [[ ! -f "$SERVER_BIN" ]]; then
-    SERVER_BIN=$(find target -name cassandra-server -type f -perm +111 2>/dev/null | head -1 || true)
+    SERVER_BIN=$(find target -name cassandra-server -type f -perm /111 2>/dev/null | head -1 || true)
 fi
 
 if [[ -n "$SERVER_BIN" && -f "$SERVER_BIN" ]]; then
     SERVER_PID=""
     TMPDATA=$(mktemp -d)
+    TMPCONF=$(mktemp)
     cleanup_server() {
         if [[ -n "$SERVER_PID" ]]; then
             kill "$SERVER_PID" 2>/dev/null || true
             wait "$SERVER_PID" 2>/dev/null || true
         fi
+        rm -f "$TMPCONF"
         rm -rf "$TMPDATA"
     }
     trap cleanup_server EXIT
 
-    # Start server in background
-    "$SERVER_BIN" --data-dir "$TMPDATA" --listen 127.0.0.1 --port 19042 --admin-port 19180 &
+    cat >"$TMPCONF" <<'EOF'
+listen_address: "127.0.0.1"
+native_transport_port: 19042
+admin_port: 19180
+EOF
+
+    # Start server in background. cassandra-server currently reads runtime
+    # parameters from CASSANDRA_CONFIG rather than CLI flags.
+    CASSANDRA_CONFIG="$TMPCONF" "$SERVER_BIN" >"$TMPDATA/server.log" 2>&1 &
     SERVER_PID=$!
 
     # Wait for readiness (up to 10s)
@@ -105,6 +135,10 @@ if [[ -n "$SERVER_BIN" && -f "$SERVER_BIN" ]]; then
             skip "Admin API ready (19180)"      "port not open"
         fi
     else
+        if [[ -f "$TMPDATA/server.log" ]]; then
+            echo "  server startup log tail:"
+            tail -n 20 "$TMPDATA/server.log" | sed 's/^/    /'
+        fi
         skip "Server TCP ready (19042)"     "server did not start"
         skip "CQL port reachable"           "server did not start"
         skip "Admin API ready (19180)"      "server did not start"
@@ -134,16 +168,42 @@ else
     echo "── Tier 2: Docker Cluster ──"
 
     COMPOSE_FILE="docker-compose.prod.yml"
+    NODE1_PORT="${CASSANDRA_NODE1_PORT:-29042}"
+    NODE2_PORT="${CASSANDRA_NODE2_PORT:-29043}"
+    NODE3_PORT="${CASSANDRA_NODE3_PORT:-29044}"
+    NODE1_TLS_PORT="${CASSANDRA_NODE1_TLS_PORT:-29142}"
+    NODE1_METRICS_PORT="${CASSANDRA_NODE1_METRICS_PORT:-29180}"
+    NODE2_METRICS_PORT="${CASSANDRA_NODE2_METRICS_PORT:-29181}"
+    NODE3_METRICS_PORT="${CASSANDRA_NODE3_METRICS_PORT:-29182}"
+
+    dcompose() {
+        CASSANDRA_NODE1_PORT="$NODE1_PORT" \
+        CASSANDRA_NODE2_PORT="$NODE2_PORT" \
+        CASSANDRA_NODE3_PORT="$NODE3_PORT" \
+        CASSANDRA_NODE1_TLS_PORT="$NODE1_TLS_PORT" \
+        CASSANDRA_NODE1_METRICS_PORT="$NODE1_METRICS_PORT" \
+        CASSANDRA_NODE2_METRICS_PORT="$NODE2_METRICS_PORT" \
+        CASSANDRA_NODE3_METRICS_PORT="$NODE3_METRICS_PORT" \
+        docker compose -f "$COMPOSE_FILE" "$@"
+    }
+
     if [[ -f "$COMPOSE_FILE" ]] && command -v docker >/dev/null 2>&1; then
-        docker compose -f "$COMPOSE_FILE" up -d 2>/dev/null || true
+        printf "  %-45s " "Docker 3-node cluster"
+        if dcompose up -d --build >/dev/null 2>&1; then
+            echo "PASS"
+            PASS=$((PASS + 1))
 
-        # Wait for nodes (up to 30s)
-        echo "  Waiting for 3-node cluster..."
-        sleep 10
-
-        check "CQL on node 1 (9042)"       nc -z 127.0.0.1 9042
-        check "CQL on node 2 (9043)"       nc -z 127.0.0.1 9043
-        check "CQL on node 3 (9044)"       nc -z 127.0.0.1 9044
+            echo "  Waiting for 3-node cluster CQL ports..."
+            check "CQL on node 1 (${NODE1_PORT})"   wait_for_port 127.0.0.1 "$NODE1_PORT" 180
+            check "CQL on node 2 (${NODE2_PORT})"   wait_for_port 127.0.0.1 "$NODE2_PORT" 180
+            check "CQL on node 3 (${NODE3_PORT})"   wait_for_port 127.0.0.1 "$NODE3_PORT" 180
+        else
+            echo "FAIL"
+            FAIL=$((FAIL + 1))
+            skip "CQL on node 1 (${NODE1_PORT})"    "docker compose up failed"
+            skip "CQL on node 2 (${NODE2_PORT})"    "docker compose up failed"
+            skip "CQL on node 3 (${NODE3_PORT})"    "docker compose up failed"
+        fi
 
         echo ""
         echo "  NOTE: Multi-node limitations:"
@@ -151,7 +211,16 @@ else
         echo "    - No StorageProxy: distributed reads/writes not available"
         echo "    - Each node operates independently (3x single-node)"
 
-        docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+        if [[ $FAIL -gt 0 ]]; then
+            echo ""
+            echo "  Docker container status:"
+            dcompose ps 2>/dev/null | sed 's/^/    /' || true
+            echo ""
+            echo "  Docker logs tail (cassandra-rust-1/2/3):"
+            dcompose logs --tail=80 cassandra-rust-1 cassandra-rust-2 cassandra-rust-3 2>/dev/null | sed 's/^/    /' || true
+        fi
+
+        dcompose down -v 2>/dev/null || true
     else
         skip "Docker 3-node cluster"        "Docker or compose file not found"
         skip "CQL on node 1 (9042)"         "no Docker"

@@ -377,6 +377,11 @@ mod tests {
     // ── Proptest roundtrip tests ───────────────────────────────────────
 
     proptest! {
+        #![proptest_config(ProptestConfig {
+            failure_persistence: None,
+            .. ProptestConfig::default()
+        })]
+
         #[test]
         fn prop_int_roundtrip(v in any::<i32>()) {
             let bytes = serialize_cql_int(v);

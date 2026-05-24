@@ -260,6 +260,8 @@ mod tests {
             keyspace: "ks".into(),
             table: "tbl".into(),
             partition_key: b"pk1".to_vec(),
+            start_after: None,
+            row_limit: None,
         })
         .unwrap();
         let msg = Message::request(Verb::ReadData, 7, payload);
@@ -329,6 +331,8 @@ mod tests {
             keyspace: "ks".into(),
             table: "tbl".into(),
             partition_key: vec![1],
+            start_after: None,
+            row_limit: None,
         })
         .unwrap()
     }

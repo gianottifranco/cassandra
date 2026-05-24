@@ -5,7 +5,7 @@
 //! ## Running
 //!
 //! ```bash
-//! SOAK_DURATION_SECS=60 cargo test -p cassandra-diff-tests --test soak_tests -- --ignored --nocapture
+//! SOAK_DURATION_SECS=60 cargo test -p cassandra-diff-tests --test soak_tests -- --nocapture
 //! ```
 
 use cassandra_storage::commitlog::{CellMutation, CommitLogConfig, Mutation, MutationRow};
@@ -14,14 +14,6 @@ use cassandra_storage::engine::{EngineConfig, StorageEngine};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-
-fn soak_duration() -> Duration {
-    let secs = std::env::var("SOAK_DURATION_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(10);
-    Duration::from_secs(secs)
-}
 
 fn test_engine(dir: &std::path::Path) -> StorageEngine {
     let config = EngineConfig {
@@ -93,11 +85,14 @@ fn make_tombstone_mutation(ks: &str, tbl: &str, pk: &[u8], ck: &[u8], ts: i64) -
 
 /// Core soak: sustained writes + reads + flushes + compaction.
 #[test]
-#[ignore]
 fn soak_write_read_flush_compact() {
     let dir = TempDir::new().unwrap();
     let engine = Arc::new(test_engine(dir.path()));
-    let duration = soak_duration();
+    let duration = std::env::var("SOAK_WRITE_READ_FLUSH_COMPACT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1));
     let start = Instant::now();
     let mut total_writes = 0u64;
     let mut total_reads = 0u64;
@@ -147,6 +142,7 @@ fn soak_write_read_flush_compact() {
         "Soak complete: writes={total_writes}, reads={total_reads}, flushes={total_flushes}, sstables={}",
         stats.sstable_count
     );
+    assert!(total_writes > 0, "soak should execute writes");
 
     // Verify data integrity
     let result = engine.read_partition("soak_ks", "soak_t", b"soak-0-99");
@@ -158,7 +154,6 @@ fn soak_write_read_flush_compact() {
 
 /// Snapshot under sustained writes.
 #[test]
-#[ignore]
 fn soak_snapshot_under_load() {
     let dir = TempDir::new().unwrap();
     let engine = test_engine(dir.path());
@@ -202,11 +197,14 @@ fn soak_snapshot_under_load() {
 
 /// Mixed workload with compaction tracking latency percentiles.
 #[test]
-#[ignore]
 fn soak_mixed_workload_with_compaction() {
     let dir = TempDir::new().unwrap();
     let engine = test_engine(dir.path());
-    let duration = soak_duration();
+    let duration = std::env::var("SOAK_MIXED_WORKLOAD_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1));
     let start = Instant::now();
     let mut write_count = 0u64;
     let mut read_count = 0u64;
@@ -283,15 +281,25 @@ fn soak_mixed_workload_with_compaction() {
         p50(&read_lat),
         p99(&read_lat)
     );
+    assert!(write_count > 0, "mixed workload should execute writes");
+    let latest_pk = format!("mix-pk-{}", write_count - 1);
+    let latest_row = engine.read_partition("ks", "mixed", latest_pk.as_bytes());
+    assert!(
+        latest_row.is_some(),
+        "latest mixed-workload key should be readable"
+    );
 }
 
 /// Writes with explicit clock drift, verifies LWW resolution.
 #[test]
-#[ignore]
 fn soak_clock_skew_tolerance() {
     let dir = TempDir::new().unwrap();
     let engine = test_engine(dir.path());
-    let duration = soak_duration();
+    let duration = std::env::var("SOAK_CLOCK_SKEW_TOLERANCE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1));
     let start = Instant::now();
     let mut round = 0u64;
 
@@ -351,11 +359,14 @@ fn soak_clock_skew_tolerance() {
 
 /// Repair-like scenario: sustained writes + full-table scans.
 #[test]
-#[ignore]
 fn soak_repair_under_load() {
     let dir = TempDir::new().unwrap();
     let engine = test_engine(dir.path());
-    let duration = soak_duration();
+    let duration = std::env::var("SOAK_REPAIR_UNDER_LOAD_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1));
     let start = Instant::now();
     let mut write_count = 0u64;
 
@@ -394,21 +405,29 @@ fn soak_repair_under_load() {
     }
 
     println!("soak_repair_under_load: writes={write_count}");
+    assert!(
+        write_count > 0,
+        "repair soak should execute at least one write batch"
+    );
     let result = engine.read_partition("ks", "repair_tbl", b"repair-pk-0");
     assert!(result.is_some(), "First key should survive");
 }
 
 /// Topology churn: writes across multiple keyspaces and tables.
 #[test]
-#[ignore]
 fn soak_topology_churn() {
     let dir = TempDir::new().unwrap();
     let engine = test_engine(dir.path());
-    let duration = soak_duration();
+    let duration = std::env::var("SOAK_TOPOLOGY_CHURN_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(1));
     let start = Instant::now();
     let mut round = 0u64;
     let keyspaces = ["ks_a", "ks_b", "ks_c", "ks_d"];
     let tables = ["t1", "t2", "t3"];
+    let mut probe_key: Option<(String, String, Vec<u8>)> = None;
 
     while start.elapsed() < duration {
         let ks = keyspaces[(round as usize) % keyspaces.len()];
@@ -426,6 +445,9 @@ fn soak_topology_churn() {
                 (round * 10 + i) as i64,
             );
             engine.apply_mutation(&m).unwrap();
+            if probe_key.is_none() {
+                probe_key = Some((ks.to_string(), tbl.to_string(), pk.as_bytes().to_vec()));
+            }
         }
 
         if round % 100 == 0 {
@@ -442,4 +464,12 @@ fn soak_topology_churn() {
         keyspaces.len(),
         tables.len()
     );
+    assert!(
+        round > 0,
+        "topology churn should execute at least one round"
+    );
+    if let Some((ks, tbl, pk)) = probe_key {
+        let row = engine.read_partition(&ks, &tbl, &pk);
+        assert!(row.is_some(), "topology churn probe row should be readable");
+    }
 }

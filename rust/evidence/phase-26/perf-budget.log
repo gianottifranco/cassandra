@@ -1,0 +1,69 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running tests/perf_budget_tests.rs (target/debug/deps/perf_budget_tests-f560ab5d1e1fbd9d)
+
+running 6 tests
+
+p50: 0μs/1μs ✅ | p99: 0μs/5μs ✅ | p999: 0μs/20μs ✅
+test perf_frame_parse_budget ... ok
+
+═══════════════════════════════════════════════════════════
+  Performance Budget Report — 1779621783
+═══════════════════════════════════════════════════════════
+
+  ✅ p50: 23μs/80μs ✅ | p99: 49μs/4000μs ✅ | p999: 811μs/20000μs ✅
+  ✅ p50: 1μs/50μs ✅ | p99: 3μs/200μs ✅ | p999: 19μs/8000μs ✅
+  ✅ p50: 0μs/1μs ✅ | p99: 0μs/5μs ✅ | p999: 0μs/20μs ✅
+
+  Overall: ✅ PASS
+═══════════════════════════════════════════════════════════
+
+
+--- Performance Report JSON ---
+{
+  "timestamp": "1779621783",
+  "latency_results": [
+    {
+      "name": "memtable_write",
+      "passed": true,
+      "p50_pass": true,
+      "p99_pass": true,
+      "p999_pass": true,
+      "details": "p50: 23μs/80μs ✅ | p99: 49μs/4000μs ✅ | p999: 811μs/20000μs ✅"
+    },
+    {
+      "name": "memtable_read",
+      "passed": true,
+      "p50_pass": true,
+      "p99_pass": true,
+      "p999_pass": true,
+      "details": "p50: 1μs/50μs ✅ | p99: 3μs/200μs ✅ | p999: 19μs/8000μs ✅"
+    },
+    {
+      "name": "frame_parse",
+      "passed": true,
+      "p50_pass": true,
+      "p99_pass": true,
+      "p999_pass": true,
+      "details": "p50: 0μs/1μs ✅ | p99: 0μs/5μs ✅ | p999: 0μs/20μs ✅"
+    }
+  ],
+  "throughput_measurements": [],
+  "memory_measurements": [],
+  "overall_pass": true
+}
+test perf_full_report ... ok
+
+Flush throughput: 28.0 MB/s (1000 partitions, 11.411212ms)
+test perf_flush_throughput ... ok
+
+p50: 2μs/50μs ✅ | p99: 3μs/200μs ✅ | p999: 6μs/8000μs ✅
+test perf_memtable_read_budget ... ok
+
+p50: 66μs/80μs ✅ | p99: 236μs/4000μs ✅ | p999: 4008μs/20000μs ✅
+test perf_memtable_write_budget ... ok
+
+Memory: initial=0B, post-flush=0B, growth=0.00x
+test perf_memory_growth_budget ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.61s
+

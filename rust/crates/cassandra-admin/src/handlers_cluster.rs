@@ -321,6 +321,7 @@ mod tests {
             repair_coordinator: None,
             storage_engine: None,
             schema_catalog: None,
+            topology_controller: None,
         }
     }
 
@@ -368,6 +369,7 @@ mod tests {
             repair_coordinator: None,
             storage_engine: None,
             schema_catalog: None,
+            topology_controller: None,
         };
         let resp = handle_cluster_status(&state);
         assert_eq!(resp.status(), StatusCode::OK);

@@ -81,7 +81,7 @@ features:
       - org.apache.cassandra.cql3.conditions
     rust_crate: cassandra-cql
     status: partial
-    evidence_type: [unit]
+    evidence_type: [unit, integration]
     criticality: P1
     config_condition: null
     closure_phase: prompt-07
@@ -445,7 +445,7 @@ features:
       - org.apache.cassandra.io
     rust_crate: cassandra-storage
     status: partial
-    evidence_type: [unit]
+    evidence_type: [unit, integration]
     criticality: P0
     config_condition: null
     closure_phase: prompt-04
@@ -1226,11 +1226,31 @@ features:
       policies, digest mismatch detection, data reconciliation, tombstone
       tracking, and read repair staging are implemented with unit coverage.
       StorageProxy executes live data/digest internode fan-out, sends the
-      immediate speculative replica for ALWAYS speculation, and can satisfy CL
-      by falling through to an extra planned read candidate when a digest
-      replica fails. Missing: delayed speculative retry scheduling, short-read
-      retry integration, and remaining Java AbstractReadExecutor runtime edge
-      cases.
+      immediate speculative replica for ALWAYS speculation, and now schedules
+      delayed speculative retry candidates (fixed-delay/percentile) after the
+      configured delay when initial data+digest attempts cannot satisfy CL.
+      ReadData messaging now carries continuation bounds (`start_after`,
+      `row_limit`) and replica handlers apply those bounds when building
+      responses. CoordinatedRead now carries those optional bounds into the
+      initial `ReadData` request, and StorageProxy retries replica `ReadData`
+      requests when responses are marked short-read (`is_short_read`) and
+      tombstone-filtered, using continuation bounds plus bounded retries with
+      short-read metrics in single-replica and quorum/digest flows. The server
+      runtime `QueryExecutor::execute_select` now has an optional keyed-read
+      sink bridge that maps SELECT LIMIT/page-size plus coordinator-style
+      paging_state into `start_after`/`row_limit` bounds with legacy fallback.
+      `cassandra-server` now also ships a StorageProxy-backed sink adapter so
+      keyed SELECT runtime paths can consume coordinated read results directly.
+      QueryProcessor now forwards native protocol consistency levels into the
+      executor for SELECT sink execution, and server startup wires a single-node
+      StorageProxy read sink with storage-backed read verb handlers. Server
+      runtime now also wires StorageProxy-backed mutation sinks for single DML
+      statements and batch execution, converts commitlog mutations (including
+      partition/range tombstones) into coordinator mutations before fan-out,
+      and routes trigger-produced mutations through the same coordinator sink
+      path.
+      Missing: full Java short-read semantics for all read-limit/paging modes
+      and remaining AbstractReadExecutor runtime edge cases.
 
   - id: coordinator-write
     name: Write Coordinator
@@ -1248,6 +1268,9 @@ features:
       StorageProxy mutation fan-out, counter read-before-write, batchlog
       store/remove/replay, trigger augmentation, and synchronous/asynchronous
       materialized-view fanout hooks are implemented with focused coverage.
+      Server runtime now routes INSERT/UPDATE/DELETE and BATCH mutations
+      through StorageProxy sink adapters with propagated consistency levels and
+      trigger-produced mutation fan-out coverage.
       Missing: production parity for Java write-stage scheduling, failure
       classification, and long-running view update worker lifecycle integration.
 
@@ -1301,7 +1324,15 @@ features:
     criticality: P0
     config_condition: null
     closure_phase: prompt-05
-    notes: "Read/write paths. Missing: bootstrap, token migration, snapshot, disk management."
+    notes: >
+      Read/write coordinator paths are implemented. StorageService now models
+      lifecycle transitions (Starting/Joining/Normal/Leaving/Left), token-aware
+      bootstrap (`initialize_with_tokens` promoting pending tokens at
+      `set_normal`), in-place token migration planning/application, and
+      decommission token capture/cleanup with runtime wiring in server startup
+      and shutdown.
+      Missing: disk management parity and remaining full SnapshotManager
+      lifecycle semantics tracked under service-snapshot.
 
   - id: service-disk
     name: Disk Management
@@ -1333,9 +1364,19 @@ features:
     config_condition: null
     closure_phase: prompt-12
     notes: >
-      Storage snapshot create/list/delete/restore plus admin HTTP handlers
-      and system_views.snapshots are implemented. Missing: full Java
-      SnapshotManager lifecycle and nodetool parity.
+      Storage snapshot create/list/delete/restore are implemented. Admin HTTP
+      snapshot endpoints now execute storage-engine snapshot/list/delete/
+      restore operations directly, support snapshot deletion by query/body
+      name and full clear-all deletes, and expose runtime incremental backup
+      enable/disable/status backed by storage-engine toggles.
+      StorageEngine snapshot creation now scopes linked files to the targeted
+      keyspace/table, restore reloads live SSTable handles from disk, and
+      snapshot size accounting helpers are exposed for admin responses.
+      Admin import now executes storage-engine SSTable import from external
+      directories (component remap/copy plus live SSTable reload) instead of
+      returning an operation stub.
+      Missing: full Java SnapshotManager multi-table lifecycle semantics,
+      and remaining nodetool parity outside snapshot restore wiring.
 
   - id: paxos
     name: Paxos / LWT
@@ -1893,8 +1934,10 @@ features:
       Clap-based nodetool surface covers cluster info, status/ring,
       gossip/compaction/snapshot, topology, stats, cache, hints, config,
       logging, security, repair, index, SSTable, bootstrap, token, password,
-      audit/FQL, and stress commands with smoke coverage. Missing: complete
-      upstream command catalog and Java output/exit-code parity.
+      audit/FQL, and stress commands with smoke coverage. Snapshot command
+      family includes snapshot/listsnapshots/clearsnapshot/restoresnapshot
+      plus import and backup toggles. Missing: complete upstream command
+      catalog and Java output/exit-code parity.
 
   - id: sstable-tools
     name: SSTable Offline Tools
@@ -1925,8 +1968,9 @@ features:
     closure_phase: prompt-12
     notes: >
       TableFormatter/TableColumn support fixed-width nodetool-style text
-      output with alignment, and status output is wired through it. Missing:
-      full Java formatter catalog and adoption by every nodetool command.
+      output with alignment; status, tpstats, and proxyhistograms output are
+      wired through it. Missing: full Java formatter catalog and adoption by
+      every nodetool command.
 
   - id: tools-nodetool-stats
     name: Nodetool Stats Commands
@@ -1943,9 +1987,72 @@ features:
       nodetool-style stat commands are wired for tablestats/tablehistograms,
       tpstats, gcstats, proxyhistograms, clientstats, toppartitions,
       failuredetectorinfo, datapaths, refreshsizeestimates, viewbuildstatus,
-      getendpoints, and getsstables with error-handling tests. Missing:
-      Java-compatible TableStatsHolder/StatsTable/StatsPrinter formatting
-      and full cfstats/tablestats output parity.
+      getendpoints, and getsstables with error-handling tests. tpstats and
+      proxyhistograms now render nodetool-style tables; tablehistograms and
+      clientstats also render structured nodetool-style summaries instead of
+      raw JSON, and client/table histogram endpoints are aligned to the admin
+      API routes. stats auxiliary endpoints used by
+      failuredetectorinfo/datapaths/refreshsizeestimates/viewbuildstatus/
+      getendpoints/getsstables are now implemented in admin HTTP handlers and
+      corresponding nodetool commands render list/table output instead of raw
+      JSON (including failure-detector, data paths, top partitions, and view/
+      refresh status command formatting improvements).
+      tablehistograms and toppartitions filters now propagate end-to-end
+      (`?keyspace`/`?table`) and are enforced in admin handlers.
+      tablehistograms/cfhistograms now render nodetool-style six-column
+      percentile output (SSTables/Write/Read/Partition Size/Cell Count,
+      including 98%/Min/Max rows) and admin stats now return derived
+      sstables-per-read, partition-size, and cell-count histogram summaries.
+      tablestats/cfstats now consume `tables` payloads and render a keyspace-
+      first nodetool-style summary with per-table details and keyspace
+      filtering, including core latency/pending-flush and space/bloom summary
+      lines sourced from stats payload fields. Table/keyspace read-write counts
+      and p50 latencies are now populated from labeled table histogram metrics,
+      and pending flushes derive from active SSTable flush tasks.
+      pending flushes now also merge table-scoped memtable flushing counts
+      from the storage-engine runtime state, so output no longer depends only
+      on virtual-table task rows.
+      off_heap_memory_used_bytes now derives from per-table SSTable
+      Summary.db component bytes as an on-disk proxy for table off-heap
+      summary structures.
+      keyspace-level space_used_total now aggregates per-table total usage
+      (SSTable data-byte aggregates plus snapshot bytes) instead of always
+      mirroring live scanned bytes.
+      speculative_retries now derives from coordinator read-path speculative
+      retry counters tracked per keyspace/table and exported in `/stats/tables`
+      instead of static zero defaults.
+      cfstats/tablestats table output now uses Java-style label/ordering for
+      key keyspace/table lines (Keyspace, SSTable count, old/max SSTable,
+      local read/write, repaired bytes, bloom/compacted/tombstone fields), and
+      `/api/v1/stats/tables` now publishes matching snake_case payload keys
+      with defaults/derived values where native metrics are not yet wired.
+      number_of_partitions_estimate, memtable_cell_count/memtable_data_size,
+      compacted partition min/max/mean, and live/tombstone slice stats now
+      derive from per-table partition scans instead of static zeros.
+      max_sstable_size and sstable_compression_ratio now derive from per-table
+      SSTable aggregates (max data component size and data-bytes/component-bytes
+      ratio) exposed by storage-engine table SSTable stats.
+      bytes_unrepaired and space_used_total_bytes now prefer per-table SSTable
+      data-byte aggregates when available, instead of always mirroring live
+      scanned partition bytes.
+      memtable_switch_count now comes from per-table runtime counters in
+      storage-engine flush switching, exposed via `/api/v1/stats/tables`,
+      instead of static zero defaults.
+      bloom_filter_space_used now derives from per-table SSTable Filter.db
+      component bytes, and space_used_snapshots_bytes now derives from
+      per-table snapshot manifest/file accounting in storage engine.
+      bloom_filter_false_positives and bloom_filter_false_ratio now derive
+      from table-scoped bloom check/false-positive runtime counters in the
+      storage engine read path.
+      old_sstable_count now derives from table-scoped orphan/obsolete TOC
+      entries present on disk but absent from the live SSTable set tracked
+      by the storage engine.
+      cfstats/tablestats `table=` filter now propagates from CLI (`--table`)
+      through `/api/v1/stats/tables?table=...` and is enforced server-side in
+      stats table collection across schema catalog and virtual table task rows.
+      Missing:
+      full Java StatsPrinter field-level parity and complete
+      cfstats/tablestats output parity.
 
   - id: admin-http
     name: HTTP Admin API
@@ -1957,7 +2064,34 @@ features:
     criticality: P2
     config_condition: null
     closure_phase: prompt-08
-    notes: "Rust-only HTTP admin API. Not in Java baseline."
+    notes: >
+      Rust-only HTTP admin API. Snapshot/import/backup handlers now execute
+      storage-engine operations directly, and topology refresh now reloads
+      live SSTable handles from disk for the targeted table with before/after
+      counts. Topology drain now performs real memtable flush + commitlog sync
+      via storage-engine runtime hooks. Decommission now executes through a
+      topology-controller bridge wired by server runtime instead of returning a
+      static started response, and topology move now applies token migration
+      through the same runtime bridge. removenode now also executes through the
+      runtime bridge with host_id→endpoint resolution and cluster node removal
+      instead of returning a static started response. rebuild now executes via
+      runtime TopologyCoordinator begin/finish flow and returns stream-request
+      counts and topology state transitions instead of static started status.
+      join now executes through the runtime bridge and advances StorageService
+      to NORMAL, bootstrap endpoint now supports real resume/abort actions
+      (including reset of failed bootstrap coordinator state), assassinate now
+      removes the target endpoint from cluster metadata via runtime bridge, and
+      topology status/netstats now return live runtime-derived node state and
+      pending-range streaming counters rather than static placeholders.
+      stopdaemon now issues a runtime shutdown signal through
+      ShutdownCoordinator and transitions transport/storage lifecycle states
+      from admin API instead of being CLI-only placeholder behavior.
+      sstableloader operation endpoint now executes real storage-engine
+      directory imports by discovering keyspace/table TOCs and loading each
+      table into live SSTable handles with aggregated per-table results.
+      `nodes` targeting is now validated as single-node local-only in current
+      runtime (remote-node targets are rejected explicitly).
+      Not in Java baseline.
 
   # ═══════════════════════════════════════════════════════════════
   # COMMON / UTILITIES
@@ -2092,16 +2226,39 @@ features:
       - org.apache.cassandra.cdc
     rust_crate: cassandra-storage
     status: partial
-    evidence_type: [unit]
+    evidence_type: [unit, integration]
     criticality: P2
     config_condition: null
     closure_phase: prompt-12
     notes: >
       CDC raw directory status, segment listing, Java-compatible _cdc.idx
       sidecar read/write, completed-segment mutation decoding, discard, and
-      commitlog CDC hooks are implemented. Missing: CDCCommitLogSegmentAllocator
-      parity, complete streaming consumer APIs, and production backpressure
-      integration.
+      commitlog CDC hooks are implemented. Offline `cassandra-tools cdcread`
+      supports completed/all segment scans, summary and JSON output, and
+      optional TDE key material for encrypted segment decoding; durable offset
+      boundaries are respected for plaintext and codec-aware reads. Storage
+      CDC now also exposes incremental completed-segment batch consumption with
+      resume cursor (`segment_id`, `mutation_index`) in plaintext and
+      codec-aware paths for encrypted segments. CDC write-path budget checks
+      now execute pre-append with transformed entry sizing (compression/
+      encryption aware), preventing rejected CDC mutations from being persisted
+      in commitlog. `cassandra-tools cdcread` now supports incremental
+      completed-segment reads with `--batch-size` plus persisted cursor state
+      via `--cursor-file` for resumable offline consumption, and `--follow`
+      polling mode (`--poll-interval-ms`, `--max-batches`) for bounded or
+      continuous consumer-style reads with sticky terminal cursor progression
+      to avoid duplicate reprocessing on exhausted polls. Follow mode now also
+      includes explicit consumer backpressure controls
+      (`--max-consecutive-nonempty-batches`, `--backpressure-sleep-ms`) to
+      pace sustained non-empty polling bursts. Storage CDC now exposes the
+      same sticky-cursor behavior as `read_completed_cdc_mutations_follow_step`
+      APIs plus reusable runtime consumer tick state/config via
+      `cdc_follower_tick(_with_codec)` for integration beyond CLI tooling.
+      `cassandra-server` now wires a background CDC follower task with graceful
+      shutdown token handling and optional commitlog decrypt codec reuse for
+      encrypted CDC reads. Missing:
+      CDCCommitLogSegmentAllocator parity and production backpressure/consumer
+      lifecycle integration.
 
   - id: serializers
     name: Type Serializers

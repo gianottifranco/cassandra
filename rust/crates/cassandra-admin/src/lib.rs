@@ -45,7 +45,12 @@ pub mod handlers_topology;
 
 pub use diagnostics::{DiagnosticEvent, DiagnosticEventService, DiagnosticEventType};
 pub use disk_management::{DataDirectory, DiskBoundary, DiskBoundaryManager, DiskError};
-pub use http_admin::{AdminState, start_admin_server};
+pub use http_admin::{
+    AdminState, AssassinateReport, BootstrapReport, CommandQueueStat, CurrentTopologyOperation,
+    DecommissionReport, JoinReport, MoveReport, NetstatsReport, RebuildReport, RemoveNodeReport,
+    StopDaemonReport, StreamPeerStat, TopologyController, TopologyNodeStatus, TopologyStatusReport,
+    start_admin_server,
+};
 pub use metrics::AdminMetrics;
 pub use nodetool::{
     NodetoolCommand, OutputFormat, StatsTable, TableFormatter, TableStatsHolder, TableStatsSummary,

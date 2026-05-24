@@ -37,6 +37,7 @@ pub mod speculative_retry;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::LazyLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -93,6 +94,10 @@ pub struct ReadResult {
     pub paging_state: Option<PagingState>,
     /// Whether this was a speculative retry.
     pub speculative_retry_used: bool,
+    /// Speculative replica reserved for delayed speculation.
+    pub speculative_replica: Option<Endpoint>,
+    /// Delay before contacting `speculative_replica`.
+    pub speculative_delay: Option<Duration>,
     /// Number of tombstones encountered.
     pub tombstones_read: u32,
 }
@@ -209,6 +214,10 @@ pub struct ReadMetrics {
     pub read_latency_us_sum: AtomicU64,
 }
 
+static GLOBAL_SPECULATIVE_RETRIES_BY_TABLE: LazyLock<
+    parking_lot::RwLock<HashMap<(String, String), u64>>,
+> = LazyLock::new(|| parking_lot::RwLock::new(HashMap::new()));
+
 impl ReadMetrics {
     pub fn new() -> Self {
         Self {
@@ -225,12 +234,23 @@ impl ReadMetrics {
             read_latency_us_sum: AtomicU64::new(0),
         }
     }
+
+    pub fn record_speculative_retry(&self, keyspace: &str, table: &str) {
+        self.speculative_retries.fetch_add(1, Ordering::Relaxed);
+        let mut map = GLOBAL_SPECULATIVE_RETRIES_BY_TABLE.write();
+        *map.entry((keyspace.to_string(), table.to_string()))
+            .or_insert(0) += 1;
+    }
 }
 
 impl Default for ReadMetrics {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub fn global_speculative_retries_snapshot() -> HashMap<(String, String), u64> {
+    GLOBAL_SPECULATIVE_RETRIES_BY_TABLE.read().clone()
 }
 
 // ─── Read Coordinator ───────────────────────────────────────────
@@ -272,6 +292,8 @@ pub struct CoordinatedRead {
     pub keyspace: String,
     pub table: String,
     pub partition_key: Vec<u8>,
+    pub start_after: Option<Vec<u8>>,
+    pub row_limit: Option<usize>,
 }
 
 impl ReadCoordinator {
@@ -430,13 +452,19 @@ impl ReadCoordinator {
             "Planned read"
         );
 
-        let speculative_retry_used = plan.speculative_replica.is_some()
-            && self.speculative_retry_policy == SpeculativeRetryPolicy::Always;
-
         let mut contacted = vec![plan.data_replica];
         contacted.extend(plan.digest_replicas);
+        let mut speculative_retry_used = false;
+        let mut speculative_replica = None;
+        let mut speculative_delay = None;
         if let Some(spec) = plan.speculative_replica {
-            contacted.push(spec);
+            if plan.speculative_delay.is_some_and(|delay| delay.is_zero()) {
+                contacted.push(spec);
+                speculative_retry_used = true;
+            } else {
+                speculative_replica = Some(spec);
+                speculative_delay = plan.speculative_delay;
+            }
         }
 
         Ok(ReadResult {
@@ -450,6 +478,8 @@ impl ReadCoordinator {
             warnings: Vec::new(),
             paging_state: None,
             speculative_retry_used,
+            speculative_replica,
+            speculative_delay,
             tombstones_read: 0,
         })
     }
@@ -495,8 +525,7 @@ impl ReadCoordinator {
 
         if planned.speculative_retry_used {
             self.metrics
-                .speculative_retries
-                .fetch_add(1, Ordering::Relaxed);
+                .record_speculative_retry(&read.keyspace, &read.table);
         }
 
         // Compatibility response for direct `ReadCoordinator` callers. The
@@ -526,6 +555,8 @@ impl ReadCoordinator {
             warnings: planned.warnings,
             paging_state: planned.paging_state,
             speculative_retry_used: planned.speculative_retry_used,
+            speculative_replica: planned.speculative_replica,
+            speculative_delay: planned.speculative_delay,
             tombstones_read: 0,
         })
     }
@@ -740,6 +771,8 @@ impl ReadCoordinator {
             warnings: Vec::new(),
             paging_state: None,
             speculative_retry_used: false,
+            speculative_replica: None,
+            speculative_delay: None,
             tombstones_read: 0,
         })
     }
@@ -923,6 +956,8 @@ mod tests {
             keyspace: "ks".to_string(),
             table: "users".to_string(),
             partition_key: b"user1".to_vec(),
+            start_after: None,
+            row_limit: None,
         }
     }
 
@@ -1221,7 +1256,10 @@ mod tests {
             .plan_read(&test_read(), ConsistencyLevel::Quorum, &strategy, &snitch)
             .unwrap();
 
-        assert!(result.contacted_replicas.len() >= 3);
+        assert_eq!(result.contacted_replicas.len(), 2);
+        assert!(result.speculative_replica.is_some());
+        assert_eq!(result.speculative_delay, Some(Duration::from_millis(7)));
+        assert!(!result.speculative_retry_used);
         assert_eq!(seen_percentile.load(Ordering::Relaxed), 95);
     }
 

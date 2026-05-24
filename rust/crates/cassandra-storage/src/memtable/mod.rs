@@ -241,7 +241,7 @@ pub struct MemtableManager {
     /// The currently active memtable per column family (keyspace.table).
     active: RwLock<BTreeMap<String, Arc<Memtable>>>,
     /// Memtables currently being flushed.
-    flushing: RwLock<Vec<Arc<Memtable>>>,
+    flushing: RwLock<Vec<(String, Arc<Memtable>)>>,
     /// Next memtable ID.
     next_id: AtomicU64,
     /// Memory threshold that triggers flush (bytes).
@@ -321,7 +321,9 @@ impl MemtableManager {
         let old = active.insert(cf_name.to_string(), new_mt);
 
         if let Some(ref old_mt) = old {
-            self.flushing.write().push(Arc::clone(old_mt));
+            self.flushing
+                .write()
+                .push((cf_name.to_string(), Arc::clone(old_mt)));
         }
 
         old
@@ -330,7 +332,7 @@ impl MemtableManager {
     /// Mark a flushing memtable as complete.
     pub fn flush_complete(&self, memtable_id: u64) {
         let mut flushing = self.flushing.write();
-        flushing.retain(|mt| mt.id != memtable_id);
+        flushing.retain(|(_, mt)| mt.id != memtable_id);
     }
 
     /// Get the lowest commitlog segment bound across all active + flushing memtables.
@@ -340,7 +342,10 @@ impl MemtableManager {
         let flushing = self.flushing.read();
 
         let active_min = active.values().map(|mt| mt.commitlog_lower_bound).min();
-        let flushing_min = flushing.iter().map(|mt| mt.commitlog_lower_bound).min();
+        let flushing_min = flushing
+            .iter()
+            .map(|(_, mt)| mt.commitlog_lower_bound)
+            .min();
 
         match (active_min, flushing_min) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -362,6 +367,15 @@ impl MemtableManager {
             .get(cf_name)
             .map(|mt| mt.iter_partitions())
             .unwrap_or_default()
+    }
+
+    /// Count currently flushing memtables by column family (`keyspace.table`).
+    pub fn flushing_count_by_cf(&self) -> std::collections::HashMap<String, u64> {
+        let mut counts = std::collections::HashMap::new();
+        for (cf_name, _) in self.flushing.read().iter() {
+            *counts.entry(cf_name.clone()).or_insert(0) += 1;
+        }
+        counts
     }
 }
 
@@ -475,6 +489,30 @@ mod tests {
         assert_ne!(new.id, old.id);
 
         mgr.flush_complete(old.id);
+    }
+
+    #[test]
+    fn flushing_count_by_cf_tracks_pending_flushes() {
+        let mgr = MemtableManager::new(1024);
+        let mt1 = mgr.get_or_create("ks.t1", 1);
+        mt1.apply(b"pk1".to_vec(), test_row(b"ck", "c", b"v1", 100));
+        let mt2 = mgr.get_or_create("ks.t2", 1);
+        mt2.apply(b"pk2".to_vec(), test_row(b"ck", "c", b"v2", 100));
+
+        let old1 = mgr.switch_memtable("ks.t1", 2).unwrap();
+        let old2 = mgr.switch_memtable("ks.t2", 2).unwrap();
+
+        let counts = mgr.flushing_count_by_cf();
+        assert_eq!(counts.get("ks.t1").copied().unwrap_or(0), 1);
+        assert_eq!(counts.get("ks.t2").copied().unwrap_or(0), 1);
+
+        mgr.flush_complete(old1.id);
+        let counts = mgr.flushing_count_by_cf();
+        assert_eq!(counts.get("ks.t1").copied().unwrap_or(0), 0);
+        assert_eq!(counts.get("ks.t2").copied().unwrap_or(0), 1);
+
+        mgr.flush_complete(old2.id);
+        assert!(mgr.flushing_count_by_cf().is_empty());
     }
 
     #[test]

@@ -391,16 +391,11 @@ pub struct Insert {
     pub using: Vec<UsingClause>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JsonDefault {
+    #[default]
     Null,
     Unset,
-}
-
-impl Default for JsonDefault {
-    fn default() -> Self {
-        Self::Null
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

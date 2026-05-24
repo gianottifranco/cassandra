@@ -1,0 +1,57 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
+     Running unittests src/lib.rs (target/debug/deps/cassandra_migration-5ab8fa86aed6201f)
+
+running 44 tests
+test cdc_continuity::tests::continuity_with_gaps ... ok
+test cdc_continuity::tests::continuity_ok ... ok
+test cdc_continuity::tests::handoff_contiguous ... ok
+test cdc_continuity::tests::empty_dir ... ok
+test cdc_continuity::tests::checkpoint_roundtrip ... ok
+test data_validator::tests::checksum_mismatch ... ok
+test data_validator::tests::collect_migration_data_from_snapshot_source ... ok
+test data_validator::tests::identical_data_passes ... ok
+test data_validator::tests::report_serializable ... ok
+test data_validator::tests::row_count_mismatch_fails ... ok
+test data_validator::tests::row_count_within_tolerance_passes ... ok
+test cdc_continuity::tests::scan_segments ... ok
+test fql_converter::tests::detect_json_format ... ok
+test fql_converter::tests::convert_json_to_json ... ok
+test schema_diff::tests::identical_schemas ... ok
+test schema_diff::tests::missing_table ... ok
+test schema_diff::tests::missing_keyspace_is_critical ... ok
+test fql_converter::tests::entry_roundtrip ... ok
+test schema_diff::tests::parse_simple_cql ... ok
+test schema_diff::tests::type_change ... ok
+test data_validator::tests::query_check_match ... ok
+test sstable_import::tests::component_extension_roundtrip ... ok
+test fql_converter::tests::merge_multiple_files ... ok
+test schema_diff::tests::added_column ... ok
+test schema_diff::tests::diff_report_serializable ... ok
+test cdc_continuity::tests::find_gaps_works ... ok
+test sstable_import::tests::parse_filename_big ... ok
+test sstable_import::tests::parse_filename_bti ... ok
+test fql_converter::tests::detect_binary_format ... ok
+test sstable_import::tests::import_missing_data_skipped ... ok
+test version_matrix::tests::java_3_x_to_rust_unsupported ... ok
+test sstable_import::tests::import_single_sstable ... ok
+test sstable_import::tests::skip_system_keyspaces ... ok
+test sstable_import::tests::batch_import_with_filter ... ok
+test sstable_import::tests::discover_and_import ... ok
+test version_matrix::tests::rust_to_rust_unsupported ... ok
+test tests::exported_modules_are_reachable ... ok
+test version_matrix::tests::java_5_0_to_rust_supported ... ok
+test version_matrix::tests::supported_paths_not_empty ... ok
+test version_matrix::tests::version_display ... ok
+test sstable_import::tests::import_warns_on_toc_mismatch ... ok
+test version_matrix::tests::java_4_0_to_rust_requires_conversion ... ok
+test version_matrix::tests::mixed_cluster_always_false ... ok
+test version_matrix::tests::unsupported_paths_all_unsupported ... ok
+
+test result: ok. 44 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cassandra_migration
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

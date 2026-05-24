@@ -35,6 +35,7 @@ use crate::hints::HintStore;
 use crate::paxos::coordinator::CasResult;
 use crate::read::{
     CoordinatedRead, DataResponse, Digest, PartitionResult, ReadCoordinator, ReadError, ReadResult,
+    ShortReadProtection,
 };
 use crate::verb_handlers::mutation_handler::{MutationRequest, MutationResponse};
 use crate::verb_handlers::read_handler::{
@@ -402,8 +403,13 @@ impl StorageProxy {
         let planned = self
             .read_coordinator
             .plan_read(read, cl, strategy, snitch)?;
-
-        self.fetch_rows_via_messaging(read, cl, planned).await
+        let result = self.fetch_rows_via_messaging(read, cl, planned).await?;
+        if result.speculative_retry_used {
+            self.read_coordinator
+                .metrics
+                .record_speculative_retry(&read.keyspace, &read.table);
+        }
+        Ok(result)
     }
 
     /// Fetch rows asynchronously with replica messaging.
@@ -442,9 +448,13 @@ impl StorageProxy {
         let mut num_failures = 0usize;
         let mut data_replica = None;
         let mut data_payload = None;
+        let mut speculative_retry_used = planned.speculative_retry_used;
 
         for candidate in planned.contacted_replicas.iter().copied() {
-            match self.fetch_full_data_payload(read, candidate).await {
+            match self
+                .fetch_full_data_payload_with_short_read_retry(read, candidate)
+                .await
+            {
                 Ok(payload) => {
                     data_replica = Some(candidate);
                     data_payload = Some(payload);
@@ -458,6 +468,35 @@ impl StorageProxy {
                     );
                     num_failures += 1;
                     failure_map.insert(candidate, 0);
+                }
+            }
+        }
+
+        if data_replica.is_none() {
+            if let Some(speculative_replica) = planned.speculative_replica {
+                if let Some(delay) = planned.speculative_delay {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                }
+                match self
+                    .fetch_full_data_payload_with_short_read_retry(read, speculative_replica)
+                    .await
+                {
+                    Ok(payload) => {
+                        data_replica = Some(speculative_replica);
+                        data_payload = Some(payload);
+                        speculative_retry_used = true;
+                    }
+                    Err(err) => {
+                        warn!(
+                            replica = %speculative_replica,
+                            error = %err,
+                            "Speculative ReadData request failed after primary candidates"
+                        );
+                        num_failures += 1;
+                        failure_map.insert(speculative_replica, 0);
+                    }
                 }
             }
         }
@@ -539,6 +578,74 @@ impl StorageProxy {
         }
 
         if responses_received < planned.responses_required {
+            if let Some(speculative_replica) = planned.speculative_replica {
+                if speculative_replica != data_replica
+                    && !failure_map.contains_key(&speculative_replica)
+                    && !contacted.contains(&speculative_replica)
+                {
+                    if let Some(delay) = planned.speculative_delay {
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                    let digest_request = ReadDigestRequest {
+                        keyspace: read.keyspace.clone(),
+                        table: read.table.clone(),
+                        partition_key: read.partition_key.clone(),
+                    };
+                    let digest_msg = Message::request(
+                        Verb::ReadDigest,
+                        self.messaging.next_id(),
+                        serde_json::to_vec(&digest_request).map_err(|e| {
+                            ReadError::Internal(format!("Serialize ReadDigest request: {e}"))
+                        })?,
+                    );
+                    match self
+                        .send_read_message(speculative_replica, digest_msg)
+                        .await
+                    {
+                        Ok(digest_response) => {
+                            if digest_response.header.verb != Verb::ReadDigestResponse {
+                                warn!(
+                                    replica = %speculative_replica,
+                                    verb = %digest_response.header.verb,
+                                    "Speculative ReadDigest request returned unexpected verb"
+                                );
+                                num_failures += 1;
+                                failure_map.insert(speculative_replica, 0);
+                            } else {
+                                let digest_payload: ReadDigestResponsePayload =
+                                    serde_json::from_slice(&digest_response.payload).map_err(
+                                        |e| {
+                                            ReadError::Internal(format!(
+                                                "Speculative ReadDigest response from {speculative_replica} invalid: {e}"
+                                            ))
+                                        },
+                                    )?;
+                                responses_received += 1;
+                                contacted.push(speculative_replica);
+                                digest_responses.push(Digest(digest_payload.digest.clone()));
+                                if digest_payload.digest != data_payload.digest {
+                                    digest_mismatches += 1;
+                                }
+                                speculative_retry_used = true;
+                            }
+                        }
+                        Err(err) => {
+                            warn!(
+                                replica = %speculative_replica,
+                                error = %err,
+                                "Speculative ReadDigest request failed"
+                            );
+                            num_failures += 1;
+                            failure_map.insert(speculative_replica, 0);
+                        }
+                    }
+                }
+            }
+        }
+
+        if responses_received < planned.responses_required {
             return Err(ReadError::ReadFailure {
                 cl,
                 required: planned.responses_required,
@@ -553,7 +660,9 @@ impl StorageProxy {
             let data_response = read_data_payload_to_response(&data_payload)?;
             let mut full_responses = vec![data_response.clone()];
             for replica in contacted.iter().copied().skip(1) {
-                let payload = self.fetch_full_data_payload(read, replica).await?;
+                let payload = self
+                    .fetch_full_data_payload_with_short_read_retry(read, replica)
+                    .await?;
                 full_responses.push(read_data_payload_to_response(&payload)?);
             }
 
@@ -590,7 +699,9 @@ impl StorageProxy {
                 contacted_replicas: contacted,
                 warnings: resolved.warnings,
                 paging_state: planned.paging_state,
-                speculative_retry_used: planned.speculative_retry_used,
+                speculative_retry_used,
+                speculative_replica: planned.speculative_replica,
+                speculative_delay: planned.speculative_delay,
                 tombstones_read: resolved.tombstones_read,
             });
         }
@@ -609,7 +720,9 @@ impl StorageProxy {
             contacted_replicas: contacted,
             warnings: planned.warnings,
             paging_state: planned.paging_state,
-            speculative_retry_used: planned.speculative_retry_used,
+            speculative_retry_used,
+            speculative_replica: planned.speculative_replica,
+            speculative_delay: planned.speculative_delay,
             tombstones_read: data_payload.tombstones_read,
         })
     }
@@ -635,10 +748,28 @@ impl StorageProxy {
         read: &CoordinatedRead,
         endpoint: Endpoint,
     ) -> Result<ReadDataResponsePayload, ReadError> {
+        self.fetch_full_data_payload_with_bounds(
+            read,
+            endpoint,
+            read.start_after.clone(),
+            read.row_limit,
+        )
+        .await
+    }
+
+    async fn fetch_full_data_payload_with_bounds(
+        &self,
+        read: &CoordinatedRead,
+        endpoint: Endpoint,
+        start_after: Option<Vec<u8>>,
+        row_limit: Option<usize>,
+    ) -> Result<ReadDataResponsePayload, ReadError> {
         let request = ReadDataRequest {
             keyspace: read.keyspace.clone(),
             table: read.table.clone(),
             partition_key: read.partition_key.clone(),
+            start_after,
+            row_limit,
         };
         let msg = Message::request(
             Verb::ReadData,
@@ -656,6 +787,59 @@ impl StorageProxy {
         serde_json::from_slice(&response.payload).map_err(|e| {
             ReadError::Internal(format!("ReadData response from {endpoint} invalid: {e}"))
         })
+    }
+
+    async fn fetch_full_data_payload_with_short_read_retry(
+        &self,
+        read: &CoordinatedRead,
+        endpoint: Endpoint,
+    ) -> Result<ReadDataResponsePayload, ReadError> {
+        let mut short_read = ShortReadProtection::default();
+        let mut payload = self.fetch_full_data_payload(read, endpoint).await?;
+
+        while payload.is_short_read {
+            let rows_received = payload
+                .partitions
+                .iter()
+                .map(|partition| partition.live_row_count)
+                .sum::<usize>();
+            let rows_requested = rows_received.saturating_add(1);
+            if !short_read.needs_retry(rows_requested, rows_received, payload.tombstones_read) {
+                break;
+            }
+
+            short_read.record_retry();
+            self.read_coordinator
+                .metrics
+                .short_read_retries
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let Some(last_clustering_key) = last_clustering_key_from_payload(&payload)? else {
+                payload = self.fetch_full_data_payload(read, endpoint).await?;
+                continue;
+            };
+            let retry = short_read.retry_bounds(&last_clustering_key, rows_requested);
+            let next_payload = self
+                .fetch_full_data_payload_with_bounds(
+                    read,
+                    endpoint,
+                    Some(retry.start_after),
+                    Some(retry.adjusted_limit),
+                )
+                .await?;
+            merge_short_read_payload(&mut payload, next_payload)?;
+        }
+
+        if payload.is_short_read && short_read.max_retries_reached() {
+            warn!(
+                keyspace = %read.keyspace,
+                table = %read.table,
+                replica = %endpoint,
+                retries = short_read.retries,
+                "Short-read retries exhausted for replica response"
+            );
+        }
+
+        Ok(payload)
     }
 
     // ─── CAS / LWT ──────────────────────────────────────────────────
@@ -804,6 +988,88 @@ fn read_data_payload_to_response(
         tombstones_read: payload.tombstones_read,
         is_short_read: payload.is_short_read,
     })
+}
+
+fn last_clustering_key_from_payload(
+    payload: &ReadDataResponsePayload,
+) -> Result<Option<Vec<u8>>, ReadError> {
+    let mut last: Option<Vec<u8>> = None;
+    for partition in &payload.partitions {
+        if partition.data.is_empty() {
+            continue;
+        }
+        let data = decode_partition_data(&partition.data)?;
+        if let Some((ck, _)) = data.rows.last_key_value() {
+            last = Some(ck.clone());
+        }
+    }
+    Ok(last)
+}
+
+fn merge_short_read_payload(
+    base: &mut ReadDataResponsePayload,
+    next: ReadDataResponsePayload,
+) -> Result<(), ReadError> {
+    base.tombstones_read = base.tombstones_read.saturating_add(next.tombstones_read);
+    base.is_short_read = next.is_short_read;
+
+    for next_partition in next.partitions {
+        if let Some(existing) = base
+            .partitions
+            .iter_mut()
+            .find(|partition| partition.partition_key == next_partition.partition_key)
+        {
+            let mut merged = if existing.data.is_empty() {
+                PartitionData::new()
+            } else {
+                decode_partition_data(&existing.data)?
+            };
+            let incoming = if next_partition.data.is_empty() {
+                PartitionData::new()
+            } else {
+                decode_partition_data(&next_partition.data)?
+            };
+            for (_ck, row) in incoming.rows {
+                merged.apply_row(row);
+            }
+            if let (Some(ts), Some(ldt)) = (
+                incoming.tombstone_timestamp,
+                incoming.tombstone_local_deletion_time,
+            ) {
+                merged.set_tombstone(ts, ldt);
+            }
+            existing.data = encode_result_partition_data(&merged);
+            existing.live_row_count = merged.rows.len();
+            existing.was_truncated = existing.was_truncated || next_partition.was_truncated;
+        } else {
+            base.partitions.push(next_partition);
+        }
+    }
+
+    refresh_payload_digest(base)?;
+    Ok(())
+}
+
+fn refresh_payload_digest(payload: &mut ReadDataResponsePayload) -> Result<(), ReadError> {
+    if payload.partitions.is_empty() {
+        payload.digest = Digest::empty().0;
+        return Ok(());
+    }
+
+    if payload.partitions.len() == 1 {
+        let partition = &payload.partitions[0];
+        if partition.data.is_empty() {
+            payload.digest = Digest::empty().0;
+        } else {
+            let data = decode_partition_data(&partition.data)?;
+            payload.digest = Digest::from_partition(&data).0;
+        }
+        return Ok(());
+    }
+
+    // Fallback: hash the response content when multiple partitions are present.
+    payload.digest = read_data_payload_to_response(payload)?.digest().0;
+    Ok(())
 }
 
 fn decode_partition_data(bytes: &[u8]) -> Result<PartitionData, ReadError> {
@@ -1011,6 +1277,7 @@ mod tests {
     use crate::batch::BatchLogManager;
     use crate::hints::HintStore;
     use crate::read::SpeculativeRetryPolicy;
+    use crate::verb_handlers::read_handler::{ReadDataResponsePayload, ReadDataVerbHandler};
     use crate::verb_handlers::registration::register_all_verb_handlers_with_storage;
     use crate::write::{CellMutation, MutationRow};
     use cassandra_cluster_metadata::node::{NodeId, NodeInfo};
@@ -1022,6 +1289,7 @@ mod tests {
     };
     use cassandra_storage::engine::{EngineConfig, StorageEngine};
     use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
 
     fn make_proxy() -> StorageProxy {
@@ -1099,6 +1367,57 @@ mod tests {
                     is_tombstone: false,
                     local_deletion_time: None,
                 }],
+                timestamp,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone: None,
+                range_tombstones: Vec::new(),
+            })
+            .unwrap();
+    }
+
+    fn apply_test_two_rows(
+        storage: &StorageEngine,
+        partition_key: &[u8],
+        first_ck: &[u8],
+        first_value: &[u8],
+        second_ck: &[u8],
+        second_value: &[u8],
+        timestamp: i64,
+    ) {
+        storage
+            .apply_mutation(&StorageMutation {
+                keyspace: "ks".to_string(),
+                table: "users".to_string(),
+                partition_key: partition_key.to_vec(),
+                rows: vec![
+                    StorageMutationRow {
+                        clustering_key: first_ck.to_vec(),
+                        cells: vec![StorageCellMutation {
+                            column: "name".to_string(),
+                            value: Some(first_value.to_vec()),
+                            timestamp,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    },
+                    StorageMutationRow {
+                        clustering_key: second_ck.to_vec(),
+                        cells: vec![StorageCellMutation {
+                            column: "name".to_string(),
+                            value: Some(second_value.to_vec()),
+                            timestamp: timestamp + 1,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    },
+                ],
                 timestamp,
                 cdc_enabled: false,
                 static_cells: Vec::new(),
@@ -1264,6 +1583,8 @@ mod tests {
                     keyspace: "ks".to_string(),
                     table: "users".to_string(),
                     partition_key: b"pk1".to_vec(),
+                    start_after: None,
+                    row_limit: None,
                 },
                 ConsistencyLevel::One,
                 &SimpleStrategy::new(1),
@@ -1282,6 +1603,8 @@ mod tests {
                     keyspace: "ks".to_string(),
                     table: "users".to_string(),
                     partition_key: b"pk1".to_vec(),
+                    start_after: None,
+                    row_limit: None,
                 },
                 ConsistencyLevel::One,
                 &SimpleStrategy::new(1),
@@ -1295,6 +1618,330 @@ mod tests {
                 .as_ref()
                 .is_some_and(|data| !data.is_empty())
         );
+    }
+
+    #[tokio::test]
+    async fn fetch_rows_applies_initial_read_bounds() {
+        let proxy = make_proxy();
+        let temp = TempDir::new().unwrap();
+        let storage = open_test_storage(&temp, "local");
+        apply_test_two_rows(&storage, b"pk-bounds", b"a", b"alice", b"b", b"bob", 1);
+        register_all_verb_handlers_with_storage(proxy.messaging(), Arc::clone(&storage));
+
+        let result = proxy
+            .fetch_rows(
+                &CoordinatedRead {
+                    keyspace: "ks".to_string(),
+                    table: "users".to_string(),
+                    partition_key: b"pk-bounds".to_vec(),
+                    start_after: Some(b"a".to_vec()),
+                    row_limit: Some(1),
+                },
+                ConsistencyLevel::One,
+                &SimpleStrategy::new(1),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+
+        let bytes = result.data.expect("bounded data");
+        let bounded = decode_partition_data(&bytes).expect("decode");
+        assert!(!bounded.rows.contains_key(&b"a".to_vec()));
+        assert!(bounded.rows.contains_key(&b"b".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn fetch_rows_retries_short_read_data_response() {
+        let proxy = make_proxy();
+        let temp = TempDir::new().unwrap();
+        let storage = open_test_storage(&temp, "local");
+        apply_test_value(&storage, b"pk-short-read", b"alice", 1);
+        register_all_verb_handlers_with_storage(proxy.messaging(), Arc::clone(&storage));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let read_storage = Arc::clone(&storage);
+        let attempts_for_handler = Arc::clone(&attempts);
+        proxy.messaging().register_handler(
+            Verb::ReadData,
+            Arc::new(move |msg| {
+                if attempts_for_handler.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let payload = ReadDataResponsePayload {
+                        partitions: Vec::new(),
+                        digest: Digest::empty().0,
+                        tombstones_read: 1,
+                        is_short_read: true,
+                    };
+                    return Some(Message::response(
+                        msg.header.message_id,
+                        Verb::ReadDataResponse,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    ));
+                }
+                ReadDataVerbHandler::handle_with_storage(msg, read_storage.as_ref())
+            }),
+        );
+
+        let result = proxy
+            .fetch_rows(
+                &CoordinatedRead {
+                    keyspace: "ks".to_string(),
+                    table: "users".to_string(),
+                    partition_key: b"pk-short-read".to_vec(),
+                    start_after: None,
+                    row_limit: None,
+                },
+                ConsistencyLevel::One,
+                &SimpleStrategy::new(1),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+
+        assert!(result.data.as_ref().is_some_and(|data| !data.is_empty()));
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            proxy
+                .read_coordinator()
+                .metrics
+                .short_read_retries
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_rows_short_read_retry_uses_continuation_bounds() {
+        let proxy = make_proxy();
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_handler = Arc::clone(&attempts);
+        proxy.messaging().register_handler(
+            Verb::ReadData,
+            Arc::new(move |msg| {
+                let request: ReadDataRequest = serde_json::from_slice(&msg.payload).unwrap();
+                let attempt = attempts_for_handler.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    let mut first = PartitionData::new();
+                    first.apply_row(Row {
+                        clustering_key: b"a".to_vec(),
+                        cells: vec![Cell {
+                            column: "name".to_string(),
+                            value: Some(b"alice".to_vec()),
+                            timestamp: 1,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    });
+                    let payload = ReadDataResponsePayload {
+                        partitions: vec![crate::verb_handlers::read_handler::WirePartitionResult {
+                            partition_key: request.partition_key.clone(),
+                            data: encode_result_partition_data(&first),
+                            live_row_count: 1,
+                            was_truncated: true,
+                        }],
+                        digest: Digest::empty().0,
+                        tombstones_read: 1,
+                        is_short_read: true,
+                    };
+                    return Some(Message::response(
+                        msg.header.message_id,
+                        Verb::ReadDataResponse,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    ));
+                }
+
+                assert_eq!(request.start_after, Some(b"a".to_vec()));
+                assert_eq!(request.row_limit, Some(2));
+                let mut second = PartitionData::new();
+                second.apply_row(Row {
+                    clustering_key: b"b".to_vec(),
+                    cells: vec![Cell {
+                        column: "name".to_string(),
+                        value: Some(b"bob".to_vec()),
+                        timestamp: 2,
+                        ttl: 0,
+                        local_deletion_time: None,
+                        is_tombstone: false,
+                    }],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                });
+                let payload = ReadDataResponsePayload {
+                    partitions: vec![crate::verb_handlers::read_handler::WirePartitionResult {
+                        partition_key: request.partition_key,
+                        data: encode_result_partition_data(&second),
+                        live_row_count: 1,
+                        was_truncated: false,
+                    }],
+                    digest: Digest::empty().0,
+                    tombstones_read: 0,
+                    is_short_read: false,
+                };
+                Some(Message::response(
+                    msg.header.message_id,
+                    Verb::ReadDataResponse,
+                    serde_json::to_vec(&payload).unwrap_or_default(),
+                ))
+            }),
+        );
+
+        let result = proxy
+            .fetch_rows(
+                &CoordinatedRead {
+                    keyspace: "ks".to_string(),
+                    table: "users".to_string(),
+                    partition_key: b"pk-short-read-bounds".to_vec(),
+                    start_after: None,
+                    row_limit: None,
+                },
+                ConsistencyLevel::One,
+                &SimpleStrategy::new(1),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let bytes = result.data.expect("merged bytes");
+        let merged = decode_partition_data(&bytes).expect("decode");
+        assert!(merged.rows.contains_key(&b"a".to_vec()));
+        assert!(merged.rows.contains_key(&b"b".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn fetch_rows_quorum_short_read_continuation_matches_digest_replica() {
+        let partition_key = b"pk-short-read-quorum";
+        let local_addr = free_addr();
+        let remote_addr = free_addr();
+        let proxy = make_two_node_proxy(local_addr, remote_addr, partition_key);
+        let temp = TempDir::new().unwrap();
+        let local_storage = open_test_storage(&temp, "local");
+        let remote_storage = open_test_storage(&temp, "remote");
+        apply_test_two_rows(
+            &local_storage,
+            partition_key,
+            b"a",
+            b"alice",
+            b"b",
+            b"bob",
+            1,
+        );
+        apply_test_two_rows(
+            &remote_storage,
+            partition_key,
+            b"a",
+            b"alice",
+            b"b",
+            b"bob",
+            1,
+        );
+        register_all_verb_handlers_with_storage(proxy.messaging(), Arc::clone(&local_storage));
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_handler = Arc::clone(&attempts);
+        proxy.messaging().register_handler(
+            Verb::ReadData,
+            Arc::new(move |msg| {
+                let request: ReadDataRequest = serde_json::from_slice(&msg.payload).unwrap();
+                let attempt = attempts_for_handler.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    let mut first = PartitionData::new();
+                    first.apply_row(Row {
+                        clustering_key: b"a".to_vec(),
+                        cells: vec![Cell {
+                            column: "name".to_string(),
+                            value: Some(b"alice".to_vec()),
+                            timestamp: 1,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        }],
+                        is_tombstone: false,
+                        local_deletion_time: None,
+                    });
+                    let payload = ReadDataResponsePayload {
+                        partitions: vec![crate::verb_handlers::read_handler::WirePartitionResult {
+                            partition_key: request.partition_key.clone(),
+                            data: encode_result_partition_data(&first),
+                            live_row_count: 1,
+                            was_truncated: true,
+                        }],
+                        digest: Digest::from_partition(&first).0,
+                        tombstones_read: 1,
+                        is_short_read: true,
+                    };
+                    return Some(Message::response(
+                        msg.header.message_id,
+                        Verb::ReadDataResponse,
+                        serde_json::to_vec(&payload).unwrap_or_default(),
+                    ));
+                }
+
+                assert_eq!(request.start_after, Some(b"a".to_vec()));
+                assert_eq!(request.row_limit, Some(2));
+                let mut second = PartitionData::new();
+                second.apply_row(Row {
+                    clustering_key: b"b".to_vec(),
+                    cells: vec![Cell {
+                        column: "name".to_string(),
+                        value: Some(b"bob".to_vec()),
+                        timestamp: 2,
+                        ttl: 0,
+                        local_deletion_time: None,
+                        is_tombstone: false,
+                    }],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                });
+                let payload = ReadDataResponsePayload {
+                    partitions: vec![crate::verb_handlers::read_handler::WirePartitionResult {
+                        partition_key: request.partition_key,
+                        data: encode_result_partition_data(&second),
+                        live_row_count: 1,
+                        was_truncated: false,
+                    }],
+                    digest: Digest::from_partition(&second).0,
+                    tombstones_read: 0,
+                    is_short_read: false,
+                };
+                Some(Message::response(
+                    msg.header.message_id,
+                    Verb::ReadDataResponse,
+                    serde_json::to_vec(&payload).unwrap_or_default(),
+                ))
+            }),
+        );
+
+        let remote_service = Arc::new(MessagingService::new(remote_addr));
+        register_all_verb_handlers_with_storage(&remote_service, Arc::clone(&remote_storage));
+        Arc::clone(&remote_service).start_listener().await.unwrap();
+
+        let result = proxy
+            .fetch_rows(
+                &CoordinatedRead {
+                    keyspace: "ks".to_string(),
+                    table: "users".to_string(),
+                    partition_key: partition_key.to_vec(),
+                    start_after: None,
+                    row_limit: None,
+                },
+                ConsistencyLevel::Quorum,
+                &SimpleStrategy::new(2),
+                &SimpleSnitch,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert!(!result.digest_mismatch_resolved);
+        assert!(!result.read_repair_triggered);
+        assert_eq!(result.responses_received, 2);
+        let merged = decode_partition_data(&result.data.expect("data")).expect("decode");
+        assert!(merged.rows.contains_key(&b"a".to_vec()));
+        assert!(merged.rows.contains_key(&b"b".to_vec()));
     }
 
     #[tokio::test]
@@ -1320,6 +1967,8 @@ mod tests {
                     keyspace: "ks".to_string(),
                     table: "users".to_string(),
                     partition_key: partition_key.to_vec(),
+                    start_after: None,
+                    row_limit: None,
                 },
                 ConsistencyLevel::Quorum,
                 &SimpleStrategy::new(2),
@@ -1394,6 +2043,8 @@ mod tests {
                     keyspace: "ks".to_string(),
                     table: "users".to_string(),
                     partition_key: partition_key.to_vec(),
+                    start_after: None,
+                    row_limit: None,
                 },
                 ConsistencyLevel::Quorum,
                 &SimpleStrategy::new(3),
@@ -1442,6 +2093,8 @@ mod tests {
                     keyspace: "ks".to_string(),
                     table: "users".to_string(),
                     partition_key: partition_key.to_vec(),
+                    start_after: None,
+                    row_limit: None,
                 },
                 ConsistencyLevel::Quorum,
                 &SimpleStrategy::new(3),
@@ -1450,7 +2103,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(!result.speculative_retry_used);
+        assert!(result.speculative_retry_used);
         assert_eq!(result.responses_required, 2);
         assert_eq!(result.responses_received, 2);
         assert_eq!(

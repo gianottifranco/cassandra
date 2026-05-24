@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use byteorder::{BigEndian, ByteOrder};
+use cassandra_cluster_metadata::{ReplicationStrategy, Snitch};
+use cassandra_coordinator::PagingState as CoordinatorPagingState;
+use cassandra_coordinator::{ConsistencyLevel, CoordinatedMutation, CoordinatedRead, StorageProxy};
 use cassandra_cql::functions::decimal_math::DecimalValue;
 use num_bigint::BigInt;
 use num_traits::Zero;
@@ -57,7 +60,7 @@ use cassandra_storage::commitlog::{
     TombstoneMarker,
 };
 use cassandra_storage::engine::StorageEngine;
-use cassandra_storage::memtable::partition::{Cell, Row};
+use cassandra_storage::memtable::partition::{Cell, PartitionData, Row};
 use cassandra_types::{
     CqlType, codec::CqlValue, native::parse_cql_type, type_compat::is_compatible_with,
 };
@@ -113,8 +116,222 @@ pub struct ResultColumn {
 }
 
 pub type BatchMutationSink = Arc<
-    dyn Fn(cassandra_cql::ast::BatchType, &[Mutation]) -> Result<(), ExecutorError> + Send + Sync,
+    dyn Fn(
+            cassandra_cql::ast::BatchType,
+            &[Mutation],
+            ConsistencyLevel,
+        ) -> Result<(), ExecutorError>
+        + Send
+        + Sync,
 >;
+
+pub type MutationSink =
+    Arc<dyn Fn(&Mutation, ConsistencyLevel) -> Result<(), ExecutorError> + Send + Sync>;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectReadRequest {
+    pub keyspace: String,
+    pub table: String,
+    pub partition_key: Vec<u8>,
+    pub consistency: ConsistencyLevel,
+    pub start_after: Option<Vec<u8>>,
+    pub row_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SelectReadResult {
+    pub partition: Option<PartitionData>,
+    pub was_truncated: bool,
+    pub warnings: Vec<String>,
+}
+
+pub type SelectReadSink =
+    Arc<dyn Fn(&SelectReadRequest) -> Result<SelectReadResult, ExecutorError> + Send + Sync>;
+
+pub fn commitlog_mutation_to_coordinated(mutation: &Mutation) -> CoordinatedMutation {
+    let mut rows = mutation
+        .rows
+        .iter()
+        .map(|row| cassandra_coordinator::MutationRow {
+            clustering_key: row.clustering_key.clone(),
+            cells: row
+                .cells
+                .iter()
+                .map(|cell| cassandra_coordinator::CellMutation {
+                    column: cell.column.clone(),
+                    value: cell.value.clone(),
+                    timestamp: cell.timestamp,
+                    ttl: cell.ttl,
+                    is_tombstone: cell.is_tombstone,
+                    collection_op: None,
+                })
+                .collect(),
+            is_tombstone: row.is_tombstone,
+            range_tombstone: None,
+        })
+        .collect::<Vec<_>>();
+
+    for marker in &mutation.range_tombstones {
+        rows.push(cassandra_coordinator::MutationRow {
+            clustering_key: marker.start.clone(),
+            cells: Vec::new(),
+            is_tombstone: true,
+            range_tombstone: Some(cassandra_coordinator::RangeTombstone {
+                start: marker.start.clone(),
+                end: marker.end.clone(),
+                deletion_time: marker.timestamp,
+                local_deletion_time: marker.local_deletion_time,
+            }),
+        });
+    }
+
+    CoordinatedMutation {
+        keyspace: mutation.keyspace.clone(),
+        table: mutation.table.clone(),
+        partition_key: mutation.partition_key.clone(),
+        rows,
+        timestamp: mutation.timestamp,
+        kind: cassandra_coordinator::MutationKind::Standard,
+        static_cells: mutation
+            .static_cells
+            .iter()
+            .map(|cell| cassandra_coordinator::CellMutation {
+                column: cell.column.clone(),
+                value: cell.value.clone(),
+                timestamp: cell.timestamp,
+                ttl: cell.ttl,
+                is_tombstone: cell.is_tombstone,
+                collection_op: None,
+            })
+            .collect(),
+        partition_tombstone: mutation.partition_tombstone.as_ref().map(|t| {
+            cassandra_coordinator::TombstoneMarker {
+                deletion_time: t.timestamp,
+                local_deletion_time: t.local_deletion_time,
+            }
+        }),
+    }
+}
+
+pub fn storage_proxy_select_read_sink(
+    proxy: Arc<StorageProxy>,
+    strategy: Arc<dyn ReplicationStrategy>,
+    snitch: Arc<dyn Snitch>,
+) -> SelectReadSink {
+    Arc::new(move |request: &SelectReadRequest| {
+        let proxy = Arc::clone(&proxy);
+        let strategy = Arc::clone(&strategy);
+        let snitch = Arc::clone(&snitch);
+        let read = CoordinatedRead {
+            keyspace: request.keyspace.clone(),
+            table: request.table.clone(),
+            partition_key: request.partition_key.clone(),
+            start_after: request.start_after.clone(),
+            row_limit: request.row_limit,
+        };
+
+        let future = async move {
+            proxy
+                .fetch_rows(
+                    &read,
+                    request.consistency,
+                    strategy.as_ref(),
+                    snitch.as_ref(),
+                )
+                .await
+        };
+        let result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        } else {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    ExecutorError::StorageError(format!("failed to build runtime: {e}"))
+                })?;
+            runtime.block_on(future)
+        };
+
+        let result = result.map_err(|e| {
+            ExecutorError::StorageError(format!("read failed via StorageProxy: {e}"))
+        })?;
+        let partition = result
+            .partitions
+            .iter()
+            .find(|partition| partition.partition_key == request.partition_key)
+            .and_then(|partition| partition.data.clone())
+            .or_else(|| {
+                result
+                    .partitions
+                    .iter()
+                    .find_map(|partition| partition.data.clone())
+            })
+            .or_else(|| {
+                result
+                    .data
+                    .as_deref()
+                    .and_then(|bytes| decode_storage_proxy_partition_data(bytes).ok())
+            });
+        let was_truncated = result
+            .partitions
+            .iter()
+            .any(|partition| partition.was_truncated);
+
+        Ok(SelectReadResult {
+            partition,
+            was_truncated,
+            warnings: result.warnings,
+        })
+    })
+}
+
+pub fn storage_proxy_batch_mutation_sink(
+    proxy: Arc<StorageProxy>,
+    strategy: Arc<dyn ReplicationStrategy>,
+    snitch: Arc<dyn Snitch>,
+) -> BatchMutationSink {
+    let mutation_sink = storage_proxy_mutation_sink(proxy, strategy, snitch);
+    Arc::new(move |_batch_type, mutations, consistency| {
+        for mutation in mutations {
+            mutation_sink(mutation, consistency)?;
+        }
+        Ok(())
+    })
+}
+
+pub fn storage_proxy_mutation_sink(
+    proxy: Arc<StorageProxy>,
+    strategy: Arc<dyn ReplicationStrategy>,
+    snitch: Arc<dyn Snitch>,
+) -> MutationSink {
+    Arc::new(move |mutation, consistency| {
+        let proxy = Arc::clone(&proxy);
+        let strategy = Arc::clone(&strategy);
+        let snitch = Arc::clone(&snitch);
+        let coordinated = commitlog_mutation_to_coordinated(mutation);
+        let future = async move {
+            proxy
+                .mutate(coordinated, consistency, strategy.as_ref(), snitch.as_ref())
+                .await
+        };
+
+        let write_result = if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        } else {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    ExecutorError::StorageError(format!("failed to build runtime: {e}"))
+                })?;
+            runtime.block_on(future)
+        };
+
+        write_result
+            .map(|_| ())
+            .map_err(|e| ExecutorError::StorageError(format!("write failed via StorageProxy: {e}")))
+    })
+}
 
 #[derive(Debug, Clone)]
 enum JavaCompatUdfBody {
@@ -1700,6 +1917,8 @@ pub struct QueryExecutor {
     uda_registry: Arc<UdaRegistry>,
     trigger_registry: Arc<TriggerRegistry>,
     batch_mutation_sink: Option<BatchMutationSink>,
+    mutation_sink: Option<MutationSink>,
+    select_read_sink: Option<SelectReadSink>,
 }
 
 impl QueryExecutor {
@@ -1719,6 +1938,8 @@ impl QueryExecutor {
             uda_registry: Arc::new(UdaRegistry::new()),
             trigger_registry: Arc::new(TriggerRegistry::new()),
             batch_mutation_sink: None,
+            mutation_sink: None,
+            select_read_sink: None,
         }
     }
 
@@ -1738,6 +1959,16 @@ impl QueryExecutor {
         self
     }
 
+    pub fn with_mutation_sink(mut self, sink: MutationSink) -> Self {
+        self.mutation_sink = Some(sink);
+        self
+    }
+
+    pub fn with_select_read_sink(mut self, sink: SelectReadSink) -> Self {
+        self.select_read_sink = Some(sink);
+        self
+    }
+
     pub fn catalog(&self) -> Arc<RwLock<SchemaCatalog>> {
         Arc::clone(&self.catalog)
     }
@@ -1747,6 +1978,15 @@ impl QueryExecutor {
         plan: &QueryPlan,
         user: Option<&str>,
     ) -> Result<QueryResult, ExecutorError> {
+        self.execute_with_consistency(plan, user, ConsistencyLevel::One)
+    }
+
+    pub fn execute_with_consistency(
+        &self,
+        plan: &QueryPlan,
+        user: Option<&str>,
+        consistency: ConsistencyLevel,
+    ) -> Result<QueryResult, ExecutorError> {
         let result = match plan {
             QueryPlan::Use(u) => self.execute_use(u),
             QueryPlan::CreateKeyspace(ck) => self.execute_create_keyspace(ck),
@@ -1755,12 +1995,12 @@ impl QueryExecutor {
             QueryPlan::CreateTable(ct) => self.execute_create_table(ct),
             QueryPlan::AlterTable(at) => self.execute_alter_table(at),
             QueryPlan::DropTable(dt) => self.execute_drop_table(dt),
-            QueryPlan::Insert(ins) => self.execute_insert(ins),
-            QueryPlan::Update(upd) => self.execute_update(upd),
-            QueryPlan::Delete(del) => self.execute_delete(del),
-            QueryPlan::Select(sel) => self.execute_select(sel, user),
+            QueryPlan::Insert(ins) => self.execute_insert(ins, consistency),
+            QueryPlan::Update(upd) => self.execute_update(upd, consistency),
+            QueryPlan::Delete(del) => self.execute_delete(del, consistency),
+            QueryPlan::Select(sel) => self.execute_select(sel, user, consistency),
             QueryPlan::Truncate(tr) => self.execute_truncate(tr),
-            QueryPlan::Batch(batch) => self.execute_batch(batch, user),
+            QueryPlan::Batch(batch) => self.execute_batch(batch, user, consistency),
             QueryPlan::CreateRole(cr) => self.execute_create_role(cr),
             QueryPlan::AlterRole(ar) => self.execute_alter_role(ar),
             QueryPlan::DropRole(dr) => self.execute_drop_role(dr),
@@ -3219,7 +3459,11 @@ impl QueryExecutor {
 
     // ─── DML ───────────────────────────────────────────────────────────
 
-    fn execute_insert(&self, plan: &InsertPlan) -> Result<QueryResult, ExecutorError> {
+    fn execute_insert(
+        &self,
+        plan: &InsertPlan,
+        consistency: ConsistencyLevel,
+    ) -> Result<QueryResult, ExecutorError> {
         let now = plan
             .using_timestamp
             .unwrap_or_else(current_timestamp_micros);
@@ -3341,15 +3585,17 @@ impl QueryExecutor {
 
         let trigger_mutations =
             self.execute_triggers(&plan.keyspace, &plan.table, &pk_bytes, MutationType::Insert)?;
-        self.engine
-            .apply_mutation(&mutation)
-            .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
-        self.apply_trigger_mutations(trigger_mutations, now)?;
+        self.apply_mutation_or_sink(&mutation, consistency)?;
+        self.apply_trigger_mutations(trigger_mutations, now, consistency)?;
 
         Ok(QueryResult::Void)
     }
 
-    fn execute_update(&self, plan: &UpdatePlan) -> Result<QueryResult, ExecutorError> {
+    fn execute_update(
+        &self,
+        plan: &UpdatePlan,
+        consistency: ConsistencyLevel,
+    ) -> Result<QueryResult, ExecutorError> {
         let now = plan
             .using_timestamp
             .unwrap_or_else(current_timestamp_micros);
@@ -3452,15 +3698,17 @@ impl QueryExecutor {
 
         let trigger_mutations =
             self.execute_triggers(&plan.keyspace, &plan.table, &pk_bytes, MutationType::Update)?;
-        self.engine
-            .apply_mutation(&mutation)
-            .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
-        self.apply_trigger_mutations(trigger_mutations, now)?;
+        self.apply_mutation_or_sink(&mutation, consistency)?;
+        self.apply_trigger_mutations(trigger_mutations, now, consistency)?;
 
         Ok(QueryResult::Void)
     }
 
-    fn execute_delete(&self, plan: &DeletePlan) -> Result<QueryResult, ExecutorError> {
+    fn execute_delete(
+        &self,
+        plan: &DeletePlan,
+        consistency: ConsistencyLevel,
+    ) -> Result<QueryResult, ExecutorError> {
         let now = plan
             .using_timestamp
             .unwrap_or_else(current_timestamp_micros);
@@ -3552,10 +3800,8 @@ impl QueryExecutor {
                 &pk_bytes,
                 MutationType::Delete,
             )?;
-            self.engine
-                .apply_mutation(&mutation)
-                .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
-            self.apply_trigger_mutations(trigger_mutations, now)?;
+            self.apply_mutation_or_sink(&mutation, consistency)?;
+            self.apply_trigger_mutations(trigger_mutations, now, consistency)?;
 
             return Ok(QueryResult::Void);
         }
@@ -3587,10 +3833,8 @@ impl QueryExecutor {
                 &pk_bytes,
                 MutationType::Delete,
             )?;
-            self.engine
-                .apply_mutation(&mutation)
-                .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
-            self.apply_trigger_mutations(trigger_mutations, now)?;
+            self.apply_mutation_or_sink(&mutation, consistency)?;
+            self.apply_trigger_mutations(trigger_mutations, now, consistency)?;
 
             return Ok(QueryResult::Void);
         }
@@ -3635,10 +3879,8 @@ impl QueryExecutor {
 
         let trigger_mutations =
             self.execute_triggers(&plan.keyspace, &plan.table, &pk_bytes, MutationType::Delete)?;
-        self.engine
-            .apply_mutation(&mutation)
-            .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
-        self.apply_trigger_mutations(trigger_mutations, now)?;
+        self.apply_mutation_or_sink(&mutation, consistency)?;
+        self.apply_trigger_mutations(trigger_mutations, now, consistency)?;
 
         Ok(QueryResult::Void)
     }
@@ -3669,20 +3911,34 @@ impl QueryExecutor {
         &self,
         trigger_mutations: Vec<TriggerMutation>,
         timestamp: i64,
+        consistency: ConsistencyLevel,
     ) -> Result<(), ExecutorError> {
         for trigger_mutation in trigger_mutations {
             let mutation = trigger_mutation_to_commitlog_mutation(trigger_mutation, timestamp);
-            self.engine
-                .apply_mutation(&mutation)
-                .map_err(|e| ExecutorError::StorageError(e.to_string()))?;
+            self.apply_mutation_or_sink(&mutation, consistency)?;
         }
         Ok(())
+    }
+
+    fn apply_mutation_or_sink(
+        &self,
+        mutation: &Mutation,
+        consistency: ConsistencyLevel,
+    ) -> Result<(), ExecutorError> {
+        if let Some(sink) = &self.mutation_sink {
+            sink(mutation, consistency)
+        } else {
+            self.engine
+                .apply_mutation(mutation)
+                .map_err(|e| ExecutorError::StorageError(e.to_string()))
+        }
     }
 
     fn execute_select(
         &self,
         plan: &SelectPlan,
         user: Option<&str>,
+        consistency: ConsistencyLevel,
     ) -> Result<QueryResult, ExecutorError> {
         let catalog = self.catalog.read();
         let snapshot = catalog.snapshot();
@@ -3950,7 +4206,7 @@ impl QueryExecutor {
             .limit
             .as_ref()
             .and_then(term_to_i64)
-            .map(|l| l as usize)
+            .and_then(|l| usize::try_from(l).ok())
             .unwrap_or(usize::MAX);
         let now_secs = (current_timestamp_micros() / 1_000_000) as i32;
 
@@ -4288,9 +4544,39 @@ impl QueryExecutor {
             );
         }
 
-        let partition = self
-            .engine
-            .read_partition(&plan.keyspace, &plan.table, &pk_bytes);
+        let parsed_sink_paging = parse_select_sink_paging_state(&plan.paging_state, &pk_bytes);
+        let sink_read_plan = self.select_read_sink.as_ref().and_then(|_| {
+            select_sink_read_request(
+                plan,
+                &pk_names,
+                &pk_bytes,
+                &parsed_sink_paging,
+                has_aggregates,
+                is_count,
+            )
+        });
+        let mut sink_next_state: Option<Vec<u8>> = None;
+        let mut sink_warnings = Vec::new();
+        let partition = if let (Some(sink), Some(read_plan)) =
+            (&self.select_read_sink, sink_read_plan.as_ref())
+        {
+            let read_result = sink(&SelectReadRequest {
+                keyspace: plan.keyspace.clone(),
+                table: plan.table.clone(),
+                partition_key: pk_bytes.clone(),
+                consistency,
+                start_after: read_plan.start_after.clone(),
+                row_limit: read_plan.row_limit,
+            })?;
+            if read_result.was_truncated {
+                sink_next_state = Some(Vec::new());
+            }
+            sink_warnings = read_result.warnings;
+            read_result.partition
+        } else {
+            self.engine
+                .read_partition(&plan.keyspace, &plan.table, &pk_bytes)
+        };
 
         let mut result_rows = Vec::new();
         let mut aggregate_inputs = Vec::new();
@@ -4397,6 +4683,7 @@ impl QueryExecutor {
             }
 
             let static_row = pd.rows.get(&Vec::new());
+            let mut last_returned_ck: Option<Vec<u8>> = None;
             for row in live {
                 if !row_matches_where(&pk_bytes, row, static_row) {
                     continue;
@@ -4404,10 +4691,45 @@ impl QueryExecutor {
                 if result_rows.len() >= row_limit {
                     break;
                 }
+                last_returned_ck = Some(row.clustering_key.clone());
                 if has_aggregates {
                     aggregate_inputs.push(make_aggregate_input(&pk_bytes, row, static_row)?);
                 } else {
                     result_rows.push(make_result_row(&pk_bytes, row, static_row)?);
+                }
+            }
+
+            if sink_next_state.is_some() {
+                if let (Some(last_ck), Some(read_plan)) =
+                    (last_returned_ck, sink_read_plan.as_ref())
+                {
+                    let returned_rows = result_rows.len() as u32;
+                    let remaining_after = read_plan
+                        .remaining_before
+                        .map(|remaining| remaining.saturating_sub(returned_rows));
+                    sink_next_state = match remaining_after {
+                        Some(0) => None,
+                        Some(remaining) => Some(
+                            CoordinatorPagingState::new(
+                                pk_bytes.clone(),
+                                last_ck,
+                                remaining,
+                                remaining,
+                            )
+                            .serialize(),
+                        ),
+                        None => Some(
+                            CoordinatorPagingState::new(
+                                pk_bytes.clone(),
+                                last_ck,
+                                u32::MAX,
+                                u32::MAX,
+                            )
+                            .serialize(),
+                        ),
+                    };
+                } else {
+                    sink_next_state = None;
                 }
             }
         }
@@ -4427,12 +4749,17 @@ impl QueryExecutor {
                 &pk_result_indices,
             );
         }
-        if result_rows.len() > row_limit {
-            result_rows.truncate(row_limit);
+        if sink_read_plan.is_none() {
+            if result_rows.len() > row_limit {
+                result_rows.truncate(row_limit);
+            }
         }
 
-        let (result_rows, pg_state, pg_warnings) =
-            apply_paging(result_rows, plan.page_size, &plan.paging_state);
+        let (result_rows, pg_state, pg_warnings) = if sink_read_plan.is_some() {
+            (result_rows, sink_next_state, sink_warnings)
+        } else {
+            apply_paging(result_rows, plan.page_size, &plan.paging_state)
+        };
         wrap_select_json(
             plan.json,
             result_columns,
@@ -4446,6 +4773,7 @@ impl QueryExecutor {
         &self,
         plan: &BatchPlan,
         _user: Option<&str>,
+        consistency: ConsistencyLevel,
     ) -> Result<QueryResult, ExecutorError> {
         // Validate counter/non-counter mixing:
         // Counter batches must only contain counter mutations and vice versa.
@@ -4501,7 +4829,7 @@ impl QueryExecutor {
         }
 
         if let Some(sink) = &self.batch_mutation_sink {
-            sink(plan.batch_type, &collected_mutations)?;
+            sink(plan.batch_type, &collected_mutations, consistency)?;
         } else {
             for mutation in &collected_mutations {
                 self.engine
@@ -8731,7 +9059,7 @@ fn token_relation_matches(rel: &Relation, partition_key: &[u8]) -> bool {
                 _ => false,
             }
         }
-        RelationOp::In => expected_values.iter().any(|expected| current == *expected),
+        RelationOp::In => expected_values.contains(&current),
         RelationOp::Contains | RelationOp::ContainsKey | RelationOp::Like => false,
     }
 }
@@ -9167,6 +9495,247 @@ fn ast_resource_to_security(
     }
 }
 
+#[derive(Debug, Clone)]
+struct SelectSinkReadRequest {
+    start_after: Option<Vec<u8>>,
+    row_limit: Option<usize>,
+    remaining_before: Option<u32>,
+}
+
+#[derive(Debug, Clone)]
+enum ParsedSelectSinkPagingState {
+    None,
+    Legacy,
+    IncompatiblePartition,
+    Coordinator {
+        start_after: Option<Vec<u8>>,
+        remaining: u32,
+    },
+}
+
+fn parse_select_sink_paging_state(
+    paging_state: &Option<Vec<u8>>,
+    partition_key: &[u8],
+) -> ParsedSelectSinkPagingState {
+    let Some(bytes) = paging_state.as_deref() else {
+        return ParsedSelectSinkPagingState::None;
+    };
+    let Some(state) = CoordinatorPagingState::deserialize(bytes) else {
+        return ParsedSelectSinkPagingState::Legacy;
+    };
+    if state.partition_key != partition_key {
+        return ParsedSelectSinkPagingState::IncompatiblePartition;
+    }
+    ParsedSelectSinkPagingState::Coordinator {
+        start_after: (!state.row_mark.is_empty()).then_some(state.row_mark),
+        remaining: state.remaining,
+    }
+}
+
+fn select_sink_read_request(
+    plan: &SelectPlan,
+    partition_key_names: &[String],
+    partition_key: &[u8],
+    parsed_paging_state: &ParsedSelectSinkPagingState,
+    has_aggregates: bool,
+    is_count: bool,
+) -> Option<SelectSinkReadRequest> {
+    if has_aggregates || is_count || plan.distinct || partition_key.is_empty() {
+        return None;
+    }
+    if plan
+        .order_by
+        .iter()
+        .any(|(_, ord)| matches!(ord, AstClusteringOrder::Desc))
+    {
+        return None;
+    }
+    if !is_partition_key_eq_only(&plan.where_clause, partition_key_names) {
+        return None;
+    }
+
+    let query_limit = plan
+        .limit
+        .as_ref()
+        .and_then(term_to_i64)
+        .and_then(|limit| u32::try_from(limit).ok());
+    let page_size = plan.page_size.and_then(|size| u32::try_from(size).ok());
+
+    let (start_after, remaining_before) = match parsed_paging_state {
+        ParsedSelectSinkPagingState::None => (None, query_limit),
+        ParsedSelectSinkPagingState::Coordinator {
+            start_after,
+            remaining,
+        } => {
+            let bounded_remaining = query_limit.map_or(*remaining, |limit| (*remaining).min(limit));
+            (start_after.clone(), Some(bounded_remaining))
+        }
+        ParsedSelectSinkPagingState::Legacy
+        | ParsedSelectSinkPagingState::IncompatiblePartition => {
+            return None;
+        }
+    };
+
+    let row_limit = match (page_size, remaining_before) {
+        (Some(_), Some(0)) | (None, Some(0)) => None,
+        (Some(size), Some(remaining)) => Some(size.min(remaining) as usize),
+        (Some(size), None) => Some(size as usize),
+        (None, Some(remaining)) => Some(remaining as usize),
+        (None, None) => None,
+    };
+
+    Some(SelectSinkReadRequest {
+        start_after,
+        row_limit,
+        remaining_before,
+    })
+}
+
+fn is_partition_key_eq_only(where_clause: &[Relation], partition_key_names: &[String]) -> bool {
+    if partition_key_names.is_empty() || where_clause.len() != partition_key_names.len() {
+        return false;
+    }
+
+    partition_key_names.iter().all(|pk_name| {
+        where_clause
+            .iter()
+            .any(|relation| relation.column == *pk_name && matches!(relation.op, RelationOp::Eq))
+    })
+}
+
+fn decode_storage_proxy_partition_data(bytes: &[u8]) -> Result<PartitionData, String> {
+    let mut input = bytes;
+    let tombstone_timestamp = decode_opt_i64(&mut input, "partition tombstone timestamp")?;
+    let tombstone_local_deletion_time =
+        decode_opt_i32(&mut input, "partition tombstone local deletion time")?;
+    let row_count = decode_u32(&mut input, "row count")? as usize;
+
+    let mut data = PartitionData {
+        rows: Default::default(),
+        tombstone_timestamp,
+        tombstone_local_deletion_time,
+    };
+
+    for _ in 0..row_count {
+        let clustering_key = decode_len_prefixed_bytes(&mut input, "clustering key")?;
+        let is_tombstone = decode_bool(&mut input, "row tombstone")?;
+        let local_deletion_time = decode_opt_i32(&mut input, "row local deletion time")?;
+        let cell_count = decode_u32(&mut input, "cell count")? as usize;
+        let mut cells = Vec::with_capacity(cell_count);
+
+        for _ in 0..cell_count {
+            let column = String::from_utf8(decode_len_prefixed_bytes(&mut input, "column")?)
+                .map_err(|e| format!("ReadData column not UTF-8: {e}"))?;
+            let has_value = decode_bool(&mut input, "cell value presence")?;
+            let value = if has_value {
+                Some(decode_len_prefixed_bytes(&mut input, "cell value")?)
+            } else {
+                None
+            };
+            let timestamp = decode_i64(&mut input, "cell timestamp")?;
+            let ttl = decode_i32(&mut input, "cell ttl")?;
+            let cell_local_deletion_time = decode_opt_i32(&mut input, "cell local deletion time")?;
+            let cell_is_tombstone = decode_bool(&mut input, "cell tombstone")?;
+            cells.push(Cell {
+                column,
+                value,
+                timestamp,
+                ttl,
+                local_deletion_time: cell_local_deletion_time,
+                is_tombstone: cell_is_tombstone,
+            });
+        }
+
+        data.rows.insert(
+            clustering_key.clone(),
+            Row {
+                clustering_key,
+                cells,
+                is_tombstone,
+                local_deletion_time,
+            },
+        );
+    }
+
+    if !input.is_empty() {
+        return Err(format!(
+            "ReadData partition payload has {} trailing bytes",
+            input.len()
+        ));
+    }
+
+    Ok(data)
+}
+
+fn decode_u32(input: &mut &[u8], field: &str) -> Result<u32, String> {
+    if input.len() < 4 {
+        return Err(format!("{field} is truncated"));
+    }
+    let (head, tail) = input.split_at(4);
+    *input = tail;
+    Ok(u32::from_be_bytes(head.try_into().expect("u32 bytes")))
+}
+
+fn decode_i64(input: &mut &[u8], field: &str) -> Result<i64, String> {
+    if input.len() < 8 {
+        return Err(format!("{field} is truncated"));
+    }
+    let (head, tail) = input.split_at(8);
+    *input = tail;
+    Ok(i64::from_be_bytes(head.try_into().expect("i64 bytes")))
+}
+
+fn decode_i32(input: &mut &[u8], field: &str) -> Result<i32, String> {
+    if input.len() < 4 {
+        return Err(format!("{field} is truncated"));
+    }
+    let (head, tail) = input.split_at(4);
+    *input = tail;
+    Ok(i32::from_be_bytes(head.try_into().expect("i32 bytes")))
+}
+
+fn decode_bool(input: &mut &[u8], field: &str) -> Result<bool, String> {
+    if input.is_empty() {
+        return Err(format!("{field} is truncated"));
+    }
+    let value = input[0];
+    *input = &input[1..];
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        other => Err(format!("{field} has invalid boolean value {other}")),
+    }
+}
+
+fn decode_len_prefixed_bytes(input: &mut &[u8], field: &str) -> Result<Vec<u8>, String> {
+    let len = decode_u32(input, field)? as usize;
+    if input.len() < len {
+        return Err(format!(
+            "{field} length {len} exceeds remaining payload {}",
+            input.len()
+        ));
+    }
+    let (head, tail) = input.split_at(len);
+    *input = tail;
+    Ok(head.to_vec())
+}
+
+fn decode_opt_i64(input: &mut &[u8], field: &str) -> Result<Option<i64>, String> {
+    Ok(if decode_bool(input, field)? {
+        Some(decode_i64(input, field)?)
+    } else {
+        None
+    })
+}
+
+fn decode_opt_i32(input: &mut &[u8], field: &str) -> Result<Option<i32>, String> {
+    Ok(if decode_bool(input, field)? {
+        Some(decode_i32(input, field)?)
+    } else {
+        None
+    })
+}
+
 /// Wrap SELECT results as JSON if `json` is true.
 ///
 /// When SELECT JSON is used, each row is collapsed into a single `[json]` column
@@ -9447,11 +10016,23 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cassandra_cluster_metadata::node::{NodeId, NodeInfo};
+    use cassandra_cluster_metadata::{ClusterMetadata, Endpoint, SimpleSnitch, SimpleStrategy};
+    use cassandra_common::Token;
+    use cassandra_coordinator::batch::BatchLogManager;
+    use cassandra_coordinator::hints::HintStore;
+    use cassandra_coordinator::verb_handlers::registration::register_all_verb_handlers_with_storage;
     use cassandra_cql::ast::{ColumnDef, CqlTypeName, Relation};
+    use cassandra_messaging::MessagingService;
     use cassandra_schema::{ColumnMetadata, TableMetadataBuilder};
     use cassandra_security::{AllowAllAuthorizer, CassandraAuthorizer, InMemoryRoleManager};
     use cassandra_storage::commitlog::CommitLogConfig;
+    use cassandra_storage::commitlog::{
+        CellMutation as StorageCellMutation, Mutation as StorageMutation,
+        MutationRow as StorageMutationRow,
+    };
     use cassandra_storage::engine::EngineConfig;
+    use std::net::SocketAddr;
     use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
@@ -9700,6 +10281,93 @@ mod tests {
         };
         let executor = QueryExecutor::new(engine, catalog, role_manager, authorizer);
         (executor, temp)
+    }
+
+    fn make_single_node_storage_proxy(
+        partition_key: &[u8],
+    ) -> (
+        Arc<StorageProxy>,
+        Arc<StorageEngine>,
+        Arc<SimpleStrategy>,
+        Arc<SimpleSnitch>,
+    ) {
+        let temp = TempDir::new().expect("tempdir");
+        let storage = Arc::new(
+            StorageEngine::open(EngineConfig {
+                data_directories: vec![temp.path().join("data")],
+                commitlog: CommitLogConfig {
+                    directory: temp.path().join("commitlog"),
+                    ..CommitLogConfig::default()
+                },
+                ..EngineConfig::default()
+            })
+            .expect("open storage"),
+        );
+        // Keep the backing directories alive for the full test process.
+        std::mem::forget(temp);
+        let local_addr: SocketAddr = "127.0.0.1:7000".parse().expect("addr");
+        let endpoint = Endpoint::new(local_addr);
+        let token = Token::from_partition_key(partition_key);
+        let node = NodeInfo::new(NodeId::random(), endpoint, "dc1", "rack1", vec![token]);
+        let cluster = Arc::new(ClusterMetadata::new(node));
+        let hints = Arc::new(HintStore::new(1000));
+        let write_coord = Arc::new(cassandra_coordinator::WriteCoordinator::new(
+            Arc::clone(&cluster),
+            endpoint,
+            Arc::clone(&hints),
+        ));
+        let read_coord = Arc::new(cassandra_coordinator::ReadCoordinator::new(
+            Arc::clone(&cluster),
+            endpoint,
+        ));
+        let messaging = Arc::new(MessagingService::new(local_addr));
+        let batch_log = Arc::new(BatchLogManager::new());
+        let proxy = Arc::new(StorageProxy::new(
+            write_coord,
+            read_coord,
+            Arc::clone(&messaging),
+            hints,
+            batch_log,
+            cassandra_coordinator::StorageProxyConfig::default(),
+        ));
+        register_all_verb_handlers_with_storage(proxy.messaging(), Arc::clone(&storage));
+
+        let strategy = Arc::new(SimpleStrategy::new(1));
+        let snitch = Arc::new(SimpleSnitch);
+        (proxy, storage, strategy, snitch)
+    }
+
+    fn apply_storage_row(
+        storage: &StorageEngine,
+        partition_key: &[u8],
+        clustering_key: &[u8],
+        value: &[u8],
+    ) {
+        storage
+            .apply_mutation(&StorageMutation {
+                keyspace: "ks".to_string(),
+                table: "users".to_string(),
+                partition_key: partition_key.to_vec(),
+                rows: vec![StorageMutationRow {
+                    clustering_key: clustering_key.to_vec(),
+                    cells: vec![StorageCellMutation {
+                        column: "name".to_string(),
+                        value: Some(value.to_vec()),
+                        timestamp: 1,
+                        ttl: 0,
+                        local_deletion_time: None,
+                        is_tombstone: false,
+                    }],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                }],
+                timestamp: 1,
+                cdc_enabled: false,
+                static_cells: Vec::new(),
+                partition_tombstone: None,
+                range_tombstones: Vec::new(),
+            })
+            .expect("apply mutation");
     }
 
     fn insert_event(executor: &QueryExecutor, id: i64, bucket: i64, name: &str) {
@@ -13277,11 +13945,14 @@ mod tests {
         let (executor, _temp) = test_executor();
         let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed_in_sink = Arc::clone(&observed);
-        let executor = executor.with_batch_mutation_sink(Arc::new(move |batch_type, mutations| {
-            assert!(matches!(batch_type, cassandra_cql::ast::BatchType::Logged));
-            observed_in_sink.store(mutations.len(), Ordering::Relaxed);
-            Ok(())
-        }));
+        let executor = executor.with_batch_mutation_sink(Arc::new(
+            move |batch_type, mutations, consistency| {
+                assert!(matches!(batch_type, cassandra_cql::ast::BatchType::Logged));
+                assert_eq!(consistency, ConsistencyLevel::One);
+                observed_in_sink.store(mutations.len(), Ordering::Relaxed);
+                Ok(())
+            },
+        ));
 
         let plan = QueryPlan::Batch(BatchPlan {
             batch_type: cassandra_cql::ast::BatchType::Logged,
@@ -13304,6 +13975,451 @@ mod tests {
         ));
         assert_eq!(observed.load(Ordering::Relaxed), 1);
         assert!(select_all_events(&executor).is_empty());
+    }
+
+    #[test]
+    fn execute_insert_uses_configured_mutation_sink() {
+        let (executor, _temp) = test_executor();
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_in_sink = Arc::clone(&observed);
+        let executor = executor.with_mutation_sink(Arc::new(move |_mutation, consistency| {
+            assert_eq!(consistency, ConsistencyLevel::One);
+            observed_in_sink.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }));
+
+        let plan = QueryPlan::Insert(InsertPlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["id".to_string(), "bucket".to_string(), "name".to_string()],
+            values: vec![int_term(12), int_term(1), text_term("sinked")],
+            if_not_exists: false,
+            json: None,
+            json_default: JsonDefault::Null,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+
+        assert!(matches!(
+            executor.execute(&plan, None),
+            Ok(QueryResult::Void)
+        ));
+        assert_eq!(observed.load(Ordering::Relaxed), 1);
+        assert!(select_all_events(&executor).is_empty());
+    }
+
+    #[test]
+    fn execute_update_uses_configured_mutation_sink() {
+        let (executor, _temp) = test_executor();
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_in_sink = Arc::clone(&observed);
+        let executor = executor.with_mutation_sink(Arc::new(move |_mutation, consistency| {
+            assert_eq!(consistency, ConsistencyLevel::One);
+            observed_in_sink.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }));
+
+        let plan = QueryPlan::Update(UpdatePlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            assignments: vec![Assignment {
+                column: "name".to_string(),
+                value: text_term("updated"),
+                op: AssignmentOp::Set,
+            }],
+            where_clause: vec![
+                Relation {
+                    column: "id".to_string(),
+                    op: RelationOp::Eq,
+                    value: int_term(12),
+                },
+                Relation {
+                    column: "bucket".to_string(),
+                    op: RelationOp::Eq,
+                    value: int_term(1),
+                },
+            ],
+            if_exists: false,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+
+        assert!(matches!(
+            executor.execute(&plan, None),
+            Ok(QueryResult::Void)
+        ));
+        assert_eq!(observed.load(Ordering::Relaxed), 1);
+        assert!(select_all_events(&executor).is_empty());
+    }
+
+    #[test]
+    fn execute_delete_uses_configured_mutation_sink() {
+        let (executor, _temp) = test_executor();
+        let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_in_sink = Arc::clone(&observed);
+        let executor = executor.with_mutation_sink(Arc::new(move |_mutation, consistency| {
+            assert_eq!(consistency, ConsistencyLevel::One);
+            observed_in_sink.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }));
+
+        let plan = QueryPlan::Delete(DeletePlan {
+            keyspace: "ks".to_string(),
+            table: "events".to_string(),
+            columns: vec!["name".to_string()],
+            where_clause: vec![
+                Relation {
+                    column: "id".to_string(),
+                    op: RelationOp::Eq,
+                    value: int_term(12),
+                },
+                Relation {
+                    column: "bucket".to_string(),
+                    op: RelationOp::Eq,
+                    value: int_term(1),
+                },
+            ],
+            if_exists: false,
+            using_timestamp: None,
+            using_ttl: None,
+        });
+
+        assert!(matches!(
+            executor.execute(&plan, None),
+            Ok(QueryResult::Void)
+        ));
+        assert_eq!(observed.load(Ordering::Relaxed), 1);
+        assert!(select_all_events(&executor).is_empty());
+    }
+
+    #[test]
+    fn insert_trigger_mutations_use_configured_mutation_sink() {
+        let (executor, _temp) = test_executor();
+        let registry = Arc::new(TriggerRegistry::new());
+        registry
+            .register_with_implementation(
+                cassandra_cql::triggers::TriggerMetadata {
+                    name: "audit".to_string(),
+                    keyspace: "ks".to_string(),
+                    table: "events".to_string(),
+                    trigger_class: "audit.Trigger".to_string(),
+                },
+                Arc::new(AuditTrigger),
+            )
+            .unwrap();
+        let observed_tables = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let observed_tables_in_sink = Arc::clone(&observed_tables);
+        let executor = executor
+            .with_trigger_registry(registry)
+            .with_mutation_sink(Arc::new(move |mutation, consistency| {
+                assert_eq!(consistency, ConsistencyLevel::One);
+                observed_tables_in_sink
+                    .lock()
+                    .expect("sink table lock")
+                    .push(format!("{}.{}", mutation.keyspace, mutation.table));
+                Ok(())
+            }));
+
+        insert_event(&executor, 19, 1, "sink+trigger");
+
+        let observed_tables = observed_tables.lock().expect("sink table lock");
+        assert_eq!(observed_tables.len(), 2);
+        assert!(observed_tables.contains(&"ks.events".to_string()));
+        assert!(observed_tables.contains(&"ks.audit".to_string()));
+        assert!(
+            executor
+                .engine
+                .read_partition("ks", "events", &19i32.to_be_bytes())
+                .is_none()
+        );
+        assert!(
+            executor
+                .engine
+                .read_partition("ks", "audit", &19i32.to_be_bytes())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn keyed_select_sink_uses_limit_and_paging_state_bounds() {
+        let (executor, _temp) = test_executor();
+        let observed_requests = Arc::new(std::sync::Mutex::new(Vec::<SelectReadRequest>::new()));
+        let observed_requests_in_sink = Arc::clone(&observed_requests);
+
+        let executor = executor.with_select_read_sink(Arc::new(move |request| {
+            observed_requests_in_sink
+                .lock()
+                .expect("request lock")
+                .push(request.clone());
+
+            let mut partition = PartitionData::new();
+            let mut add_row = |bucket: i32, name: &str| {
+                partition.apply_row(Row {
+                    clustering_key: bucket.to_be_bytes().to_vec(),
+                    cells: vec![
+                        Cell {
+                            column: "id".to_string(),
+                            value: Some(7i32.to_be_bytes().to_vec()),
+                            timestamp: 1,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        },
+                        Cell {
+                            column: "bucket".to_string(),
+                            value: Some(bucket.to_be_bytes().to_vec()),
+                            timestamp: 1,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        },
+                        Cell {
+                            column: "name".to_string(),
+                            value: Some(name.as_bytes().to_vec()),
+                            timestamp: 1,
+                            ttl: 0,
+                            local_deletion_time: None,
+                            is_tombstone: false,
+                        },
+                    ],
+                    is_tombstone: false,
+                    local_deletion_time: None,
+                });
+            };
+
+            match request.start_after.as_deref() {
+                None => {
+                    add_row(1, "a");
+                    add_row(2, "b");
+                    Ok(SelectReadResult {
+                        partition: Some(partition),
+                        was_truncated: true,
+                        warnings: vec!["sink warning".to_string()],
+                    })
+                }
+                Some(ck) if ck == 2i32.to_be_bytes().as_slice() => {
+                    add_row(3, "c");
+                    Ok(SelectReadResult {
+                        partition: Some(partition),
+                        was_truncated: false,
+                        warnings: Vec::new(),
+                    })
+                }
+                other => panic!("unexpected start_after marker: {other:?}"),
+            }
+        }));
+
+        let keyed_plan = |paging_state: Option<Vec<u8>>| {
+            QueryPlan::Select(SelectPlan {
+                keyspace: "ks".to_string(),
+                table: "events".to_string(),
+                columns: SelectColumns::Named(vec![
+                    Selector::Column("id".to_string()),
+                    Selector::Column("bucket".to_string()),
+                    Selector::Column("name".to_string()),
+                ]),
+                distinct: false,
+                json: false,
+                where_clause: vec![Relation {
+                    column: "id".to_string(),
+                    op: RelationOp::Eq,
+                    value: int_term(7),
+                }],
+                group_by: Vec::new(),
+                order_by: Vec::new(),
+                limit: Some(int_term(3)),
+                allow_filtering: false,
+                restrictions: None,
+                ann_clause: None,
+                page_size: Some(2),
+                paging_state,
+            })
+        };
+
+        let QueryResult::Rows {
+            rows: first_rows,
+            paging_state: first_state,
+            warnings: first_warnings,
+            ..
+        } = executor.execute(&keyed_plan(None), None).unwrap()
+        else {
+            panic!("expected first rows");
+        };
+        assert_eq!(first_rows.len(), 2);
+        assert_eq!(first_warnings, vec!["sink warning".to_string()]);
+        let first_state = CoordinatorPagingState::deserialize(
+            first_state.as_deref().expect("paging state must exist"),
+        )
+        .expect("coordinator paging state");
+        assert_eq!(first_state.partition_key, 7i32.to_be_bytes().to_vec());
+        assert_eq!(first_state.row_mark, 2i32.to_be_bytes().to_vec());
+        assert_eq!(first_state.remaining, 1);
+
+        let QueryResult::Rows {
+            rows: second_rows,
+            paging_state: second_state,
+            ..
+        } = executor
+            .execute(&keyed_plan(Some(first_state.serialize())), None)
+            .unwrap()
+        else {
+            panic!("expected second rows");
+        };
+        assert_eq!(second_rows.len(), 1);
+        assert!(second_state.is_none());
+
+        let requests = observed_requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].start_after, None);
+        assert_eq!(requests[0].row_limit, Some(2));
+        assert_eq!(requests[1].start_after, Some(2i32.to_be_bytes().to_vec()));
+        assert_eq!(requests[1].row_limit, Some(1));
+    }
+
+    #[test]
+    fn storage_proxy_mutation_sink_bridges_writes() {
+        let partition_key = b"pk-write-sink";
+        let (proxy, storage, strategy, snitch) = make_single_node_storage_proxy(partition_key);
+        let sink = storage_proxy_mutation_sink(proxy, strategy, snitch);
+        let mutation = StorageMutation {
+            keyspace: "ks".to_string(),
+            table: "users".to_string(),
+            partition_key: partition_key.to_vec(),
+            rows: vec![StorageMutationRow {
+                clustering_key: b"a".to_vec(),
+                cells: vec![StorageCellMutation {
+                    column: "name".to_string(),
+                    value: Some(b"from-sink".to_vec()),
+                    timestamp: 1,
+                    ttl: 0,
+                    local_deletion_time: None,
+                    is_tombstone: false,
+                }],
+                is_tombstone: false,
+                local_deletion_time: None,
+            }],
+            timestamp: 1,
+            cdc_enabled: false,
+            static_cells: Vec::new(),
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        };
+
+        sink(&mutation, ConsistencyLevel::One).expect("storage proxy mutation sink write");
+        let partition = storage
+            .read_partition("ks", "users", partition_key)
+            .expect("partition must be written");
+        let row = partition.rows.get(b"a".as_slice()).expect("row must exist");
+        assert_eq!(row.cells.len(), 1);
+        assert_eq!(row.cells[0].column, "name");
+        assert_eq!(row.cells[0].value.as_deref(), Some(b"from-sink".as_slice()));
+    }
+
+    #[test]
+    fn storage_proxy_select_read_sink_bridges_bounds() {
+        let partition_key = b"pk-select-sink";
+        let (proxy, storage, strategy, snitch) = make_single_node_storage_proxy(partition_key);
+        apply_storage_row(&storage, partition_key, b"a", b"first");
+        apply_storage_row(&storage, partition_key, b"b", b"second");
+        apply_storage_row(&storage, partition_key, b"c", b"third");
+        assert!(
+            storage
+                .read_partition("ks", "users", partition_key)
+                .is_some(),
+            "storage should contain test partition"
+        );
+
+        let sink = storage_proxy_select_read_sink(proxy, strategy, snitch);
+        let first = sink(&SelectReadRequest {
+            keyspace: "ks".to_string(),
+            table: "users".to_string(),
+            partition_key: partition_key.to_vec(),
+            consistency: ConsistencyLevel::One,
+            start_after: None,
+            row_limit: Some(2),
+        })
+        .expect("first read");
+        let first_partition = first.partition.expect("first partition");
+        assert_eq!(first_partition.rows.len(), 2);
+        assert!(first_partition.rows.contains_key(&b"a".to_vec()));
+        assert!(first_partition.rows.contains_key(&b"b".to_vec()));
+
+        let second = sink(&SelectReadRequest {
+            keyspace: "ks".to_string(),
+            table: "users".to_string(),
+            partition_key: partition_key.to_vec(),
+            consistency: ConsistencyLevel::One,
+            start_after: Some(b"b".to_vec()),
+            row_limit: Some(2),
+        })
+        .expect("second read");
+        let second_partition = second.partition.expect("second partition");
+        assert_eq!(second_partition.rows.len(), 1);
+        assert!(second_partition.rows.contains_key(&b"c".to_vec()));
+    }
+
+    #[test]
+    fn commitlog_mutation_to_coordinated_preserves_tombstones() {
+        let mutation = Mutation {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_key: b"pk".to_vec(),
+            rows: vec![cassandra_storage::commitlog::MutationRow {
+                clustering_key: b"ck".to_vec(),
+                cells: vec![StorageCellMutation {
+                    column: "v".to_string(),
+                    value: Some(b"1".to_vec()),
+                    timestamp: 9,
+                    ttl: 30,
+                    local_deletion_time: Some(123),
+                    is_tombstone: false,
+                }],
+                is_tombstone: false,
+                local_deletion_time: None,
+            }],
+            timestamp: 10,
+            cdc_enabled: false,
+            static_cells: vec![StorageCellMutation {
+                column: "s".to_string(),
+                value: Some(b"x".to_vec()),
+                timestamp: 11,
+                ttl: 0,
+                local_deletion_time: None,
+                is_tombstone: false,
+            }],
+            partition_tombstone: Some(cassandra_storage::commitlog::TombstoneMarker {
+                timestamp: 12,
+                local_deletion_time: 13,
+            }),
+            range_tombstones: vec![cassandra_storage::commitlog::RangeTombstoneMarker {
+                start: b"a".to_vec(),
+                end: b"z".to_vec(),
+                timestamp: 14,
+                local_deletion_time: 15,
+            }],
+        };
+
+        let coordinated = commitlog_mutation_to_coordinated(&mutation);
+        assert_eq!(coordinated.keyspace, "ks");
+        assert_eq!(coordinated.table, "tbl");
+        assert_eq!(coordinated.partition_key, b"pk".to_vec());
+        assert_eq!(coordinated.timestamp, 10);
+        assert_eq!(coordinated.rows.len(), 2);
+        assert_eq!(coordinated.static_cells.len(), 1);
+        assert!(coordinated.partition_tombstone.is_some());
+        let range_row = coordinated
+            .rows
+            .iter()
+            .find(|row| row.range_tombstone.is_some())
+            .expect("range row");
+        assert_eq!(
+            range_row.range_tombstone.as_ref().expect("range").start,
+            b"a".to_vec()
+        );
+        assert_eq!(
+            range_row.range_tombstone.as_ref().expect("range").end,
+            b"z".to_vec()
+        );
     }
 
     #[test]

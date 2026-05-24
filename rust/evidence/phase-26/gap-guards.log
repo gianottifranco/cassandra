@@ -1,0 +1,154 @@
+   Compiling cassandra-diff-tests v0.1.0 (/home/ubuntu/cassandra/rust/crates/cassandra-diff-tests)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.99s
+     Running unittests src/lib.rs (target/debug/deps/cassandra_diff_tests-dc9a8f77995a1772)
+
+running 68 tests
+test gap_guards::gap_guard_async_mv_fanout ... ok
+test gap_guards::gap_guard_accord ... ok
+test gap_guards::gap_guard_bloom_filter ... ok
+test gap_guards::gap_guard_caching ... ok
+test gap_guards::gap_guard_compaction_execution ... ok
+test gap_guards::gap_guard_compaction_unified ... ok
+test gap_guards::gap_guard_column_index_builder ... ok
+test gap_guards::gap_guard_concurrency_stages ... ok
+test gap_guards::gap_guard_cql_delete_using_timestamp_only ... ok
+test gap_guards::gap_guard_cql_advanced_restrictions ... ok
+test gap_guards::gap_guard_consensus ... ok
+test gap_guards::gap_guard_cql_constraints ... ok
+test gap_guards::gap_guard_consistent_repair ... ok
+test gap_guards::gap_guard_cdc ... ok
+test gap_guards::gap_guard_cql_batch_using_attributes ... ok
+test gap_guards::gap_guard_commitlog_compression ... ok
+test gap_guards::gap_guard_coordinator_read_repair ... ok
+test gap_guards::gap_guard_auth_persistent ... ok
+test gap_guards::gap_guard_cql_selection_functions ... ok
+test gap_guards::gap_guard_cql_terms_advanced ... ok
+test gap_guards::gap_guard_dc_aware_read_executor ... ok
+test gap_guards::gap_guard_compaction_writers ... ok
+test gap_guards::gap_guard_db_filters ... ok
+test gap_guards::gap_guard_cql_permission_statements ... ok
+test gap_guards::gap_guard_aggregation ... ok
+test gap_guards::gap_guard_cql_schema_statements ... ok
+test gap_guards::gap_guard_fql ... ok
+test gap_guards::gap_guard_guardrails ... ok
+test gap_guards::gap_guard_gossip_wire_compat ... ok
+test gap_guards::gap_guard_index_differential_testing ... ok
+test gap_guards::gap_guard_journal ... ok
+test gap_guards::gap_guard_internode_wire_compat ... ok
+test gap_guards::gap_guard_hints_persistence ... ok
+test gap_guards::gap_guard_ldap_kerberos_auth ... ok
+test gap_guards::gap_guard_read_aggregation ... ok
+test gap_guards::gap_guard_nodetool_formatters ... ok
+test gap_guards::gap_guard_nodetool_stats ... ok
+test gap_guards::gap_guard_paging ... ok
+test gap_guards::gap_guard_memtable_trie ... ok
+test gap_guards::gap_guard_nodetool_commands ... ok
+test gap_guards::gap_guard_cql_masking_functions ... ok
+test gap_guards::gap_guard_read_error_mapping ... ok
+test gap_guards::gap_guard_read_distinct ... ok
+test gap_guards::gap_guard_read_paging_state ... ok
+test gap_guards::gap_guard_row_transformations ... ok
+test gap_guards::gap_guard_snitches_dynamic ... ok
+test gap_guards::gap_guard_sstable_index_summary ... ok
+test gap_guards::gap_guard_repair_messages ... ok
+test gap_guards::gap_guard_sai_disk_format ... ok
+test gap_guards::gap_guard_sai_analyzers ... ok
+test gap_guards::gap_guard_sstable_java_compat ... ok
+test gap_guards::gap_guard_sstable_offline_tools ... ok
+test gap_guards::gap_guard_cql_function_type_helpers ... ok
+test gap_guards::gap_guard_sstable_metadata ... ok
+test gap_guards::gap_guard_trie_index ... ok
+test gap_guards::gap_guard_tcm ... ok
+test gap_guards::gap_guard_utils_bytecomparable ... ok
+test gap_guards::gap_guard_tracing_storage ... ok
+test gap_guards::gap_guard_utils_concurrent ... ok
+test gap_guards::gap_guard_utils_memory ... ok
+test gap_guards::gap_guard_streaming_messages ... ok
+test gap_guards::gap_guard_virtual_tables ... ok
+test gap_guards::gap_guard_trigger_plugin_system ... ok
+test gap_guards::gap_guard_write_path_mv_fanout ... ok
+test gap_guards::gap_guard_write_path_trigger_augmentation ... ok
+test gap_guards::gap_guard_write_path_read_before_write ... ok
+test gap_guards::gap_guard_sstable_read_compat ... ok
+test gap_guards::gap_guard_cql_functions ... ok
+
+test result: ok. 68 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.03s
+
+     Running tests/backup_restore_tests.rs (target/debug/deps/backup_restore_tests-349b8e5cd6267975)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/chaos_tests.rs (target/debug/deps/chaos_tests-f445b5d19673e24b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/fuzz_tests.rs (target/debug/deps/fuzz_tests-da9393e3c20315ea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/perf_budget_tests.rs (target/debug/deps/perf_budget_tests-f560ab5d1e1fbd9d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/protocol_golden_tests.rs (target/debug/deps/protocol_golden_tests-0961aa49825cf4a0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/read_error_golden_tests.rs (target/debug/deps/read_error_golden_tests-2f9f3283437bf648)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/read_path_tests.rs (target/debug/deps/read_path_tests-eb0e4c778426bb73)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/security_audit.rs (target/debug/deps/security_audit-a736751f6b801b77)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/soak_tests.rs (target/debug/deps/soak_tests-89c8aefd139f02b6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/tooling_tests.rs (target/debug/deps/tooling_tests-c99f5588c836808c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/type_serialization_golden.rs (target/debug/deps/type_serialization_golden-26038e93f1f7fe49)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 43 filtered out; finished in 0.00s
+
+     Running tests/write_error_golden_tests.rs (target/debug/deps/write_error_golden_tests-b3efcfa22f880b9c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/write_path_tests.rs (target/debug/deps/write_path_tests-67cd723caf1de4f0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+

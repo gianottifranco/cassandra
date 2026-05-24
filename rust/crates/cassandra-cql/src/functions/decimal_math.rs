@@ -101,8 +101,7 @@ impl DecimalValue {
         let scale = (MIN_SIGNIFICANT_DIGITS - quotient_first_digit_pos)
             .max(self.scale)
             .max(other.scale)
-            .max(MIN_SCALE)
-            .min(MAX_SCALE);
+            .clamp(MIN_SCALE, MAX_SCALE);
 
         Ok(Self {
             unscaled: self.divide_unscaled(other, scale),

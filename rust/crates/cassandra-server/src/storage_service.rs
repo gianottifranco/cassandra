@@ -15,9 +15,11 @@
 //! can be queried at any time to gate operations (e.g., reject writes
 //! while the node is in `Leaving` state).
 
+use std::collections::BTreeSet;
 use std::fmt;
 use std::sync::Arc;
 
+use cassandra_common::Token;
 use parking_lot::RwLock;
 use tracing::info;
 
@@ -77,6 +79,14 @@ pub struct StorageService {
     state: Arc<RwLock<NodeState>>,
     /// Whether the native transport (CQL) is running.
     native_transport_running: Arc<RwLock<bool>>,
+    /// Tokens currently owned by this node.
+    owned_tokens: Arc<RwLock<BTreeSet<Token>>>,
+    /// Tokens assigned for an in-progress bootstrap.
+    pending_bootstrap_tokens: Arc<RwLock<BTreeSet<Token>>>,
+    /// Target tokens for an in-place token migration.
+    pending_token_migration: Arc<RwLock<BTreeSet<Token>>>,
+    /// Snapshot of owned tokens when starting leave/decommission.
+    leaving_tokens: Arc<RwLock<BTreeSet<Token>>>,
 }
 
 impl StorageService {
@@ -85,6 +95,10 @@ impl StorageService {
         Self {
             state: Arc::new(RwLock::new(NodeState::Starting)),
             native_transport_running: Arc::new(RwLock::new(false)),
+            owned_tokens: Arc::new(RwLock::new(BTreeSet::new())),
+            pending_bootstrap_tokens: Arc::new(RwLock::new(BTreeSet::new())),
+            pending_token_migration: Arc::new(RwLock::new(BTreeSet::new())),
+            leaving_tokens: Arc::new(RwLock::new(BTreeSet::new())),
         }
     }
 
@@ -96,6 +110,34 @@ impl StorageService {
     /// Whether the native transport is running.
     pub fn is_native_transport_running(&self) -> bool {
         *self.native_transport_running.read()
+    }
+
+    /// Tokens currently owned by this node.
+    pub fn owned_tokens(&self) -> Vec<Token> {
+        self.owned_tokens.read().iter().copied().collect()
+    }
+
+    /// Tokens staged for bootstrap while the node is Joining.
+    pub fn pending_bootstrap_tokens(&self) -> Vec<Token> {
+        self.pending_bootstrap_tokens
+            .read()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Tokens staged for a token migration while the node is Normal.
+    pub fn pending_token_migration(&self) -> Vec<Token> {
+        self.pending_token_migration
+            .read()
+            .iter()
+            .copied()
+            .collect()
+    }
+
+    /// Tokens captured at leave start.
+    pub fn leaving_tokens(&self) -> Vec<Token> {
+        self.leaving_tokens.read().iter().copied().collect()
     }
 
     /// Initialize the storage service (Starting → Joining).
@@ -112,6 +154,35 @@ impl StorageService {
         }
 
         info!("StorageService initializing");
+        *state = NodeState::Joining;
+        info!(state = %NodeState::Joining, "StorageService state transition");
+        Ok(())
+    }
+
+    /// Initialize with explicit bootstrap tokens (Starting → Joining).
+    ///
+    /// This models token assignment during bootstrap and is promoted
+    /// to owned tokens once the node transitions to Normal.
+    pub fn initialize_with_tokens(
+        &self,
+        tokens: impl IntoIterator<Item = Token>,
+    ) -> Result<(), StorageServiceError> {
+        let token_set = tokens.into_iter().collect::<BTreeSet<_>>();
+        if token_set.is_empty() {
+            return Err(StorageServiceError::InitializationError(
+                "bootstrap requires at least one token".to_string(),
+            ));
+        }
+
+        let mut state = self.state.write();
+        if *state != NodeState::Starting {
+            return Err(StorageServiceError::InvalidTransition {
+                from: state.to_string(),
+                to: NodeState::Joining.to_string(),
+            });
+        }
+
+        *self.pending_bootstrap_tokens.write() = token_set;
         *state = NodeState::Joining;
         info!(state = %NodeState::Joining, "StorageService state transition");
         Ok(())
@@ -147,8 +218,61 @@ impl StorageService {
             });
         }
 
+        {
+            let mut pending = self.pending_bootstrap_tokens.write();
+            if !pending.is_empty() {
+                *self.owned_tokens.write() = pending.clone();
+                pending.clear();
+            }
+        }
+
         *state = NodeState::Normal;
         info!(state = %NodeState::Normal, "StorageService state transition");
+        Ok(())
+    }
+
+    /// Stage an in-place token migration while in Normal state.
+    pub fn plan_token_migration(
+        &self,
+        target_tokens: impl IntoIterator<Item = Token>,
+    ) -> Result<(), StorageServiceError> {
+        let state = self.state.read();
+        if *state != NodeState::Normal {
+            return Err(StorageServiceError::OperationNotAllowed {
+                state: state.to_string(),
+            });
+        }
+        drop(state);
+
+        let target = target_tokens.into_iter().collect::<BTreeSet<_>>();
+        if target.is_empty() {
+            return Err(StorageServiceError::InitializationError(
+                "token migration requires at least one target token".to_string(),
+            ));
+        }
+        *self.pending_token_migration.write() = target;
+        Ok(())
+    }
+
+    /// Apply a planned token migration in Normal state.
+    pub fn apply_token_migration(&self) -> Result<(), StorageServiceError> {
+        let state = self.state.read();
+        if *state != NodeState::Normal {
+            return Err(StorageServiceError::OperationNotAllowed {
+                state: state.to_string(),
+            });
+        }
+        drop(state);
+
+        let mut pending = self.pending_token_migration.write();
+        if pending.is_empty() {
+            return Err(StorageServiceError::InitializationError(
+                "token migration has no planned target".to_string(),
+            ));
+        }
+
+        *self.owned_tokens.write() = pending.clone();
+        pending.clear();
         Ok(())
     }
 
@@ -164,6 +288,12 @@ impl StorageService {
             });
         }
 
+        if !self.pending_token_migration.read().is_empty() {
+            return Err(StorageServiceError::OperationNotAllowed {
+                state: "NORMAL (pending token migration)".to_string(),
+            });
+        }
+
         // Stop native transport first.
         {
             let mut running = self.native_transport_running.write();
@@ -172,6 +302,7 @@ impl StorageService {
                 info!("Native transport stopped for decommission");
             }
         }
+        *self.leaving_tokens.write() = self.owned_tokens.read().clone();
 
         *state = NodeState::Leaving;
         info!(state = %NodeState::Leaving, "StorageService state transition");
@@ -190,6 +321,10 @@ impl StorageService {
             });
         }
 
+        self.owned_tokens.write().clear();
+        self.pending_bootstrap_tokens.write().clear();
+        self.pending_token_migration.write().clear();
+        self.leaving_tokens.write().clear();
         *state = NodeState::Left;
         info!(state = %NodeState::Left, "StorageService state transition");
         Ok(())
@@ -227,6 +362,10 @@ mod tests {
         assert_eq!(svc.state(), NodeState::Starting);
         assert!(!svc.is_serving());
         assert!(!svc.is_native_transport_running());
+        assert!(svc.owned_tokens().is_empty());
+        assert!(svc.pending_bootstrap_tokens().is_empty());
+        assert!(svc.pending_token_migration().is_empty());
+        assert!(svc.leaving_tokens().is_empty());
     }
 
     #[test]
@@ -322,5 +461,95 @@ mod tests {
     fn default_creates_starting() {
         let svc = StorageService::default();
         assert_eq!(svc.state(), NodeState::Starting);
+    }
+
+    #[test]
+    fn initialize_with_tokens_promotes_tokens_on_normal() {
+        let svc = StorageService::new();
+        svc.initialize_with_tokens([Token::from_raw(-10), Token::from_raw(5)])
+            .unwrap();
+        assert_eq!(svc.state(), NodeState::Joining);
+        assert_eq!(
+            svc.pending_bootstrap_tokens(),
+            vec![Token::from_raw(-10), Token::from_raw(5)]
+        );
+        assert!(svc.owned_tokens().is_empty());
+
+        svc.set_normal().unwrap();
+        assert_eq!(svc.state(), NodeState::Normal);
+        assert_eq!(
+            svc.owned_tokens(),
+            vec![Token::from_raw(-10), Token::from_raw(5)]
+        );
+        assert!(svc.pending_bootstrap_tokens().is_empty());
+    }
+
+    #[test]
+    fn initialize_with_tokens_requires_non_empty_input() {
+        let svc = StorageService::new();
+        let err = svc.initialize_with_tokens(Vec::<Token>::new()).unwrap_err();
+        assert!(matches!(err, StorageServiceError::InitializationError(_)));
+    }
+
+    #[test]
+    fn token_migration_plan_and_apply_updates_owned_tokens() {
+        let svc = StorageService::new();
+        svc.initialize_with_tokens([Token::from_raw(1)]).unwrap();
+        svc.set_normal().unwrap();
+        assert_eq!(svc.owned_tokens(), vec![Token::from_raw(1)]);
+
+        svc.plan_token_migration([Token::from_raw(2), Token::from_raw(3)])
+            .unwrap();
+        assert_eq!(
+            svc.pending_token_migration(),
+            vec![Token::from_raw(2), Token::from_raw(3)]
+        );
+
+        svc.apply_token_migration().unwrap();
+        assert!(svc.pending_token_migration().is_empty());
+        assert_eq!(
+            svc.owned_tokens(),
+            vec![Token::from_raw(2), Token::from_raw(3)]
+        );
+    }
+
+    #[test]
+    fn apply_token_migration_requires_planned_target() {
+        let svc = StorageService::new();
+        svc.initialize().unwrap();
+        svc.set_normal().unwrap();
+
+        let err = svc.apply_token_migration().unwrap_err();
+        assert!(matches!(err, StorageServiceError::InitializationError(_)));
+    }
+
+    #[test]
+    fn start_leaving_rejects_pending_token_migration() {
+        let svc = StorageService::new();
+        svc.initialize_with_tokens([Token::from_raw(1)]).unwrap();
+        svc.set_normal().unwrap();
+        svc.plan_token_migration([Token::from_raw(2)]).unwrap();
+
+        let err = svc.start_leaving().unwrap_err();
+        assert!(matches!(
+            err,
+            StorageServiceError::OperationNotAllowed { .. }
+        ));
+    }
+
+    #[test]
+    fn leaving_tracks_and_clears_tokens() {
+        let svc = StorageService::new();
+        svc.initialize_with_tokens([Token::from_raw(7), Token::from_raw(9)])
+            .unwrap();
+        svc.set_normal().unwrap();
+        svc.start_leaving().unwrap();
+        assert_eq!(
+            svc.leaving_tokens(),
+            vec![Token::from_raw(7), Token::from_raw(9)]
+        );
+        svc.finish_leaving().unwrap();
+        assert!(svc.owned_tokens().is_empty());
+        assert!(svc.leaving_tokens().is_empty());
     }
 }

@@ -37,6 +37,7 @@ Exit codes:
 import argparse
 import json
 import os
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -50,18 +51,55 @@ except ImportError:
 
 
 def find_repo_root(start: Optional[Path] = None) -> Path:
-    """Walk up from start to find the repo root (contains src/java)."""
+    """Walk up from start to find the repo root."""
     p = start or Path(__file__).resolve().parent.parent
     while p != p.parent:
         if (p / "src" / "java").exists():
             return p
+        if (p / "docs" / "rewrite" / "final_gap_matrix.yaml").exists():
+            return p
         p = p.parent
-    raise FileNotFoundError("Cannot find repo root with src/java")
+    raise FileNotFoundError("Cannot find repo root (expected src/java or docs/rewrite/final_gap_matrix.yaml)")
+
+
+def load_inventory_packages(repo: Path) -> dict:
+    """Load package counts from docs/rewrite/package_inventory.md."""
+    inventory_path = repo / "docs" / "rewrite" / "package_inventory.md"
+    if not inventory_path.exists():
+        raise FileNotFoundError(
+            f"Java source tree missing and inventory not found: {inventory_path}"
+        )
+
+    packages = defaultdict(lambda: {"files": [], "count": 0})
+    line_re = re.compile(r'^\|\s*`(org\.apache\.cassandra[^`]*)`\s*\|\s*([0-9]+)\s*\|')
+
+    with open(inventory_path, "r", encoding="utf-8") as f:
+        for line in f:
+            m = line_re.match(line.strip())
+            if not m:
+                continue
+            pkg = m.group(1)
+            count = int(m.group(2))
+            packages[pkg]["count"] = count
+            # Class-level data is not preserved in the markdown snapshot.
+            packages[pkg]["files"] = []
+
+    if not packages:
+        raise ValueError(
+            f"No package rows found in inventory snapshot: {inventory_path}"
+        )
+    return dict(packages)
 
 
 def scan_java_packages(repo: Path) -> dict:
-    """Scan all Java packages and count files per package."""
+    """Scan all Java packages and count files per package.
+
+    Falls back to docs/rewrite/package_inventory.md when src/java is absent.
+    """
     java_root = repo / "src" / "java" / "org" / "apache" / "cassandra"
+    if not java_root.exists():
+        return load_inventory_packages(repo)
+
     packages = defaultdict(lambda: {"files": [], "count": 0})
 
     for java_file in java_root.rglob("*.java"):
@@ -218,6 +256,25 @@ def check_orphan_entries(matrix: list, packages: dict) -> list:
 
 def generate_inventory(repo: Path, matrix: Optional[list] = None, output_path: Optional[Path] = None):
     """Generate the package_inventory.md file."""
+    java_root = repo / "src" / "java" / "org" / "apache" / "cassandra"
+    inventory_default = repo / "docs" / "rewrite" / "package_inventory.md"
+    if not java_root.exists():
+        # Java sources have already been removed from this workspace.
+        # Keep using the committed inventory snapshot for matrix validation.
+        packages = load_inventory_packages(repo)
+        print(
+            "Java source tree not present; using frozen inventory snapshot "
+            f"at {inventory_default}"
+        )
+        return {
+            "packages": packages,
+            "nodetool_commands": [],
+            "virtual_tables": [],
+            "config_files": [],
+            "sstable_tools": [],
+            "test_stats": {},
+        }
+
     packages = scan_java_packages(repo)
     nodetool_cmds = scan_nodetool_commands(repo)
     virtual_tables = scan_virtual_tables(repo)

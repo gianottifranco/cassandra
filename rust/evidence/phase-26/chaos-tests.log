@@ -1,0 +1,28 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
+     Running tests/chaos_tests.rs (target/debug/deps/chaos_tests-f445b5d19673e24b)
+
+running 10 tests
+Crash recovery: replayed 10 mutations
+test crash_recovery_via_commitlog_replay ... ok
+Corrupted 5 SSTable file(s)
+Read after corruption: Some(PartitionData { rows: {[99, 107]: Row { clustering_key: [99, 107], cells: [Cell { column: "v", value: Some([99, 108, 101, 97, 110, 45, 100, 97, 116, 97]), timestamp: 0, ttl: 0, local_deletion_time: None, is_tombstone: false }], is_tombstone: false, local_deletion_time: None }}, tombstone_timestamp: None, tombstone_local_deletion_time: None })
+First snapshot: 6 files
+test chaos_corruption_sstable_header ... ok
+test interleaved_write_read ... ok
+Post-compaction-crash replay: 10 mutations
+Readable after crash-during-compaction: 250/250
+Second snapshot: 12 files
+test chaos_concurrent_snapshot_and_write ... ok
+test repeated_flush_compact_cycle ... ok
+test chaos_crash_during_compaction ... ok
+Rapid restart: 50 cycles, 10 mutations replayed
+Found 90/250 keys
+test chaos_rapid_restart_cycle ... ok
+test large_partition_stress ... ok
+Post-compaction result: Some(PartitionData { rows: {[99, 107, 48]: Row { clustering_key: [99, 107, 48], cells: [Cell { column: "v", value: Some([97, 108, 105, 118, 101]), timestamp: 0, ttl: 0, local_deletion_time: None, is_tombstone: false }], is_tombstone: true, local_deletion_time: Some(100) }}, tombstone_timestamp: None, tombstone_local_deletion_time: None })
+test tombstone_gc_after_compaction ... ok
+Flush result: Ok(())
+test chaos_disk_full_during_flush ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.96s
+

@@ -1,6 +1,6 @@
 // Licensed under Apache License, Version 2.0.
 
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write};
 
 use cassandra_io::util::data_input::DataInputPlus;
 use cassandra_io::util::data_output::DataOutputPlus;

@@ -21,6 +21,8 @@
 //! - `org.apache.cassandra.tools.nodetool.Cleanup`
 //! - `org.apache.cassandra.tools.nodetool.Flush`
 //! - `org.apache.cassandra.tools.nodetool.Scrub`
+//! - `org.apache.cassandra.tools.nodetool.Verify`
+//! - `org.apache.cassandra.tools.nodetool.UpgradeSSTable`
 //! - `org.apache.cassandra.tools.nodetool.CompactionStats`
 //! - `org.apache.cassandra.tools.nodetool.CompactionHistory`
 //! - `org.apache.cassandra.tools.nodetool.Repair`
@@ -72,40 +74,112 @@ pub fn scrub(client: &AdminClient, keyspace: Option<&str>, table: Option<&str>) 
     }
 }
 
+/// Verify SSTables for a keyspace/table.
+///
+/// POST /api/v1/compaction/verify with optional keyspace/table.
+pub fn verify(client: &AdminClient, keyspace: Option<&str>, table: Option<&str>) {
+    let body = build_ks_table_body("verify", keyspace, table);
+    match client.post_json("/api/v1/compaction/verify", &body) {
+        Ok(resp) => {
+            print_operation_id(&resp, "Verify");
+            if let Some(scanned) = resp.get("scanned_sstables").and_then(|v| v.as_u64()) {
+                let valid = resp
+                    .get("valid_sstables")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let invalid = resp
+                    .get("invalid_sstables")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let issue_count = resp
+                    .get("issue_count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                println!(
+                    "Verify summary: scanned={}, valid={}, invalid={}, issues={}",
+                    scanned, valid, invalid, issue_count
+                );
+            }
+        }
+        Err(e) => eprintln!("Error starting verify: {}", e),
+    }
+}
+
+/// Upgrade SSTables by rewriting through the engine compaction pipeline.
+///
+/// POST /api/v1/compaction/upgradesstables with optional keyspace/table.
+pub fn upgradesstables(client: &AdminClient, keyspace: Option<&str>, table: Option<&str>) {
+    let body = build_ks_table_body("upgradesstables", keyspace, table);
+    match client.post_json("/api/v1/compaction/upgradesstables", &body) {
+        Ok(resp) => {
+            print_operation_id(&resp, "UpgradeSSTables");
+            if let Some(executed) = resp.get("compaction_executed").and_then(|v| v.as_bool()) {
+                println!("Compaction executed: {}", executed);
+            }
+        }
+        Err(e) => eprintln!("Error starting upgradesstables: {}", e),
+    }
+}
+
 /// Show compaction statistics.
 ///
 /// GET /api/v1/compaction/stats — returns pending tasks and active compactions.
 pub fn compaction_stats(client: &AdminClient) {
     match client.get("/api/v1/compaction/stats") {
         Ok(resp) => {
-            if let Some(pending) = resp.get("pending_tasks").and_then(|v| v.as_u64()) {
+            if let Some(pending) = resp
+                .get("pending_compactions")
+                .or_else(|| resp.get("pending_tasks"))
+                .and_then(|v| v.as_u64())
+            {
                 println!("pending tasks: {}", pending);
             }
 
-            if let Some(compactions) = resp.get("compactions").and_then(|v| v.as_array()) {
+            if let Some(compactions) = resp
+                .get("active_tasks")
+                .or_else(|| resp.get("compactions"))
+                .and_then(|v| v.as_array())
+            {
                 if compactions.is_empty() {
                     println!("Active compaction remaining time :        n/a");
                 } else {
                     println!(
-                        "{:<12} {:<20} {:<20} {:<12} {:<12} unit",
-                        "compaction type", "keyspace", "table", "completed", "total"
+                        "{:<12} {:<12} {:<10} {:<12} details",
+                        "compaction type", "status", "progress", "elapsed"
                     );
                     for c in compactions {
-                        let ctype = c.get("task_type").and_then(|v| v.as_str()).unwrap_or("?");
-                        let ks = c.get("keyspace").and_then(|v| v.as_str()).unwrap_or("?");
-                        let tbl = c.get("table").and_then(|v| v.as_str()).unwrap_or("?");
-                        let completed = c
-                            .get("completed")
+                        let ctype = c
+                            .get("type")
+                            .or_else(|| c.get("task_type"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("?");
+                        let status = c.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                        let progress = c
+                            .get("progress")
                             .map(|v| v.to_string())
+                            .or_else(|| {
+                                let completed = c.get("completed")?;
+                                let total = c.get("total")?;
+                                Some(format!("{completed}/{total}"))
+                            })
                             .unwrap_or_else(|| "?".to_string());
-                        let total = c
-                            .get("total")
-                            .map(|v| v.to_string())
-                            .unwrap_or_else(|| "?".to_string());
-                        let unit = c.get("unit").and_then(|v| v.as_str()).unwrap_or("bytes");
+                        let elapsed = c
+                            .get("elapsed_secs")
+                            .map(|v| format!("{}s", v))
+                            .unwrap_or_else(|| "-".to_string());
+                        let details = c
+                            .get("description")
+                            .and_then(|v| v.as_str())
+                            .map(ToString::to_string)
+                            .or_else(|| {
+                                let ks = c.get("keyspace")?.as_str()?;
+                                let tbl = c.get("table")?.as_str()?;
+                                Some(format!("{ks}.{tbl}"))
+                            })
+                            .unwrap_or_else(|| "n/a".to_string());
                         println!(
-                            "{:<12} {:<20} {:<20} {:<12} {:<12} {}",
-                            ctype, ks, tbl, completed, total, unit
+                            "{:<12} {:<12} {:<10} {:<12} {}",
+                            ctype, status, progress, elapsed, details
                         );
                     }
                 }
@@ -127,35 +201,34 @@ pub fn compaction_history(client: &AdminClient) {
                     return;
                 }
                 println!(
-                    "{:<38} {:<20} {:<20} {:<12} {:<12} {:<12} rows_merged",
-                    "id", "keyspace", "table", "compacted_at", "bytes_in", "bytes_out"
+                    "{:<38} {:<12} {:<10} {:<12} details",
+                    "id", "type", "status", "progress"
                 );
                 for entry in history {
                     let id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                    let ks = entry
-                        .get("keyspace")
+                    let typ = entry
+                        .get("type")
+                        .or_else(|| entry.get("task_type"))
                         .and_then(|v| v.as_str())
                         .unwrap_or("?");
-                    let tbl = entry.get("table").and_then(|v| v.as_str()).unwrap_or("?");
-                    let at = entry
-                        .get("compacted_at")
+                    let status = entry.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                    let progress = entry
+                        .get("progress")
+                        .map(|v| v.to_string())
+                        .unwrap_or_else(|| "?".to_string());
+                    let details = entry
+                        .get("description")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("?");
-                    let bytes_in = entry
-                        .get("bytes_in")
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    let bytes_out = entry
-                        .get("bytes_out")
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "?".to_string());
-                    let rows = entry
-                        .get("rows_merged")
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| "?".to_string());
+                        .map(ToString::to_string)
+                        .or_else(|| {
+                            let ks = entry.get("keyspace")?.as_str()?;
+                            let tbl = entry.get("table")?.as_str()?;
+                            Some(format!("{ks}.{tbl}"))
+                        })
+                        .unwrap_or_else(|| "n/a".to_string());
                     println!(
-                        "{:<38} {:<20} {:<20} {:<12} {:<12} {:<12} {}",
-                        id, ks, tbl, at, bytes_in, bytes_out, rows
+                        "{:<38} {:<12} {:<10} {:<12} {}",
+                        id, typ, status, progress, details
                     );
                 }
             } else {
@@ -211,7 +284,7 @@ pub fn status_autocompaction(client: &AdminClient) {
 pub fn get_compaction_throughput(client: &AdminClient) {
     match client.get("/api/v1/compaction/throughput") {
         Ok(resp) => {
-            if let Some(mb) = resp.get("throughput_mb").and_then(|v| v.as_u64()) {
+            if let Some(mb) = resp.get("throughput_mb_per_sec").and_then(|v| v.as_u64()) {
                 println!("Current compaction throughput: {} MB/s", mb);
             } else {
                 println!("{}", resp);
@@ -225,7 +298,7 @@ pub fn get_compaction_throughput(client: &AdminClient) {
 ///
 /// POST /api/v1/compaction/throughput with throughput value.
 pub fn set_compaction_throughput(client: &AdminClient, throughput_mb: u32) {
-    let body = json!({"throughput_mb": throughput_mb});
+    let body = json!({"throughput_mb_per_sec": throughput_mb});
     match client.post_json("/api/v1/compaction/throughput", &body) {
         Ok(_) => println!("Compaction throughput set to {} MB/s.", throughput_mb),
         Err(e) => eprintln!("Error setting compaction throughput: {}", e),
@@ -250,16 +323,37 @@ pub fn force_compact(client: &AdminClient, keyspace: &str, table: &str) {
 
 /// Garbage collect tombstones.
 ///
-/// POST /api/v1/operations/garbagecollect with optional keyspace.
+/// POST /api/v1/compaction/garbagecollect with optional keyspace.
 pub fn garbage_collect(client: &AdminClient, keyspace: Option<&str>) {
     let body = if let Some(ks) = keyspace {
         json!({"operation": "garbagecollect", "keyspace": ks})
     } else {
         json!({"operation": "garbagecollect"})
     };
-    match client.post_json("/api/v1/operations/garbagecollect", &body) {
+    match client.post_json("/api/v1/compaction/garbagecollect", &body) {
         Ok(resp) => print_operation_id(&resp, "Garbage collect"),
         Err(e) => eprintln!("Error starting garbage collection: {}", e),
+    }
+}
+
+/// Stop one operation by id, or all active operations if no id is provided.
+///
+/// POST /api/v1/operations/stop with optional `operation_id`.
+pub fn stop_operation(client: &AdminClient, operation_id: Option<&str>) {
+    let result = match operation_id {
+        Some(id) => client.post_json("/api/v1/operations/stop", &json!({ "operation_id": id })),
+        None => client.post_empty("/api/v1/operations/stop"),
+    };
+
+    match result {
+        Ok(resp) => {
+            let stopped = resp
+                .get("stopped_operations")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            println!("Stopped operations: {}", stopped);
+        }
+        Err(e) => eprintln!("Error stopping operations: {}", e),
     }
 }
 
@@ -395,8 +489,11 @@ mod tests {
         _assert_ks_tbl(compact);
         _assert_ks_tbl(flush);
         _assert_ks_tbl(scrub);
+        _assert_ks_tbl(verify);
+        _assert_ks_tbl(upgradesstables);
         _assert_ks(cleanup);
         _assert_ks(garbage_collect);
+        _assert_ks(stop_operation);
         _assert_simple(compaction_stats);
         _assert_simple(compaction_history);
         _assert_simple(enable_autocompaction);

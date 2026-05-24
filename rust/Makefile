@@ -2,7 +2,7 @@
 # or more contributor license agreements.
 # See the NOTICE file and LICENSE.txt at the repository root.
 
-.PHONY: build test fmt clippy deny bench check-all clean diff-test golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test fuzz-test security-test sanitizer-test final-validate gap-audit cluster-validate capture-evidence phase26-validate coverage-audit coverage-guard
+.PHONY: build test fmt clippy deny bench check-all clean diff-test diff-test-rust-only golden-test generate-golden migration-test upgrade-test cdc-test rollback-test validate-migration perf-test perf-test-strict fuzz-test security-test sanitizer-test final-validate final-validate-strict gap-audit cluster-validate capture-evidence capture-evidence-strict phase26-validate phase26-validate-strict phase26-validate-rust-only phase26-validate-rust-only-strict coverage-audit coverage-guard java-code-audit java-code-audit-strict
 
 # Default target
 all: check-all
@@ -65,6 +65,14 @@ gap-audit:
 coverage-audit:
 	cargo run -p xtask -- coverage-audit
 
+## Audit Java source presence in repository (advisory)
+java-code-audit:
+	cargo run -p xtask -- java-code-audit
+
+## Audit Java source presence in repository (strict: must be zero)
+java-code-audit-strict:
+	cargo run -p xtask -- java-code-audit-strict
+
 ## Run coverage guard (CI-friendly: strict mode, fail on unclassified)
 coverage-guard:
 	@echo "── Coverage Guard ──────────────────────────────────"
@@ -86,6 +94,10 @@ coverage-guard:
 ## Run the full differential test suite (requires Docker)
 diff-test:
 	cargo run -p xtask -- diff-test
+
+## Run Rust-only differential suite (no Java oracle / Docker required)
+diff-test-rust-only:
+	cargo run -p xtask -- diff-test-rust-only
 
 ## Run offline golden tests only (no Docker required)
 golden-test:
@@ -119,7 +131,7 @@ docker:
 
 ## Run soak tests (long-running, ~10s default)
 soak-test:
-	cargo test -p cassandra-diff-tests --test soak_tests -- --ignored --nocapture
+	cargo test -p cassandra-diff-tests --test soak_tests -- --nocapture
 
 ## Run chaos tests
 chaos-test:
@@ -177,7 +189,11 @@ validate-migration-full:
 
 ## Run performance budget tests (ADR-015 gate checks)
 perf-test:
-	cargo test -p cassandra-diff-tests --test perf_budget_tests -- --ignored --nocapture
+	cargo test -p cassandra-diff-tests --test perf_budget_tests -- --nocapture
+
+## Run performance budget tests in strict mode (fail on budget overrun)
+perf-test-strict:
+	CASSANDRA_STRICT_PERF_BUDGET=1 cargo test -p cassandra-diff-tests --test perf_budget_tests -- --nocapture
 
 ## Run property-based fuzz tests
 fuzz-test:
@@ -208,6 +224,10 @@ final-validate: check-all chaos-test soak-test perf-test fuzz-test security-test
 	@echo "    ✅ Security audit"
 	@echo "═══════════════════════════════════════════════════════════"
 
+## Run final validation with strict perf budget enforcement
+final-validate-strict:
+	cargo run -p xtask -- final-validate-strict
+
 ## ── Phase 26: Final Validation ───────────────────────────────────────
 
 ## Run cluster validation (Tier 1: single-node only)
@@ -216,10 +236,15 @@ cluster-validate:
 
 ## Capture evidence for all test suites
 capture-evidence:
-	bash scripts/capture-evidence.sh
+	cargo run -p xtask -- capture-evidence
+
+## Capture evidence with strict performance budget enforcement
+capture-evidence-strict:
+	cargo run -p xtask -- capture-evidence-strict
 
 ## Run Phase 26 full validation
-phase26-validate: check-all chaos-test soak-test perf-test fuzz-test security-test backup-test capture-evidence cluster-validate
+phase26-validate:
+	cargo run -p xtask -- phase26-validate
 	@echo ""
 	@echo "═══════════════════════════════════════════════════════════"
 	@echo "  ✓ Phase 26 Validation Complete"
@@ -227,3 +252,22 @@ phase26-validate: check-all chaos-test soak-test perf-test fuzz-test security-te
 	@echo "  See docs/rewrite/rc-gate-checklist.md for RC assessment"
 	@echo "  See evidence/phase-26/ for test logs"
 	@echo "═══════════════════════════════════════════════════════════"
+
+## Run Phase 26 validation with strict performance budgets
+phase26-validate-strict:
+	cargo run -p xtask -- phase26-validate-strict
+	@echo ""
+	@echo "═══════════════════════════════════════════════════════════"
+	@echo "  ✓ Phase 26 Strict Validation Complete"
+	@echo "═══════════════════════════════════════════════════════════"
+	@echo "  Strict perf budget mode: enabled"
+	@echo "  See evidence/phase-26/summary.json for suite summary"
+	@echo "═══════════════════════════════════════════════════════════"
+
+## Run Java-free validation (Phase 26 + rust-only diff + coverage audit)
+phase26-validate-rust-only:
+	cargo run -p xtask -- phase26-validate-rust-only
+
+## Run Java-free validation with strict performance budgets
+phase26-validate-rust-only-strict:
+	cargo run -p xtask -- phase26-validate-rust-only-strict

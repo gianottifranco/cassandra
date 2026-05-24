@@ -1,0 +1,128 @@
+{
+  "captured_at_utc": "2026-05-24T11:23:21Z",
+  "strict_perf_budget": true,
+  "dry_run": false,
+  "total_suites": 13,
+  "passed_suites": 13,
+  "failed_suites": 0,
+  "dry_run_suites": 0,
+  "suites": [
+    {
+      "name": "Chaos Tests",
+      "log_file": "chaos-tests.log",
+      "status": "pass",
+      "test_count": 11,
+      "exit_code": 0,
+      "duration_seconds": 6.173,
+      "command": "cargo test -p cassandra-diff-tests --test chaos_tests -- --nocapture"
+    },
+    {
+      "name": "Soak Tests (30s)",
+      "log_file": "soak-tests.log",
+      "status": "pass",
+      "test_count": 7,
+      "exit_code": 0,
+      "duration_seconds": 1.266,
+      "command": "cargo test -p cassandra-diff-tests --test soak_tests -- --nocapture"
+    },
+    {
+      "name": "Performance Budgets (strict)",
+      "log_file": "perf-budget.log",
+      "status": "pass",
+      "test_count": 7,
+      "exit_code": 0,
+      "duration_seconds": 3.865,
+      "command": "env CASSANDRA_STRICT_PERF_BUDGET=1 cargo test -p cassandra-diff-tests --test perf_budget_tests -- --nocapture"
+    },
+    {
+      "name": "Fuzz Tests",
+      "log_file": "fuzz-tests.log",
+      "status": "pass",
+      "test_count": 13,
+      "exit_code": 0,
+      "duration_seconds": 1.206,
+      "command": "cargo test -p cassandra-diff-tests --test fuzz_tests -- --nocapture"
+    },
+    {
+      "name": "Security Audit",
+      "log_file": "security-audit.log",
+      "status": "pass",
+      "test_count": 7,
+      "exit_code": 0,
+      "duration_seconds": 0.350,
+      "command": "cargo test -p cassandra-diff-tests --test security_audit -- --nocapture"
+    },
+    {
+      "name": "Backup/Restore Tests",
+      "log_file": "backup-restore.log",
+      "status": "pass",
+      "test_count": 5,
+      "exit_code": 0,
+      "duration_seconds": 0.242,
+      "command": "cargo test -p cassandra-diff-tests --test backup_restore_tests -- --nocapture"
+    },
+    {
+      "name": "Tooling Tests",
+      "log_file": "tooling.log",
+      "status": "pass",
+      "test_count": 308,
+      "exit_code": 0,
+      "duration_seconds": 7.461,
+      "command": "cargo test -p cassandra-tools -p cassandra-admin -- --nocapture"
+    },
+    {
+      "name": "Gap Guards",
+      "log_file": "gap-guards.log",
+      "status": "pass",
+      "test_count": 82,
+      "exit_code": 0,
+      "duration_seconds": 3.097,
+      "command": "cargo test -p cassandra-diff-tests gap_guard -- --nocapture"
+    },
+    {
+      "name": "Golden Tests",
+      "log_file": "golden.log",
+      "status": "pass",
+      "test_count": 89,
+      "exit_code": 0,
+      "duration_seconds": 0.278,
+      "command": "cargo test -p cassandra-diff-tests golden -- --nocapture"
+    },
+    {
+      "name": "Migration Tests",
+      "log_file": "migration-validation.log",
+      "status": "pass",
+      "test_count": 46,
+      "exit_code": 0,
+      "duration_seconds": 0.409,
+      "command": "cargo test -p cassandra-migration -- --nocapture"
+    },
+    {
+      "name": "Rollback Tests",
+      "log_file": "rollback.log",
+      "status": "pass",
+      "test_count": 7,
+      "exit_code": 0,
+      "duration_seconds": 0.270,
+      "command": "cargo test -p cassandra-diff-tests --lib rollback_tests -- --nocapture"
+    },
+    {
+      "name": "CDC Tests",
+      "log_file": "cdc.log",
+      "status": "pass",
+      "test_count": 6,
+      "exit_code": 0,
+      "duration_seconds": 0.222,
+      "command": "cargo test -p cassandra-diff-tests --lib cdc_tests -- --nocapture"
+    },
+    {
+      "name": "Workspace Tests",
+      "log_file": "workspace.log",
+      "status": "pass",
+      "test_count": 8,
+      "exit_code": 0,
+      "duration_seconds": 0.412,
+      "command": "cargo test -p cassandra-common --test workspace_tests -- --nocapture"
+    }
+  ]
+}

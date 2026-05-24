@@ -180,6 +180,7 @@ mod tests {
             repair_coordinator: None,
             storage_engine: None,
             schema_catalog: None,
+            topology_controller: None,
         });
         let _req = Request::builder()
             .method(Method::GET)
